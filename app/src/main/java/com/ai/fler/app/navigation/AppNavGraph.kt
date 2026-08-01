@@ -2,6 +2,8 @@ package com.ai.fler.app.navigation
 
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.WindowInsets
@@ -21,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -68,6 +71,9 @@ private val tabLabels: Map<Screen, Int> = mapOf(
     Screen.McpLog to R.string.tab_mcp_log,
     Screen.Settings to R.string.tab_settings,
 )
+
+/** 底部导航 label 淡入淡出时长（毫秒），改这里即可调整动画速度。 */
+private const val TAB_LABEL_FADE_MS = 180
 
 /**
  * 应用根导航图。
@@ -148,9 +154,22 @@ fun AppNavGraph() {
                                 Icon(imageVector = icon, contentDescription = null)
                             }
                         },
-                        // 默认只显示图标；选中该页时才显示文字（M3 内置 label 动画）
-                        alwaysShowLabel = false,
-                        label = { Text(stringResource(tabLabels[tab]!!)) },
+                        // 默认只显示图标；选中该页时才显示文字（手动 alpha+缩放动画，时长可调）
+                        label = {
+                            val labelAlpha by animateFloatAsState(
+                                targetValue = if (isSelected) 1f else 0f,
+                                animationSpec = tween(durationMillis = TAB_LABEL_FADE_MS),
+                                label = "tab-label-alpha"
+                            )
+                            Text(
+                                text = stringResource(tabLabels[tab]!!),
+                                modifier = Modifier.graphicsLayer {
+                                    alpha = labelAlpha
+                                    scaleX = 0.95f + 0.05f * labelAlpha
+                                    scaleY = 0.95f + 0.05f * labelAlpha
+                                }
+                            )
+                        },
                     )
                 }
             }
