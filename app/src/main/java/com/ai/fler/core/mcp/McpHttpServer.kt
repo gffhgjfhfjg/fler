@@ -29,6 +29,7 @@ class McpHttpServer(
     private val protocol: McpProtocol,
     private val config: McpConfig,
     private val sessions: McpSessions,
+    private val logger: McpLogger,
 ) {
     private data class Request(
         val method: String,
@@ -83,10 +84,13 @@ class McpHttpServer(
             val input = socket.getInputStream()
             val output = socket.getOutputStream()
             val req = readRequest(input) ?: return
+            val remote = runCatching { socket.inetAddress?.hostAddress ?: "?" }.getOrDefault("?")
             if (!authorized(req)) {
+                logger.warn("未授权连接: $remote ${req.method} ${req.path}")
                 writeResponse(output, 401, "text/plain", "unauthorized")
                 return
             }
+            logger.debug("$remote ${req.method} ${req.path}")
             when {
                 req.method == "GET" && req.path == "/sse" -> handleLegacySse(socket, output)
                 req.method == "GET" && req.path == "/mcp" -> handleSse(socket, output)
@@ -107,21 +111,25 @@ class McpHttpServer(
         writeSseHeaders(output)
         val session = sessions.create(output)
         sessions.writeEndpoint(session.id, "/message?sessionId=${session.id}")
+        logger.info("SSE 会话建立: ${session.id.take(8)}（Claude Desktop legacy）")
         while (socket.isConnected && !socket.isClosed && running.get()) {
             try { Thread.sleep(HEARTBEAT_MS) } catch (e: InterruptedException) { break }
             if (!sessions.writeHeartbeat(session.id)) break
         }
         sessions.remove(session.id)
+        logger.info("SSE 会话断开: ${session.id.take(8)}")
     }
 
     private fun handleSse(socket: Socket, output: OutputStream) {
         writeSseHeaders(output)
         val session = sessions.create(output)
+        logger.info("SSE 会话建立: ${session.id.take(8)}（Streamable HTTP）")
         while (socket.isConnected && !socket.isClosed && running.get()) {
             try { Thread.sleep(HEARTBEAT_MS) } catch (e: InterruptedException) { break }
             if (!sessions.writeHeartbeat(session.id)) break
         }
         sessions.remove(session.id)
+        logger.info("SSE 会话断开: ${session.id.take(8)}")
     }
 
     private fun handleMessage(req: Request, output: OutputStream) {
@@ -162,9 +170,14 @@ class McpHttpServer(
         val request = try {
             json.parseToJsonElement(body).jsonObject
         } catch (e: Exception) {
+            logger.error("JSON-RPC 解析失败: ${e.message}")
             return McpErrors.errorJson(null, McpErrors.PARSE_ERROR, "JSON 解析失败: ${e.message}")
         }
-        return runBlocking(Dispatchers.IO) { protocol.handle(request) }
+        val response = runBlocking(Dispatchers.IO) { protocol.handle(request) }
+        if (response != null && response["error"] != null) {
+            logger.warn("JSON-RPC 错误: ${response["error"]}")
+        }
+        return response
     }
 
     // ========== HTTP 原语 ==========

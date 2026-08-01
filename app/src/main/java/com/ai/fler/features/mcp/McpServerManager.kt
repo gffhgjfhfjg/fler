@@ -3,6 +3,7 @@ package com.ai.fler.features.mcp
 import android.content.Context
 import com.ai.fler.core.mcp.McpConfig
 import com.ai.fler.core.mcp.McpHttpServer
+import com.ai.fler.core.mcp.McpLogger
 import com.ai.fler.core.mcp.McpProtocol
 import com.ai.fler.core.mcp.McpSessions
 import com.ai.fler.core.mcp.McpToolHandlers
@@ -26,17 +27,18 @@ import javax.inject.Singleton
  *
  * - 按配置决定绑定 127.0.0.1（本机）或 0.0.0.0（局域网）
  * - 端口冲突自动回退（base..base+9）并回显实际端口
- * - 暴露运行状态 StateFlow（端口 / 连接数 / 连接 URL）
+ * - 暴露运行状态 StateFlow（端口 / 连接数 / 连接 URL：/mcp 与 /sse）
  */
 @Singleton
 class McpServerManager @Inject constructor(
     private val config: McpConfig,
     private val toolHandlers: McpToolHandlers,
+    private val logger: McpLogger,
     @ApplicationContext private val context: Context,
 ) {
     private val sessions = McpSessions()
-    private val protocol by lazy { McpProtocol(toolHandlers) }
-    private val httpServer by lazy { McpHttpServer(protocol, config, sessions) }
+    private val protocol by lazy { McpProtocol(toolHandlers, logger) }
+    private val httpServer by lazy { McpHttpServer(protocol, config, sessions, logger) }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -72,30 +74,31 @@ class McpServerManager @Inject constructor(
             }
         }
         if (started) {
+            val lanIp = if (config.bindMode.value == McpConfig.BindMode.LAN) localIpv4() else null
             _status.value = McpStatus(
                 isRunning = true,
                 port = port,
                 activeSessions = sessions.size(),
-                localUrl = "http://127.0.0.1:$port/",
-                lanUrl = if (config.bindMode.value == McpConfig.BindMode.LAN) lanUrl(port) else "",
+                localUrl = "http://127.0.0.1:$port/mcp",
+                lanUrl = if (lanIp != null) "http://$lanIp:$port/mcp" else "",
+                sseLocalUrl = "http://127.0.0.1:$port/sse",
+                sseLanUrl = if (lanIp != null) "http://$lanIp:$port/sse" else "",
             )
+            logger.info("MCP 服务器已启动: 127.0.0.1:$port（${config.bindMode.value}）")
             return true
         }
         _status.value = McpStatus(errorMessage = "端口 ${base}..${base + MAX_PORT_ATTEMPTS - 1} 均被占用")
+        logger.error("MCP 服务器启动失败: 端口 ${base}..${base + MAX_PORT_ATTEMPTS - 1} 均被占用")
         return false
     }
 
     fun stop() {
+        logger.info("MCP 服务器已停止")
         httpServer.stop()
         _status.value = McpStatus()
     }
 
     fun isRunning(): Boolean = httpServer.isRunning()
-
-    private fun lanUrl(port: Int): String {
-        val ip = localIpv4() ?: return ""
-        return "http://$ip:$port/"
-    }
 
     private fun localIpv4(): String? {
         return try {
@@ -127,7 +130,13 @@ data class McpStatus(
     val isRunning: Boolean = false,
     val port: Int = 0,
     val activeSessions: Int = 0,
+    /** MCP Streamable HTTP 端点（本机）：http://127.0.0.1:PORT/mcp */
     val localUrl: String = "",
+    /** MCP Streamable HTTP 端点（局域网） */
     val lanUrl: String = "",
+    /** Claude Desktop SSE 端点（本机）：http://127.0.0.1:PORT/sse */
+    val sseLocalUrl: String = "",
+    /** Claude Desktop SSE 端点（局域网） */
+    val sseLanUrl: String = "",
     val errorMessage: String? = null,
 )

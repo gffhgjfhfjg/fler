@@ -22,6 +22,7 @@ import kotlinx.serialization.json.addJsonObject
  */
 class McpProtocol(
     private val handlers: McpToolHandlers,
+    private val logger: McpLogger,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -98,6 +99,7 @@ class McpProtocol(
 
         return try {
             val data = tool.handler(arguments)
+            logger.info("工具调用: $name")
             // 把工具返回的 JSON 作为 text content 回传给客户端
             val text = json.encodeToString(data)
             buildJsonObject {
@@ -114,6 +116,7 @@ class McpProtocol(
                 }
             }
         } catch (e: McpToolException) {
+            logger.warn("工具调用失败: $name - ${e.message}")
             buildJsonObject {
                 put("jsonrpc", "2.0")
                 put("id", id ?: JsonPrimitive(0))
@@ -128,6 +131,7 @@ class McpProtocol(
                 }
             }
         } catch (e: Exception) {
+            logger.error("工具调用异常: $name - ${e.message}")
             McpErrors.errorJson(id, McpErrors.SERVER_ERROR, "工具执行异常: ${e.message}")
         }
     }

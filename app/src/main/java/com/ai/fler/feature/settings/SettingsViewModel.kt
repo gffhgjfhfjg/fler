@@ -88,6 +88,8 @@ class SettingsViewModel @Inject constructor(
                 activeSessions = status.activeSessions,
                 localUrl = status.localUrl,
                 lanUrl = status.lanUrl,
+                sseLocalUrl = status.sseLocalUrl,
+                sseLanUrl = status.sseLanUrl,
                 errorMessage = status.errorMessage,
             )
         }.collect { _mcpState.value = it }
@@ -267,6 +269,8 @@ data class McpUiState(
     val activeSessions: Int = 0,
     val localUrl: String = "",
     val lanUrl: String = "",
+    val sseLocalUrl: String = "",
+    val sseLanUrl: String = "",
     val errorMessage: String? = null,
 )
 

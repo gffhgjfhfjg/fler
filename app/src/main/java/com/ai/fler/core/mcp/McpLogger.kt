@@ -1,0 +1,52 @@
+package com.ai.fler.core.mcp
+
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * MCP 服务器运行日志（有界内存，供设置页日志页展示）。
+ *
+ * 级别：I/D/W/E。最多保留 [MAX_ENTRIES] 条，超出丢弃最旧。
+ */
+@Singleton
+class McpLogger @Inject constructor() {
+
+    private val _entries = MutableStateFlow<List<McpLogEntry>>(emptyList())
+    val entries: StateFlow<List<McpLogEntry>> = _entries.asStateFlow()
+
+    private var seqCounter = 0L
+
+    fun info(message: String) = log("I", message)
+    fun debug(message: String) = log("D", message)
+    fun warn(message: String) = log("W", message)
+    fun error(message: String) = log("E", message)
+
+    fun log(level: String, message: String) {
+        val entry = McpLogEntry(
+            seq = seqCounter++,
+            timestamp = System.currentTimeMillis(),
+            level = level,
+            message = message,
+        )
+        _entries.value = (_entries.value + entry).takeLast(MAX_ENTRIES)
+    }
+
+    fun clear() {
+        _entries.value = emptyList()
+    }
+
+    companion object {
+        private const val MAX_ENTRIES = 500
+    }
+}
+
+/** MCP 日志条目。 */
+data class McpLogEntry(
+    val seq: Long,
+    val timestamp: Long,
+    val level: String,
+    val message: String,
+)

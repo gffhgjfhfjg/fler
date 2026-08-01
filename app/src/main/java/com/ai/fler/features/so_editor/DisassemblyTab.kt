@@ -462,7 +462,9 @@ private fun DisassemblyListView(
     ) {
         items(
             items = filteredInstructions,
-            key = { (it.first.address to it.first.mnemonic).hashCode() }
+            // 地址在反汇编流中唯一；用 (address, mnemonic).hashCode() 作为 key 会哈希碰撞
+            // 导致 LazyColumn 抛 "Key was already used" 崩溃
+            key = { it.first.address }
         ) { (instruction, isMatch) ->
             DisassemblyRow(
                 instruction = instruction,

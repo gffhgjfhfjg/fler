@@ -43,6 +43,7 @@ fun McpSettingsCard(
     onSetPatchEnabled: (Boolean) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onOpenLog: () -> Unit,
 ) {
     var tokenInput by remember(state.token) { mutableStateOf(state.token) }
     var portInput by remember(state.port) { mutableStateOf(state.port.toString()) }
@@ -91,11 +92,18 @@ fun McpSettingsCard(
                     )
                 }
                 if (state.localUrl.isNotBlank()) {
-                    UrlLine("本机", state.localUrl)
+                    UrlLine("本机 /mcp", state.localUrl)
+                    UrlLine("本机 /sse", state.sseLocalUrl)
                 }
                 if (state.lanUrl.isNotBlank()) {
-                    UrlLine("局域网", state.lanUrl)
+                    UrlLine("局域网 /mcp", state.lanUrl)
+                    UrlLine("局域网 /sse", state.sseLanUrl)
                 }
+                Text(
+                    text = "/mcp: MCP Inspector/通用客户端 · /sse: Claude Desktop",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Text(
                     text = "电脑访问: adb reverse tcp:${state.port} tcp:${state.port}",
                     style = MaterialTheme.typography.labelSmall,
@@ -190,6 +198,9 @@ fun McpSettingsCard(
                     onClick = onStop,
                     enabled = state.isRunning
                 ) { Text("停止") }
+                OutlinedButton(
+                    onClick = onOpenLog
+                ) { Text("查看日志") }
             }
         }
     }

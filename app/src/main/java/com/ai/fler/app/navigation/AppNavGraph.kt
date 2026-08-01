@@ -33,6 +33,7 @@ import com.ai.fler.data.dao.LibraryDao
 import com.ai.fler.features.output.AsmBrowserScreen
 import com.ai.fler.features.output.AsmListScreen
 import com.ai.fler.features.output.PpBrowserScreen
+import com.ai.fler.features.mcp.McpLogScreen
 import com.ai.fler.features.project.ProjectDetailScreen
 import com.ai.fler.features.project.ProjectScreen
 import com.ai.fler.features.settings.SettingsScreen
@@ -156,7 +157,16 @@ fun AppNavGraph() {
                 )
             }
             composable(Screen.SoEditor.route) { SoEditorScreen() }
-            composable(Screen.Settings.route) { SettingsScreen() }
+            composable(Screen.Settings.route) {
+                SettingsScreen(
+                    onOpenMcpLog = { navController.navigate(Screen.McpLog.route) }
+                )
+            }
+
+            // ========== MCP 日志 ==========
+            composable(Screen.McpLog.route) {
+                McpLogScreen(onBack = { navController.popBackStack() })
+            }
 
             // ========== 项目详情 ==========
             composable(

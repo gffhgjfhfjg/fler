@@ -19,6 +19,9 @@ sealed class Screen(val route: String) {
     /** 设置 Tab。 */
     data object Settings : Screen("settings")
 
+    /** MCP 服务器日志页。 */
+    data object McpLog : Screen("mcp_log")
+
     /** SO 编辑器详情页（带文件路径、可选偏移和方法长度）。 */
     data object SoEditorDetail : Screen("so_editor/{filePath}?offset={offset}&length={length}") {
         /**

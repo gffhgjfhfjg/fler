@@ -56,6 +56,7 @@ import com.ai.fler.features.engine.EngineDownloadScreen
 @Composable
 fun SettingsScreen(
     modifier: Modifier = Modifier,
+    onOpenMcpLog: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
@@ -114,6 +115,7 @@ fun SettingsScreen(
                 onSetPatchEnabled = { viewModel.mcpSetPatchEnabled(it) },
                 onStart = { viewModel.mcpStartServer() },
                 onStop = { viewModel.mcpStopServer() },
+                onOpenLog = onOpenMcpLog,
             )
         }
 

@@ -844,7 +844,7 @@ fun onLocateInSo(vmOffset: Long, soName: String) {
 | P7-4 | 工具注册（分析/类/方法/对象池/字符串/反汇编/ELF/地址） | [ ] | 复用 DAO + JNI |
 | P7-5 | 补丁工具（McpPatchService：.bak+CRC+撤销栈持久化）+ destructiveHint 门控 | [ ] | 默认关闭 |
 | P7-6 | McpServerManager + 前台服务保活（局域网常驻通知） | [ ] | |
-| P7-7 | 设置页 UI + 连接 URL + adb reverse 提示 | [ ] | |
+| P7-7 | 设置页 UI（启动/停止/绑定/端口/Token/补丁/两组连接 URL）+ MCP 日志页 | [ ] | McpLogScreen + 路由 |
 | P7-8 | 安全与并发（Token/局域网显式开启/错误隔离/SSE 会话/补丁锁） | [ ] | |
 | P7-9 | 文档 + 验收 | [ ] | 方案.md / dev-progress.md |
 
