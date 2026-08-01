@@ -31,6 +31,9 @@ class EngineSourceConfig @Inject constructor(
         // 版本信息 JSON（稳定地址，永远指向 fler-dart main 分支的最新版本）
         const val DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/myfler/fler-dart/main/version.json"
 
+        /** GitHub 加速默认前缀（可通过设置页修改/清空关闭）。 */
+        const val DEFAULT_GITHUB_PROXY = "https://gh-proxy.com"
+
         /** 引擎包版本标识（用于项目卡片 Engine 展示；随默认源升级时同步更新）。 */
         const val ENGINE_PACKAGE_VERSION = "v0.3.10"
     }
@@ -57,18 +60,18 @@ class EngineSourceConfig @Inject constructor(
         get() = prefs.getString(KEY_VERSION_URL, DEFAULT_VERSION_URL) ?: DEFAULT_VERSION_URL
         set(value) = prefs.edit().putString(KEY_VERSION_URL, value).apply()
 
-    /** GitHub 加速前缀（如 https://gh-proxy.com），空表示关闭。 */
+    /** GitHub 加速前缀（如 https://gh-proxy.com），清空表示关闭。 */
     var githubProxy: String
-        get() = prefs.getString(KEY_GITHUB_PROXY, "") ?: ""
+        get() = prefs.getString(KEY_GITHUB_PROXY, DEFAULT_GITHUB_PROXY) ?: DEFAULT_GITHUB_PROXY
         set(value) = prefs.edit().putString(KEY_GITHUB_PROXY, value.trim().trimEnd('/')).apply()
 
-    /** 是否使用了自定义地址。 */
+    /** 是否使用了自定义地址（含改过默认加速前缀/清空）。 */
     fun isCustom(): Boolean {
         return primaryUrl != DEFAULT_PRIMARY_URL ||
             fallbackUrl != DEFAULT_FALLBACK_URL ||
             checksumUrl != DEFAULT_CHECKSUM_URL ||
             versionUrl != DEFAULT_VERSION_URL ||
-            githubProxy.isNotBlank()
+            githubProxy != DEFAULT_GITHUB_PROXY
     }
 
     /** 重置为默认地址。 */
