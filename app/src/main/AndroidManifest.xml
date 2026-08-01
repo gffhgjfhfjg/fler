@@ -30,11 +30,6 @@
         </activity>
 
         <service
-            android:name=".core.service.EngineDownloadService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
-        <service
             android:name=".features.mcp.McpServerService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />

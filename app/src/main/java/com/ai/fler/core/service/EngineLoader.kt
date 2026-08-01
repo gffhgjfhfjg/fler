@@ -106,21 +106,6 @@ class EngineLoader @Inject constructor(
     }
 
     /**
-     * 检查共享库是否已加载（调试用）。
-     */
-    fun isSharedLibsLoaded(): Boolean = synchronized(loadLock) {
-        sharedLibs.all { File(it).name in loadedLibs }
-    }
-
-    /**
-     * 检查指定引擎版本是否已加载。
-     */
-    fun isEngineLoaded(dartVersion: String): Boolean {
-        val engineFileName = "dartvm_${dartVersion}.so"
-        return synchronized(loadLock) { engineFileName in loadedLibs }
-    }
-
-    /**
      * 获取引擎目录（调试用）。
      */
     fun engineDirectory(): File = engineDir

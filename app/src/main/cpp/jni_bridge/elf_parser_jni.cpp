@@ -4,7 +4,6 @@
 #include <vector>
 
 #include "../elf_parser/elf_parser.h"
-#include "../elf_parser/elf_writer.h"
 
 using namespace fler::elf;
 
@@ -123,17 +122,6 @@ Java_com_ai_fler_core_jni_ElfParserBindings_nativeGetDynamicSymbols(
     return arr;
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_ai_fler_core_jni_ElfParserBindings_nativeFindSymbolAddress(
-    JNIEnv* env, jobject /*thiz*/, jlong handle, jstring jname) {
-    auto* parser = reinterpret_cast<ElfParser*>(handle);
-    if (!parser || !parser->isValid()) return 0;
-    const char* name = env->GetStringUTFChars(jname, nullptr);
-    jlong addr = static_cast<jlong>(parser->findSymbolAddress(name));
-    env->ReleaseStringUTFChars(jname, name);
-    return addr;
-}
-
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_ai_fler_core_jni_ElfParserBindings_nativeGetSectionData(
     JNIEnv* env, jobject /*thiz*/, jlong handle, jstring jname) {
@@ -174,14 +162,4 @@ Java_com_ai_fler_core_jni_ElfParserBindings_nativeWriteBytes(
     bool ok = parser->writeBytes(static_cast<uint64_t>(offset), data.data(), len);
     if (ok) parser->flush();
     return ok ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_ai_fler_core_jni_ElfParserBindings_nativeComputeCRC32(
-    JNIEnv* env, jobject /*thiz*/, jlong handle, jlong offset, jlong size) {
-    auto* parser = reinterpret_cast<ElfParser*>(handle);
-    if (!parser || !parser->isValid()) return 0;
-    return static_cast<jlong>(parser->computeCRC32(
-        static_cast<uint64_t>(offset),
-        static_cast<size_t>(size)));
 }

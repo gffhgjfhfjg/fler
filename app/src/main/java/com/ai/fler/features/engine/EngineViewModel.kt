@@ -30,7 +30,6 @@ class EngineViewModel @Inject constructor(
     data class EngineUiState(
         val isReady: Boolean = false,
         val progress: EnginePackManager.EngineProgress? = null,
-        val installedVersions: List<String> = emptyList(),
         val isDownloading: Boolean = false,
         val errorMessage: String? = null,
         val isCustomSource: Boolean = false,
@@ -41,11 +40,10 @@ class EngineViewModel @Inject constructor(
 
     init {
         checkEngineStatus()
-        // 引擎版本变化（下载完成/清除）时实时刷新列表
+        // 引擎版本变化（下载完成/清除）时实时刷新就绪状态
         viewModelScope.launch {
             enginePackManager.versionsEpoch.collect {
                 _uiState.value = _uiState.value.copy(
-                    installedVersions = enginePackManager.listInstalledVersions(),
                     isReady = enginePackManager.isEnginePackReady(),
                 )
             }
@@ -61,20 +59,11 @@ class EngineViewModel @Inject constructor(
             isReady = isReady,
             isCustomSource = sourceConfig.isCustom(),
         )
-
-        if (isReady) {
-            viewModelScope.launch {
-                val versions = enginePackManager.listInstalledVersions()
-                _uiState.value = _uiState.value.copy(installedVersions = versions)
-            }
-        }
     }
 
     /**
      * 启动引擎包下载。
-     * 对于大部分场景，建议使用 EngineDownloadService（前台服务）。
-     * 此处提供直接在 ViewModel 中观察进度的能力，
-     * 方便前台服务通知与应用内 UI 同步。
+     * 在 ViewModel 中观察下载进度并更新 UI。
      */
     fun startDownload() {
         if (_uiState.value.isDownloading) return
@@ -100,9 +89,6 @@ class EngineViewModel @Inject constructor(
                             isDownloading = false,
                             isReady = true,
                         )
-                        // 刷新已安装版本列表
-                        val versions = enginePackManager.listInstalledVersions()
-                        _uiState.value = _uiState.value.copy(installedVersions = versions)
                     }
                     EnginePackManager.EngineProgress.Phase.FAILED -> {
                         _uiState.value = _uiState.value.copy(
@@ -113,23 +99,6 @@ class EngineViewModel @Inject constructor(
                     else -> { /* 继续 */ }
                 }
             }
-        }
-    }
-
-    /**
-     * 启动前台服务下载（推荐方式，Android 14+ 合规）。
-     */
-    fun startDownloadService(context: android.content.Context) {
-        com.ai.fler.core.service.EngineDownloadService.start(context)
-    }
-
-    /**
-     * 清理引擎包。
-     */
-    fun clearEngines() {
-        viewModelScope.launch {
-            enginePackManager.clearEngines()
-            _uiState.value = EngineUiState(isReady = false)
         }
     }
 }

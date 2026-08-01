@@ -143,14 +143,6 @@ class ElfParserBindings : AutoCloseable {
     }
 
     /**
-     * 按名称查找符号地址。
-     * @return 符号虚拟地址，0 表示未找到
-     */
-    fun findSymbolAddress(name: String): Long {
-        return nativeFindSymbolAddress(nativeHandle, name)
-    }
-
-    /**
      * 读取指定节区的原始数据。
      */
     fun getSectionData(sectionName: String): ByteArray {
@@ -172,13 +164,6 @@ class ElfParserBindings : AutoCloseable {
         return nativeWriteBytes(nativeHandle, offset, data)
     }
 
-    /**
-     * 计算指定范围的 CRC32。
-     */
-    fun computeCRC32(offset: Long, size: Long): Long {
-        return nativeComputeCRC32(nativeHandle, offset, size)
-    }
-
     // ========== JNI 方法声明 ==========
 
     private external fun nativeOpen(path: String): Long
@@ -186,9 +171,7 @@ class ElfParserBindings : AutoCloseable {
     private external fun nativeGetSections(handle: Long): Array<ElfSection>?
     private external fun nativeGetSymbols(handle: Long): Array<ElfSymbol>?
     private external fun nativeGetDynamicSymbols(handle: Long): Array<ElfSymbol>?
-    private external fun nativeFindSymbolAddress(handle: Long, name: String): Long
     private external fun nativeGetSectionData(handle: Long, name: String): ByteArray?
     private external fun nativeReadBytes(handle: Long, offset: Long, size: Long): ByteArray?
     private external fun nativeWriteBytes(handle: Long, offset: Long, data: ByteArray): Boolean
-    private external fun nativeComputeCRC32(handle: Long, offset: Long, size: Long): Long
 }

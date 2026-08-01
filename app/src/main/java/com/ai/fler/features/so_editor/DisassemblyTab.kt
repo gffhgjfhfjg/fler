@@ -15,7 +15,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -77,7 +79,9 @@ fun DisassemblyTab(
 ) {
     val disassemblyData by viewModel.disassemblyData.collectAsStateWithLifecycle()
     val selectedOffset by viewModel.selectedOffset.collectAsStateWithLifecycle()
+    val patchedOffsets by viewModel.patchedOffsets.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
 
     var inputAddress by remember { mutableStateOf(selectedOffset.toString()) }
     var searchQuery by remember { mutableStateOf("") }
@@ -141,6 +145,8 @@ fun DisassemblyTab(
                     instructions = disassemblyData.instructions,
                     searchQuery = searchQuery,
                     highlightAddress = disassemblyData.highlightAddress,
+                    patchedOffsets = patchedOffsets,
+                    listState = listState,
                     onInstructionClick = { instruction ->
                         // 1. 通知外部（设置 patchAddress 等）
                         onInstructionClick(instruction.address)
@@ -446,6 +452,8 @@ private fun DisassemblyListView(
     instructions: List<DisasmInstruction>,
     searchQuery: String,
     highlightAddress: Long?,
+    patchedOffsets: Set<Long>,
+    listState: LazyListState,
     onInstructionClick: (DisasmInstruction) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -459,7 +467,15 @@ private fun DisassemblyListView(
         }
     }
 
+    // 撤销跳转：闪烁地址所在行滚动到可视区
+    LaunchedEffect(highlightAddress) {
+        val target = highlightAddress ?: return@LaunchedEffect
+        val idx = filteredInstructions.indexOfFirst { it.first.address == target }
+        if (idx >= 0) listState.animateScrollToItem(idx)
+    }
+
     LazyColumn(
+        state = listState,
         modifier = modifier
             .horizontalScroll(rememberScrollState()),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp)
@@ -473,7 +489,8 @@ private fun DisassemblyListView(
             DisassemblyRow(
                 instruction = instruction,
                 isMatch = isMatch,
-                isHighlighted = highlightAddress != null && instruction.address == highlightAddress,
+                isFlash = highlightAddress != null && instruction.address == highlightAddress,
+                isPatched = instruction.address in patchedOffsets,
                 onClick = { onInstructionClick(instruction) }
             )
         }
@@ -484,15 +501,18 @@ private fun DisassemblyListView(
 private fun DisassemblyRow(
     instruction: DisasmInstruction,
     isMatch: Boolean,
-    isHighlighted: Boolean,
+    isFlash: Boolean,
+    isPatched: Boolean,
     onClick: () -> Unit
 ) {
-    // 高亮（被修改/撤销）优先级 > 搜索匹配
+    // 闪烁 > 未保存修改（红）> 搜索匹配
     val backgroundColor = when {
-        isHighlighted -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
+        isFlash -> Color(0xFFD32F2F).copy(alpha = 0.85f)
+        isPatched -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
         isMatch -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
         else -> Color.Transparent
     }
+    val highlightTextColor = MaterialTheme.colorScheme.onError
 
     Row(
         modifier = Modifier
@@ -507,8 +527,10 @@ private fun DisassemblyRow(
             text = "0x${instruction.address.toString(16).uppercase().padStart(16, '0')}",
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
-            color = if (isHighlighted) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = when {
+                isFlash || isPatched -> MaterialTheme.colorScheme.error
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
             modifier = Modifier.width(130.dp)
         )
 
@@ -519,8 +541,10 @@ private fun DisassemblyRow(
             },
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
-            color = if (isHighlighted) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            color = when {
+                isFlash || isPatched -> MaterialTheme.colorScheme.error
+                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            },
             modifier = Modifier.width(120.dp)
         )
 
@@ -532,7 +556,8 @@ private fun DisassemblyRow(
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 color = when {
-                    isHighlighted -> MaterialTheme.colorScheme.error
+                    isFlash -> highlightTextColor
+                    isPatched -> MaterialTheme.colorScheme.error
                     isMatch -> MaterialTheme.colorScheme.primary
                     // 分支指令用不同颜色
                     instruction.mnemonic.startsWith("b") || instruction.mnemonic == "ret" -> Color(0xFFFF9800)
@@ -545,10 +570,13 @@ private fun DisassemblyRow(
                 text = instruction.opStr,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
-                color = if (isHighlighted) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurface.copy(
-                            alpha = if (isMatch) 1.0f else 0.8f
-                        )
+                color = when {
+                    isFlash -> highlightTextColor
+                    isPatched -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.onSurface.copy(
+                        alpha = if (isMatch) 1.0f else 0.8f
+                    )
+                }
             )
         }
     }

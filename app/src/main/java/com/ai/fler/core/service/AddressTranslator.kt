@@ -7,7 +7,6 @@ import com.ai.fler.data.entity.AddressMapping
 import com.ai.fler.data.entity.DartMethod
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -89,59 +88,6 @@ class AddressTranslator @Inject constructor(
             } catch (e: Exception) {
                 Log.w(TAG, "构建地址映射失败: ${e.message}", e)
             }
-        }
-    }
-
-    /**
-     * 初始化地址映射。
-     *
-     * 从 Blutter 分析生成的 pp.txt 和 asm 目录中解析地址映射关系，
-     * 并保存到 Room 数据库中。（旧实现，新引擎已改为 [importMethods]）
-     *
-     * @param projectId 项目 ID
-     * @param analysisDbPath 分析数据库路径
-     * @param asmDir asm 输出目录
-     */
-    suspend fun initialize(projectId: Long, analysisDbPath: String, asmDir: File) {
-        withContext(Dispatchers.IO) {
-            try {
-                val mappings = parseAsmDir(projectId, asmDir)
-                if (mappings.isNotEmpty()) {
-                    addressMappingDao.insertAll(mappings)
-                }
-            } catch (e: Exception) {
-                // 初始化失败不阻塞主流程
-            }
-        }
-    }
-
-    /**
-     * 将 Dart VM 偏移转换为文件偏移。
-     *
-     * @param vmOffset Dart VM 堆偏移
-     * @return 文件偏移，未找到返回 null
-     */
-    suspend fun vmOffsetToFileOffset(vmOffset: Long): Long? {
-        return try {
-            val mapping = addressMappingDao.findByVmOffset(vmOffset)
-            mapping?.fileOffset
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    /**
-     * 将文件偏移转换为 Dart VM 偏移。
-     *
-     * @param fileOffset ELF 文件偏移
-     * @return Dart VM 偏移，未找到返回 null
-     */
-    suspend fun fileOffsetToVmOffset(fileOffset: Long): Long? {
-        return try {
-            val mapping = addressMappingDao.findByFileOffset(fileOffset)
-            mapping?.vmOffset
-        } catch (e: Exception) {
-            null
         }
     }
 
@@ -239,70 +185,6 @@ class AddressTranslator @Inject constructor(
             }
         } catch (e: Exception) {
             AddressContext(found = false, errorMessage = e.message)
-        }
-    }
-
-    /**
-     * 解析 asm 目录中的汇编文件，提取地址映射关系。
-     */
-    private fun parseAsmDir(projectId: Long, asmDir: File): List<AddressMapping> {
-        val mappings = mutableListOf<AddressMapping>()
-
-        if (!asmDir.exists() || !asmDir.isDirectory) {
-            return mappings
-        }
-
-        asmDir.listFiles()?.forEach { file ->
-            if (file.isFile && file.extension == "s") {
-                try {
-                    parseAsmFile(projectId, file, mappings)
-                } catch (_: Exception) {
-                    // 跳过无法解析的文件
-                }
-            }
-        }
-
-        return mappings
-    }
-
-    /**
-     * 解析单个 asm 文件。
-     */
-    private fun parseAsmFile(projectId: Long, file: File, mappings: MutableList<AddressMapping>) {
-        val lines = file.readLines()
-        for (line in lines) {
-            // 匹配格式: // 0x829bbc: ldr x0, [PP, #0x428]; [pp+0x428]
-            val commentMatch = Regex("""//\s*0x([0-9a-fA-F]+)""").find(line)
-            if (commentMatch != null) {
-                val elfAddress = commentMatch.groupValues[1].toLongOrNull(16) ?: continue
-
-                // 尝试提取 [pp+offset] 格式
-                val ppMatch = Regex("""\[pp\+0x([0-9a-fA-F]+)\]""").find(line)
-                if (ppMatch != null) {
-                    val vmOffset = ppMatch.groupValues[1].toLongOrNull(16) ?: continue
-                    mappings.add(
-                        AddressMapping(
-                            projectId = projectId,
-                            vmOffset = vmOffset,
-                            fileOffset = 0,
-                            elfAddress = elfAddress,
-                            section = ".text",
-                            symbol = file.nameWithoutExtension
-                        )
-                    )
-                }
-            }
-        }
-    }
-
-    /**
-     * 清理指定项目的所有映射。
-     */
-    suspend fun clearMappings(projectId: Long) {
-        try {
-            addressMappingDao.deleteByProjectId(projectId)
-        } catch (_: Exception) {
-            // 忽略清理错误
         }
     }
 }

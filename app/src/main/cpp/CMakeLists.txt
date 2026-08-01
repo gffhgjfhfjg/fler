@@ -37,10 +37,9 @@ find_library(log-lib log)
 find_library(android-lib android)
 
 # ========== 原生静态库 (供其他模块链接) ==========
-# 解码/编码：自研编码器、自研解码器、capstone 均移除；编码仅用 Keystone。
+# 解码/编码：自研编码器、自研解码器、capstone、elf_writer 均移除；编码仅用 Keystone。
 add_library(fler_native STATIC
     elf_parser/elf_parser.cpp
-    elf_parser/elf_writer.cpp
 )
 
 target_link_libraries(fler_native

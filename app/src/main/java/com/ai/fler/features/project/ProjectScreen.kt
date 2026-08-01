@@ -64,11 +64,8 @@ import com.ai.fler.data.entity.Project
 import com.ai.fler.feature.project.AnalyzeResult
 import com.ai.fler.feature.project.AnalysisProgress
 import com.ai.fler.feature.project.AnalysisStage
-import com.ai.fler.feature.project.NewProjectState
-import com.ai.fler.feature.project.ProjectEvent
 import com.ai.fler.feature.project.ProjectListState
 import com.ai.fler.feature.project.ProjectViewModel
-import com.ai.fler.ui.components.CardListTile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale

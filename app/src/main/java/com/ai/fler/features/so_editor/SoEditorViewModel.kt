@@ -13,9 +13,9 @@ import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.BackupManager
 import com.ai.fler.core.service.EngineLoader
 import com.ai.fler.core.service.PatchExporter
-import com.ai.fler.data.dao.AddressMappingDao
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,7 +34,6 @@ import javax.inject.Inject
 class SoEditorViewModel @Inject constructor(
     private val application: Application,
     savedStateHandle: SavedStateHandle,
-    private val addressMappingDao: AddressMappingDao,
     private val backupManager: BackupManager,
     private val patchExporter: PatchExporter,
     private val engineLoader: EngineLoader
@@ -112,6 +111,17 @@ class SoEditorViewModel @Inject constructor(
     private val _selectedOffset = MutableStateFlow(0L)
     val selectedOffset: StateFlow<Long> = _selectedOffset.asStateFlow()
 
+    /** 最近一次「保存」时撤销栈中的最大 seq；补丁 seq > 此值视为未保存（红色高亮）。 */
+    private var savedSeq = -1L
+
+    /** 所有未保存补丁覆盖的字节偏移集合（用于 Hex / 汇编红色高亮）。 */
+    private val _patchedOffsets = MutableStateFlow<Set<Long>>(emptySet())
+    val patchedOffsets: StateFlow<Set<Long>> = _patchedOffsets.asStateFlow()
+
+    /** 最近被修改/撤销的字节偏移（临时闪烁，1s 后清除）。 */
+    private val _flashOffset = MutableStateFlow<Long?>(null)
+    val flashOffset: StateFlow<Long?> = _flashOffset.asStateFlow()
+
     fun setTab(tab: EditorTab) {
         _currentTab.value = tab
     }
@@ -126,6 +136,9 @@ class SoEditorViewModel @Inject constructor(
     fun closeFile() {
         currentFilePath = ""
         currentFileSize = 0
+        savedSeq = -1L
+        _patchedOffsets.value = emptySet()
+        _flashOffset.value = null
         _uiState.value = SoEditorUiState()
         _hexData.value = HexDataState()
         _disassemblyData.value = DisassemblyDataState()
@@ -144,6 +157,8 @@ class SoEditorViewModel @Inject constructor(
      */
     suspend fun openFile(filePath: String) {
         currentFilePath = filePath
+        savedSeq = -1L
+        _patchedOffsets.value = emptySet()
         _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
 
         try {
@@ -233,6 +248,7 @@ class SoEditorViewModel @Inject constructor(
                 }
                 if (ok) {
                     backupManager.recordPatch(offset, oldBytes, byteArrayOf(newValue), currentFilePath.substringAfterLast('/'))
+                    refreshPatchedOffsets()
                     loadHexData(_hexData.value.offset, _hexData.value.data.size.toLong())
                 }
             } catch (e: Exception) {
@@ -268,6 +284,7 @@ class SoEditorViewModel @Inject constructor(
                         newBytes = newBytes,
                         soName = currentFilePath.substringAfterLast('/')
                     )
+                    refreshPatchedOffsets()
                     true
                 } else {
                     false
@@ -408,37 +425,48 @@ class SoEditorViewModel @Inject constructor(
 
     /**
      * 设置/清除高亮地址（编辑或撤销后调用，让 UI 高亮被修改的指令行）。
+     *
+     * 高亮为临时闪烁：设置后 1 秒自动清除。
      */
     fun setHighlightAddress(address: Long?) {
         _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = address)
-    }
-
-    // ========== 符号 / CRC ==========
-
-    /**
-     * 根据符号名查找虚拟地址。
-     */
-    fun findSymbolAddress(name: String): Long {
-        return try {
-            ElfParserBindings().use { parser ->
-                if (parser.open(currentFilePath)) parser.findSymbolAddress(name) else 0L
+        _flashOffset.value = address
+        if (address != null) {
+            viewModelScope.launch {
+                delay(1000)
+                if (_flashOffset.value == address) {
+                    _flashOffset.value = null
+                }
+                if (_disassemblyData.value.highlightAddress == address) {
+                    _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = null)
+                }
             }
-        } catch (e: Exception) {
-            0L
         }
     }
 
     /**
-     * 计算指定偏移范围的 CRC32。
+     * 刷新「未保存补丁」的字节偏移集合（供 Hex / 汇编红色高亮）。
      */
-    fun computeCRC32(offset: Long, size: Long): Long {
-        return try {
-            ElfParserBindings().use { parser ->
-                if (parser.open(currentFilePath)) parser.computeCRC32(offset, size) else 0L
-            }
-        } catch (e: Exception) {
-            0L
+    private fun refreshPatchedOffsets() {
+        val records = backupManager.getPatchRecords().filter { it.seq > savedSeq }
+        _patchedOffsets.value = records
+            .flatMap { r -> (0 until r.newBytes.size).map { r.address + it } }
+            .toSet()
+    }
+
+    /**
+     * 保存当前修改：把当前所有补丁标记为「已保存」。
+     *
+     * @return 本次保存的补丁处数（0 表示没有未保存的修改）
+     */
+    fun commitChanges(): Int {
+        val records = backupManager.getPatchRecords()
+        val unsaved = records.filter { it.seq > savedSeq }
+        if (unsaved.isNotEmpty()) {
+            savedSeq = records.maxOfOrNull { it.seq } ?: savedSeq
+            refreshPatchedOffsets()
         }
+        return unsaved.size
     }
 
     // ========== 撤销 / 导出 ==========
@@ -451,6 +479,10 @@ class SoEditorViewModel @Inject constructor(
      */
     fun undo(): com.ai.fler.core.service.PatchRecord? {
         val record = backupManager.undo() ?: return null
+        // 被撤销的补丁从「未保存」集合移除（红色高亮消失）
+        refreshPatchedOffsets()
+        // 结构页无地址视图，撤销时切到汇编以便看到跳转闪烁
+        if (_currentTab.value == EditorTab.STRUCTURE) setTab(EditorTab.DISASSEMBLY)
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 ElfParserBindings().use { parser ->
@@ -467,50 +499,6 @@ class SoEditorViewModel @Inject constructor(
             )
         }
         return record
-    }
-
-    /**
-     * 从 vmOffset 查找文件偏移。
-     */
-    suspend fun vmOffsetToFileOffset(vmOffset: Long): Long? {
-        return try {
-            val mapping = withContext(Dispatchers.IO) {
-                addressMappingDao.findByVmOffset(vmOffset)
-            }
-            mapping?.fileOffset
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    /**
-     * 获取撤销栈大小。
-     */
-    fun getUndoCount(): Int = backupManager.getUndoCount()
-
-    /**
-     * 导出补丁文件到 SAF 目录。
-     */
-    suspend fun exportPatches(directoryUri: Uri): Uri? {
-        val records = backupManager.getPatchRecords()
-        if (records.isEmpty()) return null
-        return patchExporter.exportToSaf(
-            directoryUri = directoryUri,
-            soFileName = _uiState.value.fileName,
-            records = records
-        )
-    }
-
-    /**
-     * 导出补丁到缓存（用于分享）。
-     */
-    suspend fun exportPatchesToCache(): File? {
-        val records = backupManager.getPatchRecords()
-        if (records.isEmpty()) return null
-        return patchExporter.exportToCache(
-            soFileName = _uiState.value.fileName,
-            records = records
-        )
     }
 
     /**

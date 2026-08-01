@@ -65,7 +65,6 @@ public:
     std::vector<Symbol> getDynamicSymbols() const;
     std::vector<uint8_t> getSectionData(const char* name) const;
     std::vector<uint8_t> getSectionDataByIndex(uint32_t index) const;
-    uint64_t findSymbolAddress(const char* name) const;
     std::vector<uint8_t> readBytes(uint64_t offset, size_t size) const;
     bool isValid() const { return mmap_ != nullptr && fileSize_ > 0; }
     uint64_t getFileSize() const { return fileSize_; }
@@ -73,9 +72,6 @@ public:
     // === 写入接口 ===
     bool writeBytes(uint64_t offset, const uint8_t* data, size_t size);
     bool flush();
-
-    // === CRC32 ===
-    uint32_t computeCRC32(uint64_t offset, size_t size) const;
 
     // 调试
     const std::vector<Section>& sectionsRef() const { return sections_; }

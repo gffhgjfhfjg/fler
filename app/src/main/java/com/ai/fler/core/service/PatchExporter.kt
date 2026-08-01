@@ -2,12 +2,10 @@ package com.ai.fler.core.service
 
 import android.content.Context
 import android.net.Uri
-import androidx.documentfile.provider.DocumentFile
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -73,46 +71,6 @@ class PatchExporter @Inject constructor(
     }
 
     /**
-     * 导出补丁到 SAF 指定目录。
-     *
-     * @param directoryUri SAF 目录 Uri
-     * @param soFileName 目标 SO 文件名
-     * @param records 补丁记录列表
-     * @return 导出的文件 Uri，失败返回 null
-     */
-    suspend fun exportToSaf(
-        directoryUri: Uri,
-        soFileName: String,
-        records: List<PatchRecord>
-    ): Uri? = withContext(Dispatchers.IO) {
-        try {
-            val dir = DocumentFile.fromTreeUri(context, directoryUri) ?: return@withContext null
-
-            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
-                .format(Date())
-            val baseName = soFileName.removeSuffix(".so")
-            val patchFileName = "${baseName}_${timestamp}.patch"
-
-            // 删除同名文件（如果存在）
-            dir.findFile(patchFileName)?.delete()
-
-            val file = dir.createFile("application/octet-stream", patchFileName)
-                ?: return@withContext null
-
-            val content = generatePatchContent(soFileName, records)
-
-            context.contentResolver.openOutputStream(file.uri)?.use { outputStream ->
-                outputStream.write(content.toByteArray())
-                outputStream.flush()
-            }
-
-            file.uri
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    /**
      * 导出补丁到 SAF 指定文件 Uri（CreateDocument）。
      *
      * 用于让用户保存到 Documents 等可读位置，而非 app 私有 cacheDir。
@@ -136,35 +94,6 @@ class PatchExporter @Inject constructor(
             true
         } catch (e: Exception) {
             false
-        }
-    }
-
-    /**
-     * 导出补丁应用到应用缓存目录（用于分享）。
-     *
-     * @param soFileName 目标 SO 文件名
-     * @param records 补丁记录列表
-     * @return 补丁文件，失败返回 null
-     */
-    suspend fun exportToCache(
-        soFileName: String,
-        records: List<PatchRecord>
-    ): File? = withContext(Dispatchers.IO) {
-        try {
-            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
-                .format(Date())
-            val baseName = soFileName.removeSuffix(".so")
-            val patchFileName = "${baseName}_${timestamp}.patch"
-
-            val cacheDir = File(context.cacheDir, "patches").apply { mkdirs() }
-            val patchFile = File(cacheDir, patchFileName)
-
-            val content = generatePatchContent(soFileName, records)
-            patchFile.writeText(content)
-
-            patchFile
-        } catch (e: Exception) {
-            null
         }
     }
 

@@ -3,7 +3,6 @@ package com.ai.fler.feature.output
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.PpEntryDao
 import com.ai.fler.data.entity.PpEntry
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -25,8 +24,7 @@ import javax.inject.Inject
 @HiltViewModel
 class PpBrowserViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
-    private val ppEntryDao: PpEntryDao,
-    private val dartMethodDao: DartMethodDao
+    private val ppEntryDao: PpEntryDao
 ) : ViewModel() {
 
     private val analysisId: Long = savedStateHandle["analysisId"] ?: 0L
@@ -84,16 +82,6 @@ class PpBrowserViewModel @Inject constructor(
 
     fun setSearchQuery(query: String) {
         _searchQuery.value = query
-    }
-
-    suspend fun getMethodName(methodId: Long): String {
-        return try {
-            dartMethodDao.getById(methodId)?.let { method ->
-                method.methodName
-            } ?: "未知方法"
-        } catch (e: Exception) {
-            "未知方法"
-        }
     }
 }
 

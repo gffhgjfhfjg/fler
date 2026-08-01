@@ -29,13 +29,17 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,61 +48,59 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ai.fler.core.service.EnginePackManager
 import com.ai.fler.feature.settings.McpUiState
 import com.ai.fler.feature.settings.SettingsViewModel
-import com.ai.fler.features.engine.EngineDownloadScreen
+import com.ai.fler.features.engine.EngineViewModel
 import com.ai.fler.ui.components.CardListTile
 
 /**
  * 设置 Tab。
  *
- * 集成引擎包管理、版本更新检测、主题切换、关于等入口。
+ * 集成引擎包管理、版本更新检测、下载源配置、MCP 服务器、缓存清理与关于等入口。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     modifier: Modifier = Modifier,
     onOpenMcpSettings: () -> Unit = {},
     onOpenAbout: () -> Unit = {},
-    viewModel: SettingsViewModel = hiltViewModel()
+    viewModel: SettingsViewModel = hiltViewModel(),
+    engineViewModel: EngineViewModel = hiltViewModel(),
 ) {
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
     val installedVersions by viewModel.installedVersions.collectAsStateWithLifecycle()
     val sourceState by viewModel.sourceState.collectAsStateWithLifecycle()
     val cacheCleanResult by viewModel.cacheCleanResult.collectAsStateWithLifecycle()
     val mcpState by viewModel.mcpState.collectAsStateWithLifecycle()
+    val engineState by engineViewModel.uiState.collectAsStateWithLifecycle()
     var showCacheCleanConfirm by remember { mutableStateOf(false) }
 
-    LazyColumn(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        item {
-            Text(
-                text = "设置",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold
-            )
+    Scaffold(
+        topBar = {
+            TopAppBar(title = { Text("设置") })
         }
-
-        // 引擎包管理
-        item {
-            EngineDownloadScreen()
-        }
-
-        // 引擎版本更新检测
-        item {
-            UpdateCheckCard(
+    ) { paddingValues ->
+        LazyColumn(
+            modifier = modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            // 引擎包 + 引擎版本（合并为一个引擎卡片）
+            item {
+                EngineVersionCard(
                 state = updateState,
                 installedVersions = installedVersions,
+                engineState = engineState,
                 onCheckForUpdates = { viewModel.checkForUpdates() },
-                onClearEngines = { viewModel.clearEngines() }
+                onClearEngines = { viewModel.clearEngines() },
+                onStartDownload = { engineViewModel.startDownload() },
             )
         }
 
@@ -134,6 +136,7 @@ fun SettingsScreen(
         item {
             AboutCard(onClick = onOpenAbout)
         }
+        }
     }
 
     if (showCacheCleanConfirm) {
@@ -157,11 +160,13 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun UpdateCheckCard(
+private fun EngineVersionCard(
     state: com.ai.fler.feature.settings.UpdateCheckState,
     installedVersions: List<String>,
+    engineState: com.ai.fler.features.engine.EngineViewModel.EngineUiState,
     onCheckForUpdates: () -> Unit,
     onClearEngines: () -> Unit,
+    onStartDownload: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -177,7 +182,7 @@ private fun UpdateCheckCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "引擎版本",
+                    text = "引擎包",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
@@ -200,7 +205,7 @@ private fun UpdateCheckCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 状态图标 + 当前引擎
+            // 状态图标 + 已安装版本号（同一行，图标包住版本号）
             if (installedVersions.isNotEmpty()) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -213,7 +218,7 @@ private fun UpdateCheckCard(
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = "引擎就绪",
+                        text = "Dart ${installedVersions.joinToString(", ")}",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.Medium
@@ -238,19 +243,76 @@ private fun UpdateCheckCard(
                 }
             }
 
-            // 已安装版本号（紧凑小字列出）
-            if (installedVersions.isNotEmpty()) {
+            // 自定义下载源提示
+            if (engineState.isCustomSource) {
                 Spacer(modifier = Modifier.height(6.dp))
-                installedVersions.forEach { version ->
-                    Text(
-                        text = "Dart $version",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 22.dp)
-                    )
-                }
+                Text(
+                    text = "⚠️ 当前使用自定义下载源，可能不是最新版本",
+                    color = MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
 
+            // 下载进度
+            engineState.progress?.let { progress ->
+                if (progress.phase != EnginePackManager.EngineProgress.Phase.IDLE &&
+                    progress.phase != EnginePackManager.EngineProgress.Phase.COMPLETED
+                ) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = phaseLabel(progress.phase),
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            LinearProgressIndicator(
+                                progress = { progress.overallProgress },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Text(
+                                text = "%.0f%%".format(progress.overallProgress * 100),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                text = progressDetail(progress),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 错误提示
+            engineState.errorMessage?.let { error ->
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "❌ $error",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+
+            // 下载引擎包按钮
+            if (!engineState.isReady || engineState.isDownloading) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = onStartDownload,
+                    enabled = !engineState.isDownloading,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (engineState.isDownloading) "下载中..." else "下载引擎包")
+                }
+            }
+
+            // 清除引擎按钮
+            if (installedVersions.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = onClearEngines,
@@ -354,8 +416,44 @@ private fun UpdateCheckCard(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 说明
+            Text(
+                text = "引擎包包含 12 个 Dart 版本的分析引擎 + Capstone 反汇编库，约 10-14 MB。" +
+                        "首次使用需下载，后续启动自动检测就绪状态。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
+}
+
+private fun phaseLabel(phase: com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase): String = when (phase) {
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.DOWNLOADING -> "下载中"
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.VERIFYING -> "校验中"
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.EXTRACTING -> "解压中"
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.LOADING -> "加载中"
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.COMPLETED -> "完成"
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.FAILED -> "失败"
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.IDLE -> "等待中"
+}
+
+private fun progressDetail(progress: com.ai.fler.core.service.EnginePackManager.EngineProgress): String = when (progress.phase) {
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.DOWNLOADING -> {
+        val mb = progress.downloadedBytes / (1024.0 * 1024.0)
+        val totalMb = progress.totalBytes / (1024.0 * 1024.0)
+        if (progress.totalBytes > 0) {
+            "%.1f / %.1f MB · %s".format(mb, totalMb, progress.speed)
+        } else {
+            "%.1f MB · %s".format(mb, progress.speed)
+        }
+    }
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.EXTRACTING -> "%.0f%%".format(progress.extractProgress * 100)
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.VERIFYING -> "SHA256 校验中..."
+    com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.FAILED -> progress.errorMessage ?: "未知错误"
+    else -> ""
 }
 
 @Composable
@@ -519,7 +617,7 @@ private fun AboutCard(
 ) {
     CardListTile(
         title = "关于",
-        subtitle = "fler ${com.ai.fler.BuildConfig.VERSION_NAME} · 开源项目与第三方库",
+        subtitle = "Fler ${com.ai.fler.BuildConfig.VERSION_NAME} · 开源项目与第三方库",
         onClick = onClick,
     )
 }

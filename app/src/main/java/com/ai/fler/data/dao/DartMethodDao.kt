@@ -5,9 +5,7 @@ import androidx.room.Embedded
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import androidx.room.Update
 import com.ai.fler.data.entity.DartMethod
-import kotlinx.coroutines.flow.Flow
 
 /**
  * Dart 方法 DAO。
@@ -22,47 +20,14 @@ interface DartMethodDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(dartMethods: List<DartMethod>): List<Long>
 
-    @Update
-    suspend fun update(dartMethod: DartMethod)
-
-    @Query("DELETE FROM dart_methods WHERE id = :id")
-    suspend fun deleteById(id: Long)
-
-    @Query("DELETE FROM dart_methods WHERE class_id = :classId")
-    suspend fun deleteByClassId(classId: Long)
-
     @Query("DELETE FROM dart_methods WHERE analysis_id = :analysisId")
     suspend fun deleteByAnalysisId(analysisId: Long)
 
     @Query("SELECT * FROM dart_methods WHERE id = :id")
     suspend fun getById(id: Long): DartMethod?
 
-    @Query("SELECT * FROM dart_methods WHERE class_id = :classId ORDER BY method_name")
-    fun getByClassId(classId: Long): Flow<List<DartMethod>>
-
-    @Query("SELECT * FROM dart_methods WHERE class_id = :classId ORDER BY method_name")
-    suspend fun getByClassIdList(classId: Long): List<DartMethod>
-
-    @Query("SELECT * FROM dart_methods WHERE analysis_id = :analysisId ORDER BY method_name")
-    fun getByAnalysisId(analysisId: Long): Flow<List<DartMethod>>
-
     @Query("SELECT * FROM dart_methods WHERE analysis_id = :analysisId ORDER BY method_name")
     suspend fun getByAnalysisIdList(analysisId: Long): List<DartMethod>
-
-    @Query("SELECT * FROM dart_methods WHERE analysis_id = :analysisId AND method_name LIKE '%' || :query || '%' ORDER BY method_name")
-    fun searchByAnalysisId(analysisId: Long, query: String): Flow<List<DartMethod>>
-
-    @Query("SELECT * FROM dart_methods WHERE class_id = :classId AND method_name LIKE '%' || :query || '%' ORDER BY method_name")
-    fun searchByClassId(classId: Long, query: String): Flow<List<DartMethod>>
-
-    @Query("SELECT * FROM dart_methods WHERE pp_count > 0 ORDER BY pp_count DESC")
-    fun getWithPpEntries(): Flow<List<DartMethod>>
-
-    @Query("SELECT COUNT(*) FROM dart_methods WHERE analysis_id = :analysisId")
-    suspend fun countByAnalysisId(analysisId: Long): Int
-
-    @Query("SELECT COUNT(*) FROM dart_methods WHERE class_id = :classId")
-    suspend fun countByClassId(classId: Long): Int
 
     /** 方法 + 所属类名（供 ASM 方法列表展示）。 */
     @Query(

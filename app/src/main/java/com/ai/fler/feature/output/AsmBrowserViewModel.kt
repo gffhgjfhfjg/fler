@@ -92,22 +92,6 @@ class AsmBrowserViewModel @Inject constructor(
     fun refresh() {
         loadAsmContent()
     }
-
-    fun getFilteredLines(): List<AsmLine> {
-        val state = _uiState.value
-        val query = _searchQuery.value
-
-        if (query.isBlank()) {
-            return state.lines.mapIndexed { index, line ->
-                AsmLine(index + 1, line, false)
-            }
-        }
-
-        return state.lines.mapIndexed { index, line ->
-            val matches = line.contains(query, ignoreCase = true)
-            AsmLine(index + 1, line, matches)
-        }.filter { it.text.contains(query, ignoreCase = true) || it.lineNumber <= 0 }
-    }
 }
 
 data class AsmBrowserUiState(
@@ -119,10 +103,4 @@ data class AsmBrowserUiState(
     val lineCount: Int = 0,
     val isLoading: Boolean = false,
     val errorMessage: String? = null
-)
-
-data class AsmLine(
-    val lineNumber: Int,
-    val text: String,
-    val isMatch: Boolean
 )

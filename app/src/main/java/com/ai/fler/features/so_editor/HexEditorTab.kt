@@ -14,8 +14,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -62,6 +64,8 @@ fun HexEditorTab(
 ) {
     val hexData by viewModel.hexData.collectAsStateWithLifecycle()
     val selectedOffset by viewModel.selectedOffset.collectAsStateWithLifecycle()
+    val patchedOffsets by viewModel.patchedOffsets.collectAsStateWithLifecycle()
+    val flashOffset by viewModel.flashOffset.collectAsStateWithLifecycle()
 
     var inputOffset by remember { mutableStateOf(selectedOffset.toString()) }
     var selectedByteIndex by remember { mutableStateOf(-1) }
@@ -119,6 +123,8 @@ fun HexEditorTab(
                     data = hexData.data,
                     baseOffset = hexData.offset,
                     selectedByteIndex = selectedByteIndex,
+                    patchedOffsets = patchedOffsets,
+                    flashOffset = flashOffset,
                     onByteClick = { index ->
                         selectedByteIndex = index
                     },
@@ -228,19 +234,31 @@ private fun HexDataView(
     data: ByteArray,
     baseOffset: Long,
     selectedByteIndex: Int,
+    patchedOffsets: Set<Long>,
+    flashOffset: Long?,
     onByteClick: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val bytesPerRow = 16
     val rows = (data.size + bytesPerRow - 1) / bytesPerRow
+    val listState = rememberLazyListState()
 
-    Column(
+    // 撤销跳转：闪烁地址所在行滚动到可视区
+    LaunchedEffect(flashOffset) {
+        val fo = flashOffset ?: return@LaunchedEffect
+        val idx = (fo - baseOffset).toInt()
+        if (idx in 0 until data.size) {
+            listState.animateScrollToItem(idx / bytesPerRow)
+        }
+    }
+
+    LazyColumn(
+        state = listState,
         modifier = modifier
             .horizontalScroll(rememberScrollState())
-            .verticalScroll(rememberScrollState())
             .padding(vertical = 4.dp)
     ) {
-        for (rowIndex in 0 until rows) {
+        items(count = rows) { rowIndex ->
             val startIndex = rowIndex * bytesPerRow
             val endIndex = minOf(startIndex + bytesPerRow, data.size)
             val rowOffset = baseOffset + startIndex
@@ -250,6 +268,8 @@ private fun HexDataView(
                 bytes = data.sliceArray(startIndex until endIndex),
                 startIndex = startIndex,
                 selectedByteIndex = selectedByteIndex,
+                patchedOffsets = patchedOffsets,
+                flashOffset = flashOffset,
                 onByteClick = onByteClick
             )
         }
@@ -262,6 +282,8 @@ private fun HexRow(
     bytes: ByteArray,
     startIndex: Int,
     selectedByteIndex: Int,
+    patchedOffsets: Set<Long>,
+    flashOffset: Long?,
     onByteClick: (Int) -> Unit
 ) {
     Row(
@@ -286,6 +308,8 @@ private fun HexRow(
                     val byteIndex = startIndex + i
                     val isSelected = byteIndex == selectedByteIndex
                     val byteValue = bytes[i]
+                    val isPatched = rowOffset + i in patchedOffsets
+                    val isFlash = rowOffset + i == flashOffset
 
                     Box(
                         modifier = Modifier
@@ -293,7 +317,9 @@ private fun HexRow(
                             .clip(RoundedCornerShape(2.dp))
                             .background(
                                 when {
+                                    isFlash -> Color(0xFFD32F2F)
                                     isSelected -> MaterialTheme.colorScheme.primary
+                                    isPatched -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
                                     else -> Color.Transparent
                                 }
                             )

@@ -109,8 +109,5 @@ class BlutterEngine(
         }
     }
 
-    /** 获取对应的 Dart 版本号。 */
-    fun getDartVersion(): String = dartVersion
-
     override fun toString(): String = "BlutterEngine(dartVersion=$dartVersion, engineSoPath=$engineSoPath)"
 }

@@ -31,9 +31,4 @@ object NativeLoader {
             throw e
         }
     }
-
-    /**
-     * 检查原生库是否已加载。
-     */
-    fun isLoaded(): Boolean = loaded
 }

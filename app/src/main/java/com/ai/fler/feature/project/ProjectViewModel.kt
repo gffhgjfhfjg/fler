@@ -28,11 +28,9 @@ import com.ai.fler.data.entity.PpEntry
 import com.ai.fler.data.entity.Project
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import java.io.File
 import javax.inject.Inject
@@ -72,10 +70,6 @@ class ProjectViewModel @Inject constructor(
     private val _projectListState = MutableStateFlow(ProjectListState())
     val projectListState: StateFlow<ProjectListState> = _projectListState.asStateFlow()
 
-    // ========== 新建项目状态 ==========
-    private val _newProjectState = MutableStateFlow(NewProjectState())
-    val newProjectState: StateFlow<NewProjectState> = _newProjectState.asStateFlow()
-
     // ========== 分析进度 ==========
 
     private val _analysisProgress = MutableStateFlow(AnalysisProgress())
@@ -92,10 +86,6 @@ class ProjectViewModel @Inject constructor(
             _analysisProgress.value = AnalysisProgress()
         }
     }
-
-    // ========== 事件通道 ==========
-    private val _events = Channel<ProjectEvent>(Channel.BUFFERED)
-    val events = _events.receiveAsFlow()
 
     // ========== 初始化 ==========
     init {
@@ -138,44 +128,19 @@ class ProjectViewModel @Inject constructor(
     // ========== 新建项目 ==========
 
     /**
-     * 更新新项目名称。
-     */
-    fun updateProjectName(name: String) {
-        _newProjectState.value = _newProjectState.value.copy(name = name)
-    }
-
-    /**
-     * 设置 APK 路径。
-     */
-    fun setApkPath(path: String) {
-        _newProjectState.value = _newProjectState.value.copy(apkPath = path)
-    }
-
-    /**
      * 创建新项目。
      */
     fun createProject(name: String, apkPath: String) {
         viewModelScope.launch {
-            _newProjectState.value = _newProjectState.value.copy(isLoading = true)
-
             try {
                 val project = Project(
                     name = name,
                     apkPath = apkPath,
                     status = Project.STATUS_CREATED
                 )
-
-                val id = projectDao.insert(project)
-
-                _newProjectState.value = _newProjectState.value.copy(
-                    isLoading = false,
-                    isSaved = true
-                )
-
-                _events.send(ProjectEvent.ProjectCreated(id))
+                projectDao.insert(project)
             } catch (e: Exception) {
-                _newProjectState.value = _newProjectState.value.copy(
-                    isLoading = false,
+                _projectListState.value = _projectListState.value.copy(
                     errorMessage = e.message
                 )
             }
@@ -204,8 +169,6 @@ class ProjectViewModel @Inject constructor(
                     val deleted = extractDir.deleteRecursively()
                     Log.i(TAG, "清理提取目录 ${extractDir.absolutePath}: $deleted")
                 }
-
-                _events.send(ProjectEvent.ProjectDeleted(project.id))
             } catch (e: Exception) {
                 Log.e(TAG, "删除项目失败: id=${project.id}", e)
                 _projectListState.value = _projectListState.value.copy(
@@ -230,7 +193,6 @@ class ProjectViewModel @Inject constructor(
             val project = projectDao.getById(projectId)
             if (project == null) {
                 Log.e(TAG, "startAnalysis: project $projectId not found")
-                _events.send(ProjectEvent.AnalysisFailed("Project not found"))
                 return@launch
             }
 
@@ -239,7 +201,6 @@ class ProjectViewModel @Inject constructor(
                 createAnalysisRecord(projectId)
             } catch (e: Exception) {
                 Log.e(TAG, "createAnalysisRecord failed", e)
-                _events.send(ProjectEvent.AnalysisFailed("无法创建分析记录: ${e.message}"))
                 return@launch
             }
 
@@ -392,7 +353,6 @@ class ProjectViewModel @Inject constructor(
                     status = Project.STATUS_COMPLETED
                 )
             )
-            _events.send(ProjectEvent.AnalysisCompleted(projectId, analysisId))
         }
     }
 
@@ -530,7 +490,6 @@ class ProjectViewModel @Inject constructor(
             message = "分析失败",
             error = error
         )
-        _events.send(ProjectEvent.AnalysisFailed(error))
     }
 
     /**
@@ -573,13 +532,3 @@ data class RunOutcome(
     val result: AnalyzeResult,
     val dbPath: String
 )
-
-/**
- * ViewModel 事件密封类。
- */
-sealed class ProjectEvent {
-    data class ProjectCreated(val projectId: Long) : ProjectEvent()
-    data class ProjectDeleted(val projectId: Long) : ProjectEvent()
-    data class AnalysisCompleted(val projectId: Long, val analysisId: Long) : ProjectEvent()
-    data class AnalysisFailed(val error: String) : ProjectEvent()
-}

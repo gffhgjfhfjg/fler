@@ -36,14 +36,3 @@ enum class AnalysisStage {
     Completed,
     Failed
 }
-
-/**
- * 新建项目表单状态。
- */
-data class NewProjectState(
-    val name: String = "",
-    val apkPath: String = "",
-    val isLoading: Boolean = false,
-    val errorMessage: String? = null,
-    val isSaved: Boolean = false
-)

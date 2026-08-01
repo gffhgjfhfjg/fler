@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.Button
@@ -86,6 +87,7 @@ fun SoEditorScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val currentTab by viewModel.currentTab.collectAsStateWithLifecycle()
+    val patchedOffsets by viewModel.patchedOffsets.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -185,6 +187,26 @@ fun SoEditorScreen(
                         Icon(
                             imageVector = Icons.Default.Undo,
                             contentDescription = "撤销"
+                        )
+                    }
+
+                    // 保存按钮：标记所有修改为已保存，清除红色高亮
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                val count = viewModel.commitChanges()
+                                if (count > 0) {
+                                    snackbarHostState.showSnackbar("已保存 $count 处修改")
+                                } else {
+                                    snackbarHostState.showSnackbar("无未保存的修改")
+                                }
+                            }
+                        },
+                        enabled = uiState.isFileOpen && patchedOffsets.isNotEmpty()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Save,
+                            contentDescription = "保存"
                         )
                     }
 

@@ -24,6 +24,7 @@ class BackupManager @Inject constructor() {
     private val undoStack = ArrayDeque<PatchRecord>()
     private val MAX_UNDO = 50
     private var backupCreated = false
+    private var seqCounter = 0L
 
     /**
      * 首次编辑前创建备份。
@@ -63,7 +64,8 @@ class BackupManager @Inject constructor() {
                 oldBytes = oldBytes.copyOf(),
                 newBytes = newBytes.copyOf(),
                 soName = soName,
-                timestamp = System.currentTimeMillis()
+                timestamp = System.currentTimeMillis(),
+                seq = seqCounter++
             )
         )
     }
@@ -82,42 +84,9 @@ class BackupManager @Inject constructor() {
     }
 
     /**
-     * 获取撤销栈大小。
-     */
-    fun getUndoCount(): Int = undoStack.size
-
-    /**
-     * 获取所有补丁记录（用于导出）。
+     * 获取所有补丁记录（用于导出 / 高亮未保存修改）。
      */
     fun getPatchRecords(): List<PatchRecord> = undoStack.toList()
-
-    /**
-     * 清空撤销栈。
-     */
-    fun clearUndoStack() {
-        undoStack.clear()
-    }
-
-    /**
-     * 从备份文件恢复。
-     */
-    suspend fun restoreFromBackup(soFile: File): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                val backupFile = File(soFile.parent, "${soFile.name}.bak")
-                if (backupFile.exists()) {
-                    backupFile.copyTo(soFile, overwrite = true)
-                    backupCreated = false
-                    undoStack.clear()
-                    true
-                } else {
-                    false
-                }
-            } catch (e: Exception) {
-                false
-            }
-        }
-    }
 
     /**
      * 计算 CRC32 校验值。
@@ -136,35 +105,6 @@ class BackupManager @Inject constructor() {
         }
         return (crc xor 0xFFFFFFFFL.toInt()).toLong() and 0xFFFFFFFFL
     }
-
-    /**
-     * 验证数据完整性。
-     */
-    fun verifyCRC32(data: ByteArray, expectedCrc: Long): Boolean {
-        val actualCrc = computeCRC32(data)
-        return actualCrc == expectedCrc
-    }
-
-    /**
-     * 生成补丁文件内容。
-     */
-    fun generatePatchFile(soFile: File, records: List<PatchRecord>): String {
-        val builder = StringBuilder()
-        builder.appendLine("# Patch file for ${soFile.name}")
-        builder.appendLine("# Generated at: ${System.currentTimeMillis()}")
-        builder.appendLine()
-
-        for (record in records) {
-            builder.appendLine(
-                "0x${record.address.toString(16).uppercase()}: " +
-                    record.newBytes.joinToString(" ") { byte ->
-                        byte.toUByte().toString(16).uppercase().padStart(2, '0')
-                    }
-            )
-        }
-
-        return builder.toString()
-    }
 }
 
 /**
@@ -175,7 +115,9 @@ data class PatchRecord(
     val oldBytes: ByteArray,
     val newBytes: ByteArray,
     val soName: String,
-    val timestamp: Long
+    val timestamp: Long,
+    /** 全局自增序号，用于区分「未保存」的补丁（seq > savedSeq）。 */
+    val seq: Long = 0,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -184,7 +126,8 @@ data class PatchRecord(
             oldBytes.contentEquals(other.oldBytes) &&
             newBytes.contentEquals(other.newBytes) &&
             soName == other.soName &&
-            timestamp == other.timestamp
+            timestamp == other.timestamp &&
+            seq == other.seq
     }
 
     override fun hashCode(): Int {
@@ -193,6 +136,7 @@ data class PatchRecord(
         result = 31 * result + newBytes.contentHashCode()
         result = 31 * result + soName.hashCode()
         result = 31 * result + timestamp.hashCode()
+        result = 31 * result + seq.hashCode()
         return result
     }
 }

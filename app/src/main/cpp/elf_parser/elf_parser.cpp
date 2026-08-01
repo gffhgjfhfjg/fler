@@ -259,17 +259,6 @@ std::vector<uint8_t> ElfParser::getSectionDataByIndex(uint32_t index) const {
     return std::vector<uint8_t>(base, base + sec.size);
 }
 
-uint64_t ElfParser::findSymbolAddress(const char* name) const {
-    std::string target(name);
-    for (const auto& sym : symbols_) {
-        if (sym.name == target) return sym.address;
-    }
-    for (const auto& sym : dynSymbols_) {
-        if (sym.name == target) return sym.address;
-    }
-    return 0;
-}
-
 std::vector<uint8_t> ElfParser::readBytes(uint64_t offset, size_t size) const {
     if (offset + size > fileSize_) return {};
     auto base = static_cast<uint8_t*>(mmap_) + offset;
@@ -287,37 +276,6 @@ bool ElfParser::flush() {
     if (mmap_ == nullptr || fd_ < 0) return false;
     // msync 刷新 mmap 缓存回磁盘
     return ::msync(mmap_, fileSize_, MS_SYNC) == 0;
-}
-
-// CRC32 查表
-static uint32_t crc32Table[256];
-static bool crc32TableInit = false;
-
-static void initCRC32Table() {
-    if (crc32TableInit) return;
-    for (uint32_t i = 0; i < 256; ++i) {
-        uint32_t crc = i;
-        for (int j = 0; j < 8; ++j) {
-            if (crc & 1)
-                crc = (crc >> 1) ^ 0xEDB88320;
-            else
-                crc >>= 1;
-        }
-        crc32Table[i] = crc;
-    }
-    crc32TableInit = true;
-}
-
-uint32_t ElfParser::computeCRC32(uint64_t offset, size_t size) const {
-    if (offset + size > fileSize_) return 0;
-    initCRC32Table();
-
-    uint32_t crc = 0xFFFFFFFF;
-    auto base = static_cast<uint8_t*>(mmap_) + offset;
-    for (size_t i = 0; i < size; ++i) {
-        crc = crc32Table[(crc ^ base[i]) & 0xFF] ^ (crc >> 8);
-    }
-    return crc ^ 0xFFFFFFFF;
 }
 
 } // namespace elf

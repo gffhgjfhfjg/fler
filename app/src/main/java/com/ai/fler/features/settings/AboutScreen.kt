@@ -61,7 +61,7 @@ fun AboutScreen(
         ) {
             item {
                 SectionCard(title = "应用", icon = Icons.Default.Info) {
-                    AboutRow("名称", "fler")
+                    AboutRow("名称", "Fler")
                     AboutRow("版本", "${com.ai.fler.BuildConfig.VERSION_NAME} (${com.ai.fler.BuildConfig.VERSION_CODE})")
                     AboutRow("类型", "Dart/Flutter 逆向分析工具")
                 }
