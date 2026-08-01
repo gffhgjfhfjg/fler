@@ -4,9 +4,13 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ai.fler.core.mcp.McpConfig
 import com.ai.fler.core.service.EnginePackManager
 import com.ai.fler.core.service.EngineSourceConfig
 import com.ai.fler.core.service.EngineUpdate
+import com.ai.fler.features.mcp.McpServerManager
+import com.ai.fler.features.mcp.McpServerService
+import com.ai.fler.features.mcp.McpStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,13 +25,15 @@ import javax.inject.Inject
 /**
  * 设置 ViewModel。
  *
- * 管理设置页面的状态，包括引擎更新检测、下载源配置和项目缓存清理。
+ * 管理设置页面的状态，包括引擎更新检测、下载源配置、项目缓存清理与 MCP 服务器。
  */
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val application: Application,
     private val enginePackManager: EnginePackManager,
-    private val sourceConfig: EngineSourceConfig
+    private val sourceConfig: EngineSourceConfig,
+    private val mcpConfig: McpConfig,
+    private val mcpServerManager: McpServerManager,
 ) : ViewModel() {
 
     private val _updateState = MutableStateFlow(UpdateCheckState())
@@ -43,6 +49,10 @@ class SettingsViewModel @Inject constructor(
     private val _cacheCleanResult = MutableStateFlow<Long?>(null)
     val cacheCleanResult: StateFlow<Long?> = _cacheCleanResult.asStateFlow()
 
+    /** MCP 服务器状态（配置 + 运行状态聚合）。 */
+    private val _mcpState = MutableStateFlow(McpUiState())
+    val mcpState: StateFlow<McpUiState> = _mcpState.asStateFlow()
+
     init {
         loadInstalledVersions()
         // 引擎版本变化（下载完成/清除）时实时刷新已安装版本，无需重启
@@ -51,6 +61,72 @@ class SettingsViewModel @Inject constructor(
                 _installedVersions.value = enginePackManager.listInstalledVersions()
             }
         }
+        // 聚合 MCP 配置与运行状态
+        viewModelScope.launch {
+            combineMcpState()
+        }
+    }
+
+    private suspend fun combineMcpState() {
+        val config = mcpConfig
+        val enabled = config.enabled.value
+        val bindMode = config.bindMode.value
+        val port = config.port.value
+        val token = config.token.value
+        val patchEnabled = config.patchEnabled.value
+        mcpServerManager.status.collect { status: McpStatus ->
+            _mcpState.value = McpUiState(
+                enabled = enabled,
+                bindMode = bindMode,
+                port = port,
+                token = token,
+                patchEnabled = patchEnabled,
+                isRunning = status.isRunning,
+                activeSessions = status.activeSessions,
+                localUrl = status.localUrl,
+                lanUrl = status.lanUrl,
+                errorMessage = status.errorMessage,
+            )
+        }
+    }
+
+    // ========== MCP Server ==========
+
+    fun mcpSetEnabled(value: Boolean) {
+        mcpConfig.setEnabled(value)
+        if (value) mcpStartServer() else mcpStopServer()
+    }
+
+    fun mcpStartServer() {
+        mcpConfig.setEnabled(true)
+        if (mcpConfig.bindMode.value == McpConfig.BindMode.LAN) {
+            // 局域网模式：前台服务保活
+            McpServerService.start(application)
+        } else {
+            mcpServerManager.start()
+        }
+    }
+
+    fun mcpStopServer() {
+        mcpConfig.setEnabled(false)
+        McpServerService.stop(application)
+        mcpServerManager.stop()
+    }
+
+    fun mcpSetBindMode(mode: McpConfig.BindMode) {
+        mcpConfig.setBindMode(mode)
+    }
+
+    fun mcpSetPort(port: Int) {
+        mcpConfig.setPort(port.coerceIn(1024, 65535))
+    }
+
+    fun mcpSetToken(token: String) {
+        mcpConfig.setToken(token)
+    }
+
+    fun mcpSetPatchEnabled(value: Boolean) {
+        mcpConfig.setPatchEnabled(value)
     }
 
     /**
@@ -178,4 +254,20 @@ data class EngineSourceState(
     val checksumUrl: String = "",
     val versionUrl: String = "",
     val isCustom: Boolean = false
+)
+
+/**
+ * MCP 服务器 UI 状态（配置 + 运行状态聚合）。
+ */
+data class McpUiState(
+    val enabled: Boolean = false,
+    val bindMode: com.ai.fler.core.mcp.McpConfig.BindMode = com.ai.fler.core.mcp.McpConfig.BindMode.LOCAL,
+    val port: Int = com.ai.fler.core.mcp.McpConfig.DEFAULT_PORT,
+    val token: String = "",
+    val patchEnabled: Boolean = false,
+    val isRunning: Boolean = false,
+    val activeSessions: Int = 0,
+    val localUrl: String = "",
+    val lanUrl: String = "",
+    val errorMessage: String? = null,
 )

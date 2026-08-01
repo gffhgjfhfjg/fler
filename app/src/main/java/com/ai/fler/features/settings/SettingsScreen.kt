@@ -62,6 +62,7 @@ fun SettingsScreen(
     val installedVersions by viewModel.installedVersions.collectAsStateWithLifecycle()
     val sourceState by viewModel.sourceState.collectAsStateWithLifecycle()
     val cacheCleanResult by viewModel.cacheCleanResult.collectAsStateWithLifecycle()
+    val mcpState by viewModel.mcpState.collectAsStateWithLifecycle()
     var showCacheCleanConfirm by remember { mutableStateOf(false) }
 
     LazyColumn(
@@ -100,6 +101,20 @@ fun SettingsScreen(
                     viewModel.saveSourceConfig(primary, fallback, checksum, version)
                 },
                 onReset = { viewModel.resetSourceConfig() }
+            )
+        }
+
+        // MCP 服务器
+        item {
+            McpSettingsCard(
+                state = mcpState,
+                onToggleEnabled = { viewModel.mcpSetEnabled(it) },
+                onSetBindMode = { viewModel.mcpSetBindMode(it) },
+                onSetPort = { viewModel.mcpSetPort(it) },
+                onSetToken = { viewModel.mcpSetToken(it) },
+                onSetPatchEnabled = { viewModel.mcpSetPatchEnabled(it) },
+                onStart = { viewModel.mcpStartServer() },
+                onStop = { viewModel.mcpStopServer() },
             )
         }
 

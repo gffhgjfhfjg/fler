@@ -832,6 +832,31 @@ fun onLocateInSo(vmOffset: Long, soName: String) {
 
 ---
 
+### P7: MCP Server（内嵌，2-3 周）
+
+**目标**：App 内嵌 MCP 服务器，开放逆向能力给 AI 代理（Claude Desktop SSE 会话模式优先）
+
+| # | 任务 | 状态 | 备注 |
+|---|------|------|------|
+| P7-1 | McpConfig 配置（端口/绑定/Token/补丁开关） | [ ] | SharedPreferences |
+| P7-2 | JSON-RPC 协议层（initialize/tools/resources/prompts/ping/notifications） | [ ] | kotlinx-serialization |
+| P7-3 | 双模式传输：HTTP+SSE（Claude Desktop）+ Streamable HTTP + 会话 | [ ] | JDK HttpServer |
+| P7-4 | 工具注册（分析/类/方法/对象池/字符串/反汇编/ELF/地址） | [ ] | 复用 DAO + JNI |
+| P7-5 | 补丁工具（McpPatchService：.bak+CRC+撤销栈持久化）+ destructiveHint 门控 | [ ] | 默认关闭 |
+| P7-6 | McpServerManager + 前台服务保活（局域网常驻通知） | [ ] | |
+| P7-7 | 设置页 UI + 连接 URL + adb reverse 提示 | [ ] | |
+| P7-8 | 安全与并发（Token/局域网显式开启/错误隔离/SSE 会话/补丁锁） | [ ] | |
+| P7-9 | 文档 + 验收 | [ ] | 方案.md / dev-progress.md |
+
+**验收标准**：
+- [ ] Claude Desktop SSE 会话模式可连接、握手、工具调用
+- [ ] MCP Inspector（Streamable HTTP）可连接
+- [ ] 工具异常返回结构化 JSON-RPC 错误，不崩服务
+- [ ] 补丁默认不可用；开启后可备份/写盘/CRC 校验/撤销，App 重启后撤销栈仍在
+- [ ] 局域网前台服务保活；端口冲突自动回退
+
+---
+
 ## 3. 关键设计决策
 
 ### 3.1 引擎包加载方式
@@ -869,6 +894,15 @@ val db = Room.databaseBuilder(context, AnalysisDatabase::class.java, analysisDbP
 根据代码分析（[blutter_entry.cpp](file:///e:/111/bitcontrol/out/fler-dart/dartvm/src/blutter_entry.cpp)），Blutter 的 Android 构建显式排除了 ICU 依赖（[build-dartvm.sh](file:///e:/111/bitcontrol/out/fler-dart/scripts/build-dartvm.sh) 中 `set(ICU_LIBRARIES "")`）。
 
 **建议**：引擎包中不包含 ICU 库，EngineLoader 中移除 `libicuuc.so` / `libicudata.so` 加载。如果运行时出现 `UnsatisfiedLinkError` 指向 ICU 符号，再添加回共享库列表。
+
+### 3.5 MCP Server 内嵌设计
+
+- **数据源**：App 内 Room（dart_classes/dart_methods/pp_entries）+ 引擎 SQLite src_code，零导出
+- **传输**：HTTP+SSE（Claude Desktop 兼容目标）+ Streamable HTTP（JDK HttpServer，零新增传输依赖）
+- **JSON**：kotlinx-serialization-json（可靠 JSON-RPC/参数校验）
+- **保活**：局域网模式前台服务（常驻通知）
+- **补丁门控**：默认关闭，客户端决定；撤销栈持久化 undo.log
+- **安全**：默认本机；LAN/Token 显式开启
 
 ---
 

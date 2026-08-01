@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
 }
@@ -91,6 +92,9 @@ dependencies {
 
     // DocumentFile (SAF)
     implementation(libs.androidx.documentfile)
+
+    // kotlinx-serialization（MCP JSON-RPC）
+    implementation(libs.kotlinx.serialization.json)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 
