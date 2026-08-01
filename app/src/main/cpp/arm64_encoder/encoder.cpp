@@ -41,6 +41,8 @@ int parseRegister(const char* reg) {
     // 去除空白
     while (!s.empty() && std::isspace(s.front())) s.erase(s.begin());
     while (!s.empty() && std::isspace(s.back())) s.pop_back();
+    // 大小写不敏感（capstone 输出小写，用户输入可能大写）
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
 
     if (s == "sp" || s == "xzr" || s == "wzr") return 31;
 
@@ -59,8 +61,10 @@ bool parseImmediate(const char* str, int64_t& value) {
     if (*str == '#') str++;
     if (*str == 0) return false;
 
-    // 16 进制
-    if ((str[0] == '0' && (str[1] == 'x' || str[1] == 'X'))) {
+    // 支持带符号（含 -0x 十六进制负值，如 capstone 的 "#-0x10"）
+    const char* num = str;
+    if (*num == '-' || *num == '+') num++;
+    if ((num[0] == '0' && (num[1] == 'x' || num[1] == 'X'))) {
         value = std::strtoll(str, nullptr, 16);
     } else {
         value = std::strtoll(str, nullptr, 10);
@@ -158,179 +162,212 @@ std::vector<std::string> Arm64Encoder::listInstructions() const {
 
 // --- 加载/存储 (Load/Store) ---
 
+// 解析内存操作数 "[Rn, #imm]" / "[Rn]"（unsigned/signed offset 形式）。
+// 返回寄存器号 rn、是否有立即数 hasImm 及立即数 imm；
+// pre/post 变址（带 '!'）暂不支持，返回 false 以免编码出语义错误的指令。
+static bool parseMemOperand(const char* s, uint32_t& rn, int64_t& imm, bool& hasImm) {
+    if (!s) return false;
+    while (*s && std::isspace(*s)) s++;
+    if (*s != '[') return false;
+    s++;
+    while (*s && std::isspace(*s)) s++;
+    char reg[16];
+    int i = 0;
+    while (*s && *s != ',' && *s != ']' && i < 15) reg[i++] = *s++;
+    reg[i] = 0;
+    int r = parseRegister(reg);
+    if (r < 0 || r > 31) return false;
+    rn = static_cast<uint32_t>(r);
+    hasImm = false;
+    imm = 0;
+    while (*s && std::isspace(*s)) s++;
+    if (*s == ',') {
+        s++;
+        while (*s && std::isspace(*s)) s++;
+        char num[24];
+        int j = 0;
+        while (*s && *s != ']' && j < 23) num[j++] = *s++;
+        num[j] = 0;
+        if (!parseImmediate(num, imm)) return false;
+        hasImm = true;
+    }
+    while (*s && std::isspace(*s)) s++;
+    if (*s != ']') return false;
+    s++;
+    // 变址后缀 '!'（pre/post index）暂不支持
+    while (*s && std::isspace(*s)) s++;
+    if (*s == '!') return false;
+    return true;
+}
+
 static bool encodeLDR(const char* args, uint32_t& encoding) {
-    // LDR Xt, [Xn, #imm12]  (64-bit, unsigned offset)
-    // 1111 1001 01.. .... .... .... .... ....  (0xF940_0000 base)
-    char rt[8], rn[8];
-    int imm = 0;
-    if (std::sscanf(args, "%7s, %7s, #%d", rt, rn, &imm) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        if (imm < 0 || imm > 4095) return false;
-        // 64-bit LDR unsigned offset: size=11, opc=01
-        encoding = (0xF9u << 24) | (1u << 22) | ((imm & 0xFFF) << 10) | (base << 5) | rd;
-        return true;
-    }
-    // LDR Xt, [Xn] (no offset)
-    if (std::sscanf(args, "%7s, %7s", rt, rn) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        encoding = (0xF9u << 24) | (1u << 22) | (0u << 10) | (base << 5) | rd;
-        return true;
-    }
-    return false;
+    // LDR Xt, [Xn, #imm12]  (64-bit, unsigned offset) / LDR Xt, [Xn]
+    const char* comma = strchr(args, ',');
+    if (!comma) return false;
+    char rt[16];
+    size_t len = static_cast<size_t>(comma - args);
+    if (len >= sizeof(rt)) return false;
+    memcpy(rt, args, len); rt[len] = 0;
+    int rd = parseRegister(rt);
+    if (rd < 0 || rd > 31) return false;
+
+    uint32_t base; int64_t imm; bool hasImm;
+    if (!parseMemOperand(comma + 1, base, imm, hasImm)) return false;
+    if (hasImm && (imm < 0 || imm > 4095)) return false;
+    uint32_t imm12 = hasImm ? static_cast<uint32_t>(imm) : 0;
+    // 64-bit LDR unsigned offset: size=11, opc=01
+    encoding = (0xF9u << 24) | (1u << 22) | (imm12 << 10) | (base << 5) | static_cast<uint32_t>(rd);
+    return true;
 }
 
 static bool encodeSTR(const char* args, uint32_t& encoding) {
-    // STR Xt, [Xn, #imm12]  (64-bit, unsigned offset)
-    // 1111 1001 00.. .... .... .... .... ....  (0xF900_0000 base)
-    char rt[8], rn[8];
-    int imm = 0;
-    if (std::sscanf(args, "%7s, %7s, #%d", rt, rn, &imm) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        if (imm < 0 || imm > 4095) return false;
-        // 64-bit STR unsigned offset: size=11, opc=00
-        encoding = (0xF9u << 24) | (0u << 22) | ((imm & 0xFFF) << 10) | (base << 5) | rd;
-        return true;
-    }
-    if (std::sscanf(args, "%7s, %7s", rt, rn) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        encoding = (0xF9u << 24) | (0u << 22) | (0u << 10) | (base << 5) | rd;
-        return true;
-    }
-    return false;
+    // STR Xt, [Xn, #imm12]  (64-bit, unsigned offset) / STR Xt, [Xn]
+    const char* comma = strchr(args, ',');
+    if (!comma) return false;
+    char rt[16];
+    size_t len = static_cast<size_t>(comma - args);
+    if (len >= sizeof(rt)) return false;
+    memcpy(rt, args, len); rt[len] = 0;
+    int rd = parseRegister(rt);
+    if (rd < 0 || rd > 31) return false;
+
+    uint32_t base; int64_t imm; bool hasImm;
+    if (!parseMemOperand(comma + 1, base, imm, hasImm)) return false;
+    if (hasImm && (imm < 0 || imm > 4095)) return false;
+    uint32_t imm12 = hasImm ? static_cast<uint32_t>(imm) : 0;
+    // 64-bit STR unsigned offset: size=11, opc=00
+    encoding = (0xF9u << 24) | (0u << 22) | (imm12 << 10) | (base << 5) | static_cast<uint32_t>(rd);
+    return true;
 }
 
 static bool encodeLDRB(const char* args, uint32_t& encoding) {
     // LDRB Wt, [Xn, #imm12]  - 8-bit
-    char rt[8], rn[8];
-    int imm = 0;
-    if (std::sscanf(args, "%7s, %7s, #%d", rt, rn, &imm) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        if (imm < 0 || imm > 4095) return false;
-        // 8-bit LDR unsigned offset: size=00, opc=01
-        encoding = (0x39u << 24) | (1u << 22) | ((imm & 0xFFF) << 10) | (base << 5) | rd;
-        return true;
-    }
-    if (std::sscanf(args, "%7s, %7s", rt, rn) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        encoding = (0x39u << 24) | (1u << 22) | (0u << 10) | (base << 5) | rd;
-        return true;
-    }
-    return false;
+    const char* comma = strchr(args, ',');
+    if (!comma) return false;
+    char rt[16];
+    size_t len = static_cast<size_t>(comma - args);
+    if (len >= sizeof(rt)) return false;
+    memcpy(rt, args, len); rt[len] = 0;
+    int rd = parseRegister(rt);
+    if (rd < 0 || rd > 31) return false;
+
+    uint32_t base; int64_t imm; bool hasImm;
+    if (!parseMemOperand(comma + 1, base, imm, hasImm)) return false;
+    if (hasImm && (imm < 0 || imm > 4095)) return false;
+    uint32_t imm12 = hasImm ? static_cast<uint32_t>(imm) : 0;
+    // 8-bit LDR unsigned offset: size=00, opc=01
+    encoding = (0x39u << 24) | (1u << 22) | (imm12 << 10) | (base << 5) | static_cast<uint32_t>(rd);
+    return true;
 }
 
 static bool encodeSTRB(const char* args, uint32_t& encoding) {
-    char rt[8], rn[8];
-    int imm = 0;
-    if (std::sscanf(args, "%7s, %7s, #%d", rt, rn, &imm) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        if (imm < 0 || imm > 4095) return false;
-        // 8-bit STR unsigned offset: size=00, opc=00
-        encoding = (0x39u << 24) | (0u << 22) | ((imm & 0xFFF) << 10) | (base << 5) | rd;
-        return true;
-    }
-    if (std::sscanf(args, "%7s, %7s", rt, rn) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        encoding = (0x39u << 24) | (0u << 22) | (0u << 10) | (base << 5) | rd;
-        return true;
-    }
-    return false;
+    const char* comma = strchr(args, ',');
+    if (!comma) return false;
+    char rt[16];
+    size_t len = static_cast<size_t>(comma - args);
+    if (len >= sizeof(rt)) return false;
+    memcpy(rt, args, len); rt[len] = 0;
+    int rd = parseRegister(rt);
+    if (rd < 0 || rd > 31) return false;
+
+    uint32_t base; int64_t imm; bool hasImm;
+    if (!parseMemOperand(comma + 1, base, imm, hasImm)) return false;
+    if (hasImm && (imm < 0 || imm > 4095)) return false;
+    uint32_t imm12 = hasImm ? static_cast<uint32_t>(imm) : 0;
+    // 8-bit STR unsigned offset: size=00, opc=00
+    encoding = (0x39u << 24) | (0u << 22) | (imm12 << 10) | (base << 5) | static_cast<uint32_t>(rd);
+    return true;
 }
 
 static bool encodeLDRH(const char* args, uint32_t& encoding) {
-    char rt[8], rn[8];
-    int imm = 0;
-    if (std::sscanf(args, "%7s, %7s, #%d", rt, rn, &imm) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        if (imm < 0 || imm > 4095) return false;
-        // 16-bit LDR unsigned offset: size=01, opc=01
-        encoding = (0x79u << 24) | (1u << 22) | ((imm & 0xFFF) << 10) | (base << 5) | rd;
-        return true;
-    }
-    if (std::sscanf(args, "%7s, %7s", rt, rn) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        encoding = (0x79u << 24) | (1u << 22) | (0u << 10) | (base << 5) | rd;
-        return true;
-    }
-    return false;
+    // LDRH Wt, [Xn, #imm12]  - 16-bit
+    const char* comma = strchr(args, ',');
+    if (!comma) return false;
+    char rt[16];
+    size_t len = static_cast<size_t>(comma - args);
+    if (len >= sizeof(rt)) return false;
+    memcpy(rt, args, len); rt[len] = 0;
+    int rd = parseRegister(rt);
+    if (rd < 0 || rd > 31) return false;
+
+    uint32_t base; int64_t imm; bool hasImm;
+    if (!parseMemOperand(comma + 1, base, imm, hasImm)) return false;
+    if (hasImm && (imm < 0 || imm > 4095)) return false;
+    uint32_t imm12 = hasImm ? static_cast<uint32_t>(imm) : 0;
+    // 16-bit LDR unsigned offset: size=01, opc=01
+    encoding = (0x79u << 24) | (1u << 22) | (imm12 << 10) | (base << 5) | static_cast<uint32_t>(rd);
+    return true;
 }
 
 static bool encodeSTRH(const char* args, uint32_t& encoding) {
-    char rt[8], rn[8];
-    int imm = 0;
-    if (std::sscanf(args, "%7s, %7s, #%d", rt, rn, &imm) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        if (imm < 0 || imm > 4095) return false;
-        // 16-bit STR unsigned offset: size=01, opc=00
-        encoding = (0x79u << 24) | (0u << 22) | ((imm & 0xFFF) << 10) | (base << 5) | rd;
-        return true;
-    }
-    if (std::sscanf(args, "%7s, %7s", rt, rn) >= 2) {
-        uint32_t rd = parseRegister(rt);
-        uint32_t base = parseRegister(rn);
-        if (rd > 31 || base > 31) return false;
-        encoding = (0x79u << 24) | (0u << 22) | (0u << 10) | (base << 5) | rd;
-        return true;
-    }
-    return false;
+    const char* comma = strchr(args, ',');
+    if (!comma) return false;
+    char rt[16];
+    size_t len = static_cast<size_t>(comma - args);
+    if (len >= sizeof(rt)) return false;
+    memcpy(rt, args, len); rt[len] = 0;
+    int rd = parseRegister(rt);
+    if (rd < 0 || rd > 31) return false;
+
+    uint32_t base; int64_t imm; bool hasImm;
+    if (!parseMemOperand(comma + 1, base, imm, hasImm)) return false;
+    if (hasImm && (imm < 0 || imm > 4095)) return false;
+    uint32_t imm12 = hasImm ? static_cast<uint32_t>(imm) : 0;
+    // 16-bit STR unsigned offset: size=01, opc=00
+    encoding = (0x79u << 24) | (0u << 22) | (imm12 << 10) | (base << 5) | static_cast<uint32_t>(rd);
+    return true;
 }
 
 static bool encodeLDP(const char* args, uint32_t& encoding) {
-    // LDP Xt1, Xt2, [Xn, #imm7]
-    // 1010 1001 0.. .... .... .... .... .... (64-bit, signed offset, imm7 scaled by 8)
-    char rt1[8], rt2[8], rn[8];
-    int imm = 0;
-    if (std::sscanf(args, "%7s, %7s, %7s, #%d", rt1, rt2, rn, &imm) >= 3) {
-        uint32_t t1 = parseRegister(rt1);
-        uint32_t t2 = parseRegister(rt2);
-        uint32_t base = parseRegister(rn);
-        if (t1 > 31 || t2 > 31 || base > 31) return false;
-        // imm7 是有符号，以 8 字节为单位
-        int32_t imm7 = imm / 8;
-        if (imm7 < -64 || imm7 > 63) return false;
-        encoding = (0xA9u << 24) | (0u << 22) | ((imm7 & 0x7F) << 15) | (t2 << 10) | (base << 5) | t1;
-        return true;
-    }
-    return false;
+    // LDP Xt1, Xt2, [Xn, #imm]  (64-bit, signed offset, imm scaled by 8) / [Xn]
+    const char* comma1 = strchr(args, ',');
+    if (!comma1) return false;
+    const char* comma2 = strchr(comma1 + 1, ',');
+    if (!comma2) return false;
+    char t1[16], t2[16];
+    size_t l1 = static_cast<size_t>(comma1 - args);
+    size_t l2 = static_cast<size_t>(comma2 - (comma1 + 1));
+    if (l1 >= sizeof(t1) || l2 >= sizeof(t2)) return false;
+    memcpy(t1, args, l1); t1[l1] = 0;
+    memcpy(t2, comma1 + 1, l2); t2[l2] = 0;
+    int r1 = parseRegister(t1);
+    int r2 = parseRegister(t2);
+    if (r1 < 0 || r1 > 31 || r2 < 0 || r2 > 31) return false;
+
+    uint32_t base; int64_t imm; bool hasImm;
+    if (!parseMemOperand(comma2 + 1, base, imm, hasImm)) return false;
+    int64_t imm7 = hasImm ? (imm / 8) : 0;
+    if (imm7 < -64 || imm7 > 63) return false;
+    // 64-bit LDP signed offset
+    encoding = (0xA9u << 24) | (0u << 22) | ((static_cast<uint32_t>(imm7) & 0x7F) << 15) |
+               (static_cast<uint32_t>(r2) << 10) | (base << 5) | static_cast<uint32_t>(r1);
+    return true;
 }
 
 static bool encodeSTP(const char* args, uint32_t& encoding) {
-    // STP Xt1, Xt2, [Xn, #imm7]
-    // 1010 1001 0.. .... .... .... .... .... (64-bit, signed offset, imm7 scaled by 8)
-    char rt1[8], rt2[8], rn[8];
-    int imm = 0;
-    if (std::sscanf(args, "%7s, %7s, %7s, #%d", rt1, rt2, rn, &imm) >= 3) {
-        uint32_t t1 = parseRegister(rt1);
-        uint32_t t2 = parseRegister(rt2);
-        uint32_t base = parseRegister(rn);
-        if (t1 > 31 || t2 > 31 || base > 31) return false;
-        int32_t imm7 = imm / 8;
-        if (imm7 < -64 || imm7 > 63) return false;
-        encoding = (0xA9u << 24) | (0u << 22) | ((imm7 & 0x7F) << 15) | (t2 << 10) | (base << 5) | t1;
-        return true;
-    }
-    return false;
+    // STP Xt1, Xt2, [Xn, #imm]  (64-bit, signed offset, imm scaled by 8) / [Xn]
+    const char* comma1 = strchr(args, ',');
+    if (!comma1) return false;
+    const char* comma2 = strchr(comma1 + 1, ',');
+    if (!comma2) return false;
+    char t1[16], t2[16];
+    size_t l1 = static_cast<size_t>(comma1 - args);
+    size_t l2 = static_cast<size_t>(comma2 - (comma1 + 1));
+    if (l1 >= sizeof(t1) || l2 >= sizeof(t2)) return false;
+    memcpy(t1, args, l1); t1[l1] = 0;
+    memcpy(t2, comma1 + 1, l2); t2[l2] = 0;
+    int r1 = parseRegister(t1);
+    int r2 = parseRegister(t2);
+    if (r1 < 0 || r1 > 31 || r2 < 0 || r2 > 31) return false;
+
+    uint32_t base; int64_t imm; bool hasImm;
+    if (!parseMemOperand(comma2 + 1, base, imm, hasImm)) return false;
+    int64_t imm7 = hasImm ? (imm / 8) : 0;
+    if (imm7 < -64 || imm7 > 63) return false;
+    // 64-bit STP signed offset
+    encoding = (0xA9u << 24) | (0u << 22) | ((static_cast<uint32_t>(imm7) & 0x7F) << 15) |
+               (static_cast<uint32_t>(r2) << 10) | (base << 5) | static_cast<uint32_t>(r1);
+    return true;
 }
 
 // --- 整数运算 (Data Processing - Immediate) ---

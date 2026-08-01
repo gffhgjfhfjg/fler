@@ -308,8 +308,9 @@ class SoEditorViewModel @Inject constructor(
     /**
      * 从文件读取字节并反汇编（分段，每页 4096 字节）。
      *
-     * 自研解码器优先（[Arm64EncoderBindings.disassemble]）；当自研解码结果全为
-     * `.word`（未识别）时，回退到引擎包中的 Capstone（[CapstoneBindings.disassembleWithCapstone]）。
+     * 优先用引擎包已加载的 libcapstone.so（[CapstoneBindings.disassembleWithCapstone]，
+     * 完整正确的 ARM64 反汇编）；引擎包不可用（返回 null）时回退自研解码器
+     * [Arm64EncoderBindings.disassemble]。
      * 保留 [DisassemblyDataState.highlightAddress]（若已设置），便于编辑/撤销后刷新仍高亮。
      */
     fun loadDisassembly(offset: Long, size: Long = DISASM_PAGE_SIZE) {
@@ -322,17 +323,11 @@ class SoEditorViewModel @Inject constructor(
                     if (bytes.isEmpty()) {
                         emptyList<com.ai.fler.core.jni.DisasmInstruction>()
                     } else {
-                        // 自研解码优先
-                        val selfDev = Arm64EncoderBindings().disassemble(bytes, offset)
-                        if (selfDev.isNotEmpty() && selfDev.all { it.mnemonic == ".word" }) {
-                            // 自研全 .word（无法识别）→ Capstone 兜底
-                            val capstonePath = engineLoader.engineDirectory()
-                                .resolve("lib/libcapstone.so").absolutePath
-                            CapstoneBindings.disassembleWithCapstone(capstonePath, bytes, offset)
-                                ?: selfDev
-                        } else {
-                            selfDev
-                        }
+                        // Capstone 解码优先（完整正确）；不可用时回退自研解码器
+                        val capstonePath = engineLoader.engineDirectory()
+                            .resolve("lib/libcapstone.so").absolutePath
+                        CapstoneBindings.disassembleWithCapstone(capstonePath, bytes, offset)
+                            ?: Arm64EncoderBindings().disassemble(bytes, offset)
                     }
                 }
                 _disassemblyData.value = DisassemblyDataState(
