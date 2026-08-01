@@ -3,6 +3,7 @@ package com.ai.fler.features.output
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -51,6 +53,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ai.fler.data.dao.MethodWithClass
 import com.ai.fler.feature.output.AsmListViewModel
+import com.ai.fler.ui.components.ShimmerBox
 import kotlinx.coroutines.launch
 
 /**
@@ -114,8 +117,20 @@ fun AsmListScreen(
         ) {
             when {
                 uiState.isLoading -> {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("加载中...")
+                    // 加载骨架屏（shimmer 占位行）
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        repeat(8) {
+                            ShimmerBox(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(56.dp)
+                            )
+                        }
                     }
                 }
 

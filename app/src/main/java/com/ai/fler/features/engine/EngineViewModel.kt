@@ -63,9 +63,10 @@ class EngineViewModel @Inject constructor(
 
     /**
      * 启动引擎包下载。
-     * 在 ViewModel 中观察下载进度并更新 UI。
+     *
+     * @param force 为 true 时强制重新下载（「下载更新」用），即使已就绪也重下。
      */
-    fun startDownload() {
+    fun startDownload(force: Boolean = false) {
         if (_uiState.value.isDownloading) return
 
         _uiState.value = _uiState.value.copy(
@@ -74,7 +75,7 @@ class EngineViewModel @Inject constructor(
         )
 
         viewModelScope.launch {
-            enginePackManager.ensureEnginesReady().collectLatest { progress ->
+            enginePackManager.ensureEnginesReady(force).collectLatest { progress ->
                 _uiState.value = _uiState.value.copy(
                     progress = progress,
                     isDownloading = progress.phase == EnginePackManager.EngineProgress.Phase.DOWNLOADING ||

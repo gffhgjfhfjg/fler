@@ -1,12 +1,17 @@
 package com.ai.fler.app.navigation
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -53,7 +58,7 @@ import kotlinx.coroutines.launch
 private val tabIcons: Map<Screen, ImageVector> = mapOf(
     Screen.Projects to Icons.Outlined.Folder,
     Screen.SoEditor to Icons.Outlined.Memory,
-    Screen.McpLog to Icons.Outlined.Terminal,
+    Screen.McpLog to Icons.Outlined.Article,
     Screen.Settings to Icons.Outlined.Settings,
 )
 
@@ -144,7 +149,17 @@ fun AppNavGraph() {
                                 Icon(imageVector = icon, contentDescription = null)
                             }
                         },
-                        label = { Text(stringResource(tabLabels[tab]!!)) },
+                        // 默认只显示图标；选中该页时才淡入显示文字
+                        alwaysShowLabel = false,
+                        label = {
+                            AnimatedVisibility(
+                                visible = isSelected,
+                                enter = fadeIn(),
+                                exit = fadeOut()
+                            ) {
+                                Text(stringResource(tabLabels[tab]!!))
+                            }
+                        },
                     )
                 }
             }
@@ -237,7 +252,11 @@ fun AppNavGraph() {
             // 点击方法 → AsmBrowser（查看 src_code），AsmBrowser 内「在 SO 中编辑」→ SO 编辑器。
             composable(
                 route = Screen.AsmList.route,
-                arguments = listOf(navArgument("analysisId") { type = NavType.LongType })
+                arguments = listOf(navArgument("analysisId") { type = NavType.LongType }),
+                enterTransition = { slideInHorizontally(initialOffsetX = { it }) + fadeIn() },
+                exitTransition = { fadeOut() },
+                popEnterTransition = { fadeIn() },
+                popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) + fadeOut() }
             ) { entry ->
                 val analysisId = entry.arguments?.getLong("analysisId") ?: 0L
                 AsmListScreen(
@@ -256,7 +275,11 @@ fun AppNavGraph() {
                 arguments = listOf(
                     navArgument("analysisId") { type = NavType.LongType },
                     navArgument("methodId") { type = NavType.LongType }
-                )
+                ),
+                enterTransition = { slideInHorizontally(initialOffsetX = { it }) + fadeIn() },
+                exitTransition = { fadeOut() },
+                popEnterTransition = { fadeIn() },
+                popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) + fadeOut() }
             ) { entry ->
                 val analysisId = entry.arguments?.getLong("analysisId") ?: 0L
                 val methodId = entry.arguments?.getLong("methodId") ?: 0L

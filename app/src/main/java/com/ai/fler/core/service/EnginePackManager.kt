@@ -44,6 +44,7 @@ class EnginePackManager @Inject constructor(
 
     companion object {
         private const val TAG = "FlerEngine"
+        private const val KEY_INSTALLED_PACK_VERSION = "installed_pack_version"
 
         /** 下载+SHA256 校验的最大尝试次数（失败自动重试）。 */
         private const val MAX_DOWNLOAD_ATTEMPTS = 3
@@ -92,6 +93,14 @@ class EnginePackManager @Inject constructor(
     private val _versionsEpoch = MutableStateFlow(0L)
     val versionsEpoch: StateFlow<Long> = _versionsEpoch.asStateFlow()
 
+    /** 已安装引擎包版本（Fix 2：装完新版本后更新检测不再提示；缺省回退内置版本）。 */
+    private var installedPackVersion: String
+        get() = prefs().getString(KEY_INSTALLED_PACK_VERSION, null)
+            ?: EngineSourceConfig.ENGINE_PACKAGE_VERSION
+        set(value) = prefs().edit().putString(KEY_INSTALLED_PACK_VERSION, value).apply()
+
+    private fun prefs() = context.getSharedPreferences("engine_pack", Context.MODE_PRIVATE)
+
     /** 通知已安装引擎版本发生变化（下载完成 / 清除）。 */
     fun notifyVersionsChanged() {
         _versionsEpoch.value++
@@ -139,8 +148,13 @@ class EnginePackManager @Inject constructor(
      *
      * @return Flow<EngineProgress> 进度流
      */
-    fun ensureEnginesReady(): Flow<EngineProgress> = channelFlow {
-        if (isEnginePackReady()) {
+    /**
+     * 确保引擎包就绪：未就绪时下载 + 校验 + 解压。
+     *
+     * @param force 为 true 时强制重新下载（「下载更新」用），跳过已就绪短路。
+     */
+    fun ensureEnginesReady(force: Boolean = false): Flow<EngineProgress> = channelFlow {
+        if (!force && isEnginePackReady()) {
             Log.i(TAG, "引擎包已就绪，跳过下载")
             send(EngineProgress(EngineProgress.Phase.COMPLETED))
             return@channelFlow
@@ -270,6 +284,8 @@ class EnginePackManager @Inject constructor(
             send(EngineProgress(EngineProgress.Phase.COMPLETED))
             _progress.value = EngineProgress(EngineProgress.Phase.COMPLETED)
             notifyVersionsChanged()
+            // Fix 2：记录本次实际安装的引擎包版本，避免更新后仍提示「发现新版本」
+            remote?.let { installedPackVersion = it.version }
 
         } catch (e: Exception) {
             Log.e(TAG, "引擎包准备失败: ${e.message}", e)
@@ -293,9 +309,9 @@ class EnginePackManager @Inject constructor(
             val installed = listInstalledVersions()
 
             // 判断是否需要更新：
-            // 1. 远程引擎版本号与本地内置版本标识不同（引擎分析逻辑升级但支持版本不变也检出）；
+            // 1. 远程引擎版本号与「已安装引擎包版本」不同（装完新版本后不再提示）；
             // 2. 远程支持版本包含本地未安装的 Dart 版本。
-            val hasNewVersion = remote.version != EngineSourceConfig.ENGINE_PACKAGE_VERSION ||
+            val hasNewVersion = remote.version != installedPackVersion ||
                 remote.dartVersions.any { !installed.contains(it) }
 
             if (!hasNewVersion && installed.isNotEmpty()) {

@@ -1,5 +1,12 @@
 package com.ai.fler.features.project
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +34,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -461,30 +469,57 @@ private fun AnalysisProgressDialog(
             if (progress.stage == AnalysisStage.Failed) onDismiss()
         },
         title = {
-            Text(
-                text = when (progress.stage) {
-                    AnalysisStage.Extracting -> "正在提取文件"
-                    AnalysisStage.DetectingVersion -> "正在检测版本"
-                    AnalysisStage.LoadingEngine -> "正在加载引擎"
-                    AnalysisStage.Analyzing -> "正在分析"
-                    AnalysisStage.SavingResults -> "正在保存结果"
-                    AnalysisStage.Failed -> "分析失败"
-                    else -> "处理中"
+            // 阶段切换：标题淡入淡出 + 轻微位移；保存结果阶段标题旁加旋转 spinner
+            AnimatedContent(
+                targetState = progress.stage,
+                transitionSpec = {
+                    (fadeIn() + slideInVertically(initialOffsetY = { it / 4 })) togetherWith
+                        (fadeOut() + slideOutVertically(targetOffsetY = { -it / 4 }))
                 },
-                style = MaterialTheme.typography.titleMedium
-            )
+                label = "stage-title"
+            ) { stage ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = when (stage) {
+                            AnalysisStage.Extracting -> "正在提取文件"
+                            AnalysisStage.DetectingVersion -> "正在检测版本"
+                            AnalysisStage.LoadingEngine -> "正在加载引擎"
+                            AnalysisStage.Analyzing -> "正在分析"
+                            AnalysisStage.SavingResults -> "正在保存结果"
+                            AnalysisStage.Failed -> "分析失败"
+                            else -> "处理中"
+                        },
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    if (stage == AnalysisStage.SavingResults) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    }
+                }
+            }
         },
         text = {
             Column {
+                // 进度条平滑过渡（阶段间不再跳变）
+                val animatedProgress by animateFloatAsState(targetValue = progress.progress)
                 LinearProgressIndicator(
-                    progress = { progress.progress },
+                    progress = { animatedProgress },
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = progress.message,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                AnimatedContent(
+                    targetState = progress.message,
+                    transitionSpec = { fadeIn() togetherWith fadeOut() },
+                    label = "stage-msg"
+                ) { msg ->
+                    Text(
+                        text = msg,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
                 if (progress.error != null) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(

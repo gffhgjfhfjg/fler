@@ -104,7 +104,7 @@ fun SettingsScreen(
                 onCheckForUpdates = { viewModel.checkForUpdates() },
                 onClearEngines = { viewModel.clearEngines() },
                 onStartDownload = { engineViewModel.startDownload() },
-                onDownloadUpdate = { engineViewModel.startDownload() },
+                onDownloadUpdate = { engineViewModel.startDownload(force = true) },
             )
         }
 
@@ -446,7 +446,7 @@ private fun EngineVersionCard(
 
             // 说明
             Text(
-                text = "引擎包包含 12 个 Dart 版本的分析引擎 + Capstone 反汇编库，约 10-14 MB。" +
+                text = "引擎包包含多个Dart版本的分析引擎 + Capstone 反汇编库，约 10-14 MB。" +
                         "首次使用需下载，后续启动自动检测就绪状态。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

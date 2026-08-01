@@ -3,7 +3,14 @@ package com.ai.fler.features.project
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -389,22 +396,49 @@ private fun AnalysisProgressDialog(
             }
         },
         title = {
-            Text(
-                text = getStageTitle(progress.stage),
-                style = MaterialTheme.typography.titleMedium
-            )
+            // 阶段切换：标题淡入淡出 + 轻微位移；保存结果阶段标题旁加旋转 spinner
+            AnimatedContent(
+                targetState = progress.stage,
+                transitionSpec = {
+                    (fadeIn() + slideInVertically(initialOffsetY = { it / 4 })) togetherWith
+                        (fadeOut() + slideOutVertically(targetOffsetY = { -it / 4 }))
+                },
+                label = "stage-title"
+            ) { stage ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = getStageTitle(stage),
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    if (stage == AnalysisStage.SavingResults) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    }
+                }
+            }
         },
         text = {
             Column {
+                // 进度条平滑过渡（阶段间不再跳变）
+                val animatedProgress by animateFloatAsState(targetValue = progress.progress)
                 LinearProgressIndicator(
-                    progress = { progress.progress },
+                    progress = { animatedProgress },
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = progress.message,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                AnimatedContent(
+                    targetState = progress.message,
+                    transitionSpec = { fadeIn() togetherWith fadeOut() },
+                    label = "stage-msg"
+                ) { msg ->
+                    Text(
+                        text = msg,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
                 if (progress.error != null) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
