@@ -532,6 +532,21 @@ class SoEditorViewModel @Inject constructor(
         )
     }
 
+    /**
+     * 通过 SAF 导出「修改后的 SO」二进制到用户指定位置。
+     *
+     * 编辑器把补丁直接写入工作文件（[currentFilePath]），因此将其复制到目标即为补丁后的 SO。
+     * 无补丁或未打开文件时返回 false。
+     *
+     * @param uri SAF CreateDocument 返回的 Uri
+     * @return 是否成功
+     */
+    suspend fun exportSoToUri(uri: Uri): Boolean {
+        if (!_uiState.value.isFileOpen) return false
+        if (backupManager.getPatchRecords().isEmpty()) return false
+        return patchExporter.exportSoToUri(uri, File(currentFilePath))
+    }
+
     // ========== 内部工具 ==========
 
     /**

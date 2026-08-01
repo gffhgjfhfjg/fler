@@ -9,11 +9,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ProgressIndicatorDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,7 +22,6 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ai.fler.core.service.EnginePackManager
-import com.ai.fler.ui.components.CardListTile
 
 /**
  * 引擎下载/管理页面。
@@ -46,17 +43,6 @@ fun EngineDownloadScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text(text = "引擎包", style = MaterialTheme.typography.headlineMedium)
-
-        // 引擎就绪状态
-        CardListTile(
-            title = if (uiState.isReady) "✅ 引擎已就绪" else "⚠️ 引擎未就绪",
-            subtitle = if (uiState.isReady) {
-                "已安装 ${uiState.installedVersions.size} 个 Dart 版本"
-            } else {
-                "需要下载引擎包才能分析 APK"
-            },
-            onClick = {},
-        )
 
         // 自定义下载源提示
         if (uiState.isCustomSource) {
@@ -114,34 +100,17 @@ fun EngineDownloadScreen(
             )
         }
 
-        // 操作按钮
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (!uiState.isReady || uiState.isDownloading) {
-                Button(
-                    onClick = {
-                        onStartDownload()
-                        viewModel.startDownload()
-                    },
-                    enabled = !uiState.isDownloading,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text(if (uiState.isDownloading) "下载中..." else "下载引擎包")
-                }
-            }
-
-            if (uiState.isReady) {
-                OutlinedButton(
-                    onClick = { viewModel.clearEngines() },
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error,
-                    ),
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("清除引擎")
-                }
+        // 下载引擎包
+        if (!uiState.isReady || uiState.isDownloading) {
+            Button(
+                onClick = {
+                    onStartDownload()
+                    viewModel.startDownload()
+                },
+                enabled = !uiState.isDownloading,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (uiState.isDownloading) "下载中..." else "下载引擎包")
             }
         }
 

@@ -32,6 +32,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -46,8 +48,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -114,6 +118,18 @@ fun SoEditorScreen(
         }
     }
 
+    // SAF CreateDocument：导出修改后的 SO 二进制
+    val createSoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri: Uri? ->
+        uri?.let {
+            scope.launch {
+                val ok = viewModel.exportSoToUri(it)
+                snackbarHostState.showSnackbar(if (ok) "已导出修改后的 SO" else "无补丁可导出")
+            }
+        }
+    }
+
     // 如果有传入路径且未打开，打开文件
     LaunchedEffect(filePath) {
         if (filePath.isNotBlank() && !uiState.isFileOpen && !uiState.isLoading) {
@@ -172,20 +188,43 @@ fun SoEditorScreen(
                         )
                     }
 
-                    // 导出补丁按钮（SAF 让用户选保存位置，默认文件名含时间戳）
-                    IconButton(
-                        onClick = {
-                            val name = uiState.fileName.removeSuffix(".so")
-                            val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
-                                .format(java.util.Date())
-                            createDocLauncher.launch("${name}_$ts.patch")
-                        },
-                        enabled = uiState.isFileOpen
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FileUpload,
-                            contentDescription = "导出补丁"
-                        )
+                    // 导出菜单（补丁 / 修改后的 SO）
+                    var showExportMenu by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(
+                            onClick = { showExportMenu = true },
+                            enabled = uiState.isFileOpen
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FileUpload,
+                                contentDescription = "导出"
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showExportMenu,
+                            onDismissRequest = { showExportMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("导出补丁 (.patch)") },
+                                onClick = {
+                                    showExportMenu = false
+                                    val name = uiState.fileName.removeSuffix(".so")
+                                    val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                                        .format(java.util.Date())
+                                    createDocLauncher.launch("${name}_$ts.patch")
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("导出修改后的 SO (.so)") },
+                                onClick = {
+                                    showExportMenu = false
+                                    val name = uiState.fileName.removeSuffix(".so")
+                                    val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                                        .format(java.util.Date())
+                                    createSoLauncher.launch("${name}_patched_$ts.so")
+                                }
+                            )
+                        }
                     }
                 }
             )

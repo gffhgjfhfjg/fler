@@ -213,6 +213,18 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
+     * 清除已安装引擎包（版本列表经 versionsEpoch 自动刷新）。
+     */
+    fun clearEngines() {
+        viewModelScope.launch {
+            try {
+                enginePackManager.clearEngines()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
      * 保存下载源配置。
      */
     fun saveSourceConfig(

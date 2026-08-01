@@ -140,7 +140,7 @@ class PatchExporter @Inject constructor(
     }
 
     /**
-     * 导出补丁到应用缓存目录（用于分享）。
+     * 导出补丁应用到应用缓存目录（用于分享）。
      *
      * @param soFileName 目标 SO 文件名
      * @param records 补丁记录列表
@@ -165,6 +165,33 @@ class PatchExporter @Inject constructor(
             patchFile
         } catch (e: Exception) {
             null
+        }
+    }
+
+    /**
+     * 导出「修改后的 SO」二进制到 SAF 指定文件 Uri（CreateDocument）。
+     *
+     * 编辑器把补丁直接写入工作文件，因此把工作文件复制到用户选择的位置即为补丁后的 SO。
+     *
+     * @param uri SAF CreateDocument 返回的文件 Uri
+     * @param sourceFile 已应用补丁的 SO 文件
+     * @return 是否成功
+     */
+    suspend fun exportSoToUri(
+        uri: Uri,
+        sourceFile: File
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            if (!sourceFile.exists() || !sourceFile.isFile) return@withContext false
+            context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                sourceFile.inputStream().use { input ->
+                    input.copyTo(outputStream)
+                }
+                outputStream.flush()
+                true
+            } ?: false
+        } catch (e: Exception) {
+            false
         }
     }
 }

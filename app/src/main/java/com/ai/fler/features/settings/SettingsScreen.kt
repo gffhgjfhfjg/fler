@@ -21,9 +21,11 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -94,7 +97,8 @@ fun SettingsScreen(
             UpdateCheckCard(
                 state = updateState,
                 installedVersions = installedVersions,
-                onCheckForUpdates = { viewModel.checkForUpdates() }
+                onCheckForUpdates = { viewModel.checkForUpdates() },
+                onClearEngines = { viewModel.clearEngines() }
             )
         }
 
@@ -156,7 +160,8 @@ fun SettingsScreen(
 private fun UpdateCheckCard(
     state: com.ai.fler.feature.settings.UpdateCheckState,
     installedVersions: List<String>,
-    onCheckForUpdates: () -> Unit
+    onCheckForUpdates: () -> Unit,
+    onClearEngines: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -195,31 +200,67 @@ private fun UpdateCheckCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 当前引擎版本（单卡片，不再展示完整已安装版本列表）
-            val currentVersion = installedVersions.firstOrNull()
-            if (currentVersion != null) {
+            // 状态图标 + 当前引擎
+            if (installedVersions.isNotEmpty()) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.CheckCircle,
-                        contentDescription = null,
+                        contentDescription = "引擎就绪",
                         tint = MaterialTheme.colorScheme.tertiary,
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = "当前引擎: Dart $currentVersion",
+                        text = "引擎就绪",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.Medium
                     )
                 }
             } else {
-                Text(
-                    text = "尚未安装任何引擎",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "引擎未就绪",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "引擎未就绪，需下载引擎包",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+
+            // 已安装版本号（紧凑小字列出）
+            if (installedVersions.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                installedVersions.forEach { version ->
+                    Text(
+                        text = "Dart $version",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 22.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onClearEngines,
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("清除引擎")
+                }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
