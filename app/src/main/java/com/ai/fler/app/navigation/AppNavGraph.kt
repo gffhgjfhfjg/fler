@@ -1,6 +1,5 @@
 package com.ai.fler.app.navigation
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -149,17 +148,9 @@ fun AppNavGraph() {
                                 Icon(imageVector = icon, contentDescription = null)
                             }
                         },
-                        // 默认只显示图标；选中该页时才淡入显示文字
+                        // 默认只显示图标；选中该页时才显示文字（M3 内置 label 动画）
                         alwaysShowLabel = false,
-                        label = {
-                            AnimatedVisibility(
-                                visible = isSelected,
-                                enter = fadeIn(),
-                                exit = fadeOut()
-                            ) {
-                                Text(stringResource(tabLabels[tab]!!))
-                            }
-                        },
+                        label = { Text(stringResource(tabLabels[tab]!!)) },
                     )
                 }
             }

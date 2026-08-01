@@ -165,9 +165,7 @@ class EnginePackManager @Inject constructor(
 
             // 获取远程版本信息：优先用 version.json 的下载/校验地址（方案 B），失败回退默认源
             val remote = downloader.fetchVersionInfo()
-            val downloadUrls = remote?.downloadUrl?.let {
-                listOf(it, sourceConfig.primaryUrl, sourceConfig.fallbackUrl)
-            }
+            val downloadUrls = remote?.downloadUrl?.let { listOf(it) }
             val checksumUrl = remote?.checksumUrl?.takeIf { it.isNotBlank() }
                 ?: sourceConfig.checksumUrl
 

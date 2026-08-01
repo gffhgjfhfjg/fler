@@ -31,7 +31,7 @@ class DualSourceDownloader @Inject constructor(
      * @param target 目标文件路径
      * @param onProgress 进度回调：(已下载字节, 总字节, 速度字符串)
      * @param urls 候选下载地址；缺省用 [EngineSourceConfig.primaryUrl] / [EngineSourceConfig.fallbackUrl]。
-     *        主下载（第一个）走 GitHub 加速代理，备用下载保持原始 GitHub 地址。
+     *        代理开启时：主下载 = 代理前缀 URL，备用 = 同一文件的原始 GitHub 地址。
      * @return 下载完成后的文件
      * @throws IllegalStateException 所有源均下载失败
      */
@@ -40,10 +40,14 @@ class DualSourceDownloader @Inject constructor(
         onProgress: (downloaded: Long, total: Long, speed: String) -> Unit,
         urls: List<String>? = null,
     ): File = withContext(Dispatchers.IO) {
-        val fallback = urls?.getOrNull(1) ?: sourceConfig.fallbackUrl
         val main = urls?.firstOrNull() ?: sourceConfig.primaryUrl
-        // 主下载走代理（resolveUrl），备用保持原始 GitHub 地址
-        val candidates = listOf(resolveUrl(main), fallback)
+        val resolved = resolveUrl(main)
+        // 代理主 + 原始备用（同一文件）；显式目标（如更新下载）无代理时只取目标；默认主/备
+        val candidates = when {
+            resolved != main -> listOf(resolved, main)
+            urls != null -> listOf(main)
+            else -> listOf(main, sourceConfig.fallbackUrl)
+        }
         var lastException: Exception? = null
 
         for (url in candidates) {
@@ -235,7 +239,8 @@ class DualSourceDownloader @Inject constructor(
         if (proxy.isBlank()) return url
         if (!isGithubUrl(url)) return url
         if (url.startsWith(proxy)) return url
-        return "$proxy$url"
+        // 代理前缀统一无尾斜杠，需补分隔符：https://gh-proxy.com/https://github.com/...
+        return "$proxy/$url"
     }
 
     private fun isGithubUrl(url: String): Boolean {
