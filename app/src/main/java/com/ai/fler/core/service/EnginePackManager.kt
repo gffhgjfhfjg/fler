@@ -279,8 +279,11 @@ class EnginePackManager @Inject constructor(
             val remote = downloader.fetchVersionInfo() ?: return@withContext null
             val installed = listInstalledVersions()
 
-            // 判断是否需要更新：远程版本包含本地未安装的 Dart 版本
-            val hasNewVersion = remote.dartVersions.any { !installed.contains(it) }
+            // 判断是否需要更新：
+            // 1. 远程引擎版本号与本地内置版本标识不同（引擎分析逻辑升级但支持版本不变也检出）；
+            // 2. 远程支持版本包含本地未安装的 Dart 版本。
+            val hasNewVersion = remote.version != EngineSourceConfig.ENGINE_PACKAGE_VERSION ||
+                remote.dartVersions.any { !installed.contains(it) }
 
             if (!hasNewVersion && installed.isNotEmpty()) {
                 return@withContext null

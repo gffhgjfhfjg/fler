@@ -426,19 +426,30 @@ class SoEditorViewModel @Inject constructor(
     /**
      * 设置/清除高亮地址（编辑或撤销后调用，让 UI 高亮被修改的指令行）。
      *
-     * 高亮为临时闪烁：设置后 1 秒自动清除。
+     * 高亮为快速闪烁：亮 150ms / 灭 100ms，约 4 个周期后彻底熄灭。
      */
     fun setHighlightAddress(address: Long?) {
+        if (address == null) {
+            _flashOffset.value = null
+            _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = null)
+            return
+        }
         _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = address)
         _flashOffset.value = address
-        if (address != null) {
-            viewModelScope.launch {
-                delay(1000)
-                if (_flashOffset.value == address) {
-                    _flashOffset.value = null
-                }
-                if (_disassemblyData.value.highlightAddress == address) {
-                    _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = null)
+        viewModelScope.launch {
+            val blinkOn = 150L
+            val blinkOff = 100L
+            val cycles = 4
+            for (i in 0 until cycles) {
+                delay(blinkOn)
+                if (_flashOffset.value != address) return@launch
+                _flashOffset.value = null
+                _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = null)
+                if (i < cycles - 1) {
+                    delay(blinkOff)
+                    if (_flashOffset.value != address) return@launch
+                    _flashOffset.value = address
+                    _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = address)
                 }
             }
         }

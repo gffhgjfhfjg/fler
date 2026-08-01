@@ -27,7 +27,8 @@ class EngineSourceConfig @Inject constructor(
         const val DEFAULT_PRIMARY_URL = "https://github.com/myfler/fler-dart/releases/download/v0.3.10/fler-engines.7z"
         const val DEFAULT_FALLBACK_URL = "https://github.com/myfler/fler-dart/releases/download/v0.3.10/fler-engines.7z"
         const val DEFAULT_CHECKSUM_URL = "https://github.com/myfler/fler-dart/releases/download/v0.3.10/checksums.txt"
-        const val DEFAULT_VERSION_URL = ""
+        // 版本信息 JSON（稳定地址，永远指向 fler-dart main 分支的最新版本）
+        const val DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/myfler/fler-dart/main/version.json"
 
         /** 引擎包版本标识（用于项目卡片 Engine 展示；随默认源升级时同步更新）。 */
         const val ENGINE_PACKAGE_VERSION = "v0.3.10"

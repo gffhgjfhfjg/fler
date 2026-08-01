@@ -253,12 +253,17 @@ class DualSourceDownloader @Inject constructor(
             // dartVersions 是数组
             val dartVersions = extractJsonArray(json, "dartVersions")
 
+            // downloadUrl 优先取 JSON 字段，缺省回退到主下载源
+            val downloadUrl = extractJsonField(json, "downloadUrl")
+                ?.takeIf { it.isNotBlank() }
+                ?: sourceConfig.primaryUrl
+
             RemoteVersionInfo(
                 version = version,
                 dartVersions = dartVersions,
                 sizeBytes = sizeBytes,
                 releaseNotes = releaseNotes,
-                downloadUrl = sourceConfig.primaryUrl,
+                downloadUrl = downloadUrl,
             )
         } catch (_: Exception) {
             null

@@ -2,7 +2,6 @@ package com.ai.fler.features.so_editor
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,9 +17,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Search
@@ -44,10 +43,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ai.fler.core.jni.DisasmInstruction
@@ -87,6 +87,8 @@ fun DisassemblyTab(
     var searchQuery by remember { mutableStateOf("") }
     // 正在编辑的指令（null 表示对话框未打开）
     var editingInstruction by remember { mutableStateOf<DisasmInstruction?>(null) }
+    // 指令帮助对话框
+    var showAsmHelp by remember { mutableStateOf(false) }
 
     // 初始加载（非方法模式才自动加载默认页；方法模式由调用方主动 loadDisassembly）
     LaunchedEffect(Unit) {
@@ -112,6 +114,7 @@ fun DisassemblyTab(
             },
             searchQuery = searchQuery,
             onSearchQueryChange = { searchQuery = it },
+            onOpenHelp = { showAsmHelp = true },
             showNavigation = !isMethodMode
         )
 
@@ -166,6 +169,7 @@ fun DisassemblyTab(
             // 用 Capstone cs_asm 实时校验编码（需传入指令地址，分支偏移量依赖它）
             onEncode = { asmText -> viewModel.assembleInstruction(asmText, instruction.address) },
             onDismiss = { editingInstruction = null },
+            onOpenHelp = { showAsmHelp = true },
             onApply = { asmText ->
                 // 解析 "MOV W0, #1" -> instruction="MOV", args="W0, #1"
                 val parsed = parseAsmText(asmText)
@@ -194,6 +198,11 @@ fun DisassemblyTab(
                 }
             }
         )
+    }
+
+    // 指令帮助文档
+    if (showAsmHelp) {
+        AsmHelpDialog(onDismiss = { showAsmHelp = false })
     }
 }
 
@@ -261,6 +270,7 @@ private fun InstructionEditDialog(
     instruction: DisasmInstruction,
     onEncode: (String) -> ByteArray?,
     onDismiss: () -> Unit,
+    onOpenHelp: () -> Unit,
     onApply: (String) -> Boolean
 ) {
     // 预填当前指令文本（如 "MOV W0, #0"）
@@ -272,6 +282,7 @@ private fun InstructionEditDialog(
         }
     }
     var input by remember { mutableStateOf(initialText) }
+    var showHelp by remember { mutableStateOf(false) }
 
     // 实时校验（onEncode 依赖 address，地址在对话框生命周期内不变）
     val validation = remember(input, instruction.address) {
@@ -281,7 +292,23 @@ private fun InstructionEditDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("编辑汇编指令") },
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "编辑汇编指令",
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = { showHelp = true }) {
+                    Icon(
+                        imageVector = Icons.Default.HelpOutline,
+                        contentDescription = "指令帮助"
+                    )
+                }
+            }
+        },
         text = {
             Column {
                 Text(
@@ -356,6 +383,10 @@ private fun InstructionEditDialog(
             }
         }
     )
+
+    if (showHelp) {
+        AsmHelpDialog(onDismiss = { showHelp = false })
+    }
 }
 
 @Composable
@@ -367,6 +398,7 @@ private fun DisassemblyNavigationBar(
     onNextPage: () -> Unit,
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
+    onOpenHelp: () -> Unit = {},
     showNavigation: Boolean = true
 ) {
     Column(
@@ -378,7 +410,7 @@ private fun DisassemblyNavigationBar(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(
@@ -394,7 +426,9 @@ private fun DisassemblyNavigationBar(
                 OutlinedTextField(
                     value = inputAddress,
                     onValueChange = onInputAddressChange,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(40.dp),
                     placeholder = { Text("地址 (hex 或 dec)") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
@@ -431,7 +465,9 @@ private fun DisassemblyNavigationBar(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = onSearchQueryChange,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(40.dp),
                 placeholder = { Text("搜索指令...") },
                 leadingIcon = {
                     Icon(
@@ -443,6 +479,15 @@ private fun DisassemblyNavigationBar(
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
             )
+            IconButton(
+                onClick = onOpenHelp,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.HelpOutline,
+                    contentDescription = "指令帮助"
+                )
+            }
         }
     }
 }
@@ -476,8 +521,7 @@ private fun DisassemblyListView(
 
     LazyColumn(
         state = listState,
-        modifier = modifier
-            .horizontalScroll(rememberScrollState()),
+        modifier = modifier,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp)
     ) {
         items(
@@ -522,16 +566,16 @@ private fun DisassemblyRow(
             .padding(horizontal = 16.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 地址列
+        // 地址列（8 位十六进制，紧凑）
         Text(
-            text = "0x${instruction.address.toString(16).uppercase().padStart(16, '0')}",
+            text = "0x${instruction.address.toString(16).uppercase().padStart(8, '0')}",
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
             color = when {
                 isFlash || isPatched -> MaterialTheme.colorScheme.error
                 else -> MaterialTheme.colorScheme.onSurfaceVariant
             },
-            modifier = Modifier.width(130.dp)
+            modifier = Modifier.width(96.dp)
         )
 
         // 字节码列
@@ -545,11 +589,16 @@ private fun DisassemblyRow(
                 isFlash || isPatched -> MaterialTheme.colorScheme.error
                 else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
             },
-            modifier = Modifier.width(120.dp)
+            modifier = Modifier.width(92.dp)
         )
 
-        // 指令列
-        Row(modifier = Modifier.padding(start = 16.dp)) {
+        // 指令列（占剩余宽度，操作数过长省略）
+        Row(
+            modifier = Modifier
+                .padding(start = 12.dp)
+                .weight(1f),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
                 text = instruction.mnemonic.uppercase(),
                 style = MaterialTheme.typography.bodySmall,
@@ -570,6 +619,8 @@ private fun DisassemblyRow(
                 text = instruction.opStr,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 color = when {
                     isFlash -> highlightTextColor
                     isPatched -> MaterialTheme.colorScheme.error

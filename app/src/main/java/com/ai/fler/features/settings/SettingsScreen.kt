@@ -3,6 +3,8 @@ package com.ai.fler.features.settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,11 +21,14 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -101,6 +106,7 @@ fun SettingsScreen(
                 onCheckForUpdates = { viewModel.checkForUpdates() },
                 onClearEngines = { viewModel.clearEngines() },
                 onStartDownload = { engineViewModel.startDownload() },
+                onDownloadUpdate = { engineViewModel.startDownload() },
             )
         }
 
@@ -159,6 +165,7 @@ fun SettingsScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EngineVersionCard(
     state: com.ai.fler.feature.settings.UpdateCheckState,
@@ -167,6 +174,7 @@ private fun EngineVersionCard(
     onCheckForUpdates: () -> Unit,
     onClearEngines: () -> Unit,
     onStartDownload: () -> Unit,
+    onDownloadUpdate: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -205,7 +213,7 @@ private fun EngineVersionCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 状态图标 + 已安装版本号（同一行，图标包住版本号）
+            // 状态图标 + 已安装版本号（芯片装饰）
             if (installedVersions.isNotEmpty()) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -218,11 +226,30 @@ private fun EngineVersionCard(
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = "Dart ${installedVersions.joinToString(", ")}",
+                        text = "引擎就绪",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.Medium
                     )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    installedVersions.forEach { version ->
+                        AssistChip(
+                            onClick = {},
+                            label = { Text("Dart $version") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Memory,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(AssistChipDefaults.IconSize)
+                                )
+                            }
+                        )
+                    }
                 }
             } else {
                 Row(
@@ -375,7 +402,7 @@ private fun EngineVersionCard(
                     Spacer(modifier = Modifier.height(8.dp))
 
                     Button(
-                        onClick = { /* 触发引擎下载流程 */ },
+                        onClick = onDownloadUpdate,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(
