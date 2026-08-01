@@ -48,7 +48,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.ai.fler.core.jni.Arm64EncoderBindings
 import com.ai.fler.core.jni.DisasmInstruction
 import kotlinx.coroutines.launch
 
@@ -157,6 +156,8 @@ fun DisassemblyTab(
     editingInstruction?.let { instruction ->
         InstructionEditDialog(
             instruction = instruction,
+            // 用 Capstone cs_asm 实时校验编码（需传入指令地址，分支偏移量依赖它）
+            onEncode = { asmText -> viewModel.assembleInstruction(asmText, instruction.address) },
             onDismiss = { editingInstruction = null },
             onApply = { asmText ->
                 // 解析 "MOV W0, #1" -> instruction="MOV", args="W0, #1"
@@ -213,6 +214,8 @@ private fun parseAsmText(text: String): Pair<String, String>? {
 /**
  * 校验汇编文本语法并返回预览信息。
  *
+ * 统一用 Capstone cs_asm 编码（经 [SoEditorViewModel.assembleInstruction]）。
+ *
  * 返回：
  * - null：输入为空或无法解析
  * - ValidationResult：包含指令名、操作数、预编码字节（若可编码）或错误信息
@@ -224,22 +227,18 @@ private data class ValidationResult(
     val errorMessage: String? = null
 )
 
-private fun validateAsmText(text: String): ValidationResult? {
+private fun validateAsmText(
+    text: String,
+    encode: (String) -> ByteArray?
+): ValidationResult? {
     val parsed = parseAsmText(text) ?: return null
     val (inst, args) = parsed
-    // 用自研编码器编码预览
+    // 用 Capstone cs_asm 编码预览
     return try {
-        val encoder = Arm64EncoderBindings()
-        val code = encoder.encode(inst, args)
-        if (code == 0L) {
-            ValidationResult(inst, args, errorMessage = "编码器未识别或不支持该指令")
+        val bytes = encode(text.trim())
+        if (bytes == null || bytes.isEmpty()) {
+            ValidationResult(inst, args, errorMessage = "Capstone 无法编码该指令")
         } else {
-            val bytes = byteArrayOf(
-                (code and 0xFF).toByte(),
-                ((code shr 8) and 0xFF).toByte(),
-                ((code shr 16) and 0xFF).toByte(),
-                ((code shr 24) and 0xFF).toByte(),
-            )
             ValidationResult(inst, args, encodedBytes = bytes)
         }
     } catch (e: Exception) {
@@ -250,6 +249,7 @@ private fun validateAsmText(text: String): ValidationResult? {
 @Composable
 private fun InstructionEditDialog(
     instruction: DisasmInstruction,
+    onEncode: (String) -> ByteArray?,
     onDismiss: () -> Unit,
     onApply: (String) -> Boolean
 ) {
@@ -263,9 +263,9 @@ private fun InstructionEditDialog(
     }
     var input by remember { mutableStateOf(initialText) }
 
-    // 实时校验
-    val validation = remember(input) {
-        if (input.isBlank()) null else validateAsmText(input)
+    // 实时校验（onEncode 依赖 address，地址在对话框生命周期内不变）
+    val validation = remember(input, instruction.address) {
+        if (input.isBlank()) null else validateAsmText(input, onEncode)
     }
     val canApply = validation?.encodedBytes != null
 

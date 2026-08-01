@@ -267,10 +267,10 @@ class SoEditorViewModel @Inject constructor(
     }
 
     /**
-     * 汇编指令补丁：把人类可读的汇编指令（如 "MOV W0, #1"）编码为 4 字节机器码并写入文件。
+     * 汇编指令补丁：把人类可读的汇编指令（如 "MOV W0, #1"）编码为机器码并写入文件。
      *
-     * 使用自研 [Arm64EncoderBindings.encode] 进行汇编，比直接输入 hex 字节对新手更友好。
-     * 固定写入 4 字节（ARM64 指令定长），保留原指令字节用于撤销。
+     * 使用 Capstone cs_asm（[CapstoneBindings.assembleWithCapstone]）编码，
+     * 支持完整 ARM64 指令集；分支指令偏移量由指令地址（offset）正确计算。
      *
      * @param offset 文件偏移（指令起始地址）
      * @param instruction 指令名（如 "MOV" / "RET" / "NOP"），大小写不敏感
@@ -280,19 +280,20 @@ class SoEditorViewModel @Inject constructor(
     suspend fun applyInstructionPatch(offset: Long, instruction: String, args: String): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                // 1. 汇编：指令名 -> 4 字节机器码
-                val encoder = Arm64EncoderBindings()
-                val code = encoder.encode(instruction.trim().uppercase(), args.trim())
-                if (code == 0L) {
-                    Log.w(TAG, "汇编失败: $instruction $args（编码器未识别或不支持）")
+                // 1. 汇编：指令文本 -> 机器码字节
+                val assembly = if (args.isBlank()) instruction.trim() else "${instruction.trim()} ${args.trim()}"
+                val newBytes = CapstoneBindings.assembleWithCapstone(
+                    capstonePath(),
+                    assembly,
+                    offset
+                ) ?: run {
+                    Log.w(TAG, "汇编失败: $assembly（Capstone cs_asm 无法编码）")
                     return@withContext false
                 }
-                val newBytes = byteArrayOf(
-                    (code and 0xFF).toByte(),
-                    ((code shr 8) and 0xFF).toByte(),
-                    ((code shr 16) and 0xFF).toByte(),
-                    ((code shr 24) and 0xFF).toByte(),
-                )
+                if (newBytes.isEmpty()) {
+                    Log.w(TAG, "汇编失败: $assembly（编码结果为空）")
+                    return@withContext false
+                }
 
                 // 2. 复用 applyPatch 完成备份 + 写盘 + 记录撤销
                 applyPatch(offset, newBytes)
@@ -304,6 +305,27 @@ class SoEditorViewModel @Inject constructor(
     }
 
     // ========== 反汇编 ==========
+
+    /** 引擎包内 libcapstone.so 的绝对路径。 */
+    private fun capstonePath(): String =
+        engineLoader.engineDirectory().resolve("lib/libcapstone.so").absolutePath
+
+    /**
+     * 用 Capstone 汇编一条指令（供指令编辑对话框实时校验预览）。
+     *
+     * @param assembly 完整指令文本（如 "MOV W0, #1"）
+     * @param address 指令所在地址（分支指令偏移量计算依赖它）
+     * @return 机器码字节；Capstone 不可用或汇编失败返回 null
+     */
+    fun assembleInstruction(assembly: String, address: Long): ByteArray? {
+        if (assembly.isBlank()) return null
+        return try {
+            CapstoneBindings.assembleWithCapstone(capstonePath(), assembly, address)
+        } catch (e: Exception) {
+            Log.w(TAG, "Capstone 汇编失败: $assembly", e)
+            null
+        }
+    }
 
     /**
      * 从文件读取字节并反汇编（分段，每页 4096 字节）。
@@ -324,9 +346,7 @@ class SoEditorViewModel @Inject constructor(
                         emptyList<com.ai.fler.core.jni.DisasmInstruction>()
                     } else {
                         // Capstone 解码优先（完整正确）；不可用时回退自研解码器
-                        val capstonePath = engineLoader.engineDirectory()
-                            .resolve("lib/libcapstone.so").absolutePath
-                        CapstoneBindings.disassembleWithCapstone(capstonePath, bytes, offset)
+                        CapstoneBindings.disassembleWithCapstone(capstonePath(), bytes, offset)
                             ?: Arm64EncoderBindings().disassemble(bytes, offset)
                     }
                 }
