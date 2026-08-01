@@ -37,8 +37,12 @@ Java_com_ai_fler_core_jni_KeystoneBindings_nativeAsm(
     int count = ks_asm(ks, assembly, (uint64_t)jAddress, &encoding, &encoding_size, &stat_count);
     env->ReleaseStringUTFChars(jAssembly, assembly);
 
-    if (count <= 0 || encoding_size == 0 || !encoding) {
-        __android_log_print(ANDROID_LOG_WARN, TAG, "ks_asm failed: %s", assembly);
+    // keystone 0.9.2 的 ARM64 ks_asm 返回值（stat_count）可能是 0，
+    // 但 encoding/encoding_size 已填好（errno=0 表示无错误）。
+    // 故以 encoding_size 为准判断成败，不能因 count==0 误判失败。
+    if (encoding_size == 0 || !encoding) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "ks_asm failed: '%s' errno=%d",
+                            assembly, (int)ks_errno(ks));
         if (encoding) ks_free(encoding);
         ks_close(ks);
         return nullptr;

@@ -312,7 +312,10 @@ class SoEditorViewModel @Inject constructor(
     // ========== 反汇编 ==========
 
     /**
-     * 编码一条 ARM64 指令：仅使用 Keystone（完整 AArch64 汇编器）。
+     * 编码一条 ARM64 指令：使用 Keystone（完整 AArch64 汇编器）。
+     *
+     * keystone 0.9.2 的 ARM64 解析器对大小写敏感（官方示例用小写），
+     * 而对话框预填把 mnemonic 转了大写，故先试原文本，失败再试小写。
      *
      * @param assembly 完整指令文本（如 "MOV W0, #1"）
      * @param address 指令所在地址（分支指令偏移量计算依赖它）
@@ -320,12 +323,21 @@ class SoEditorViewModel @Inject constructor(
      */
     private fun encodeInstruction(assembly: String, address: Long): ByteArray? {
         if (assembly.isBlank()) return null
-        return try {
-            KeystoneBindings.asm(assembly, address)?.takeIf { it.isNotEmpty() }
-        } catch (e: Exception) {
-            Log.w(TAG, "Keystone 汇编失败: $assembly", e)
-            null
+        val attempts = if (assembly == assembly.lowercase()) {
+            listOf(assembly)
+        } else {
+            listOf(assembly, assembly.lowercase())
         }
+        for (a in attempts) {
+            val bytes = try {
+                KeystoneBindings.asm(a, address)?.takeIf { it.isNotEmpty() }
+            } catch (e: Exception) {
+                Log.w(TAG, "Keystone 汇编失败: $a", e)
+                null
+            }
+            if (bytes != null) return bytes
+        }
+        return null
     }
 
     /**
