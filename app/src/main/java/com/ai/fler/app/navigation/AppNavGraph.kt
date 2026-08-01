@@ -5,6 +5,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -36,6 +37,8 @@ import com.ai.fler.features.output.PpBrowserScreen
 import com.ai.fler.features.mcp.McpLogScreen
 import com.ai.fler.features.project.ProjectDetailScreen
 import com.ai.fler.features.project.ProjectScreen
+import com.ai.fler.features.settings.AboutScreen
+import com.ai.fler.features.settings.McpSettingsScreen
 import com.ai.fler.features.settings.SettingsScreen
 import com.ai.fler.features.so_editor.SoEditorDetailScreen
 import com.ai.fler.features.so_editor.SoEditorScreen
@@ -49,6 +52,7 @@ import kotlinx.coroutines.launch
 private val tabIcons: Map<Screen, ImageVector> = mapOf(
     Screen.Projects to Icons.Outlined.Folder,
     Screen.SoEditor to Icons.Outlined.Memory,
+    Screen.McpLog to Icons.Outlined.Terminal,
     Screen.Settings to Icons.Outlined.Settings,
 )
 
@@ -56,6 +60,7 @@ private val tabIcons: Map<Screen, ImageVector> = mapOf(
 private val tabLabels: Map<Screen, Int> = mapOf(
     Screen.Projects to R.string.tab_projects,
     Screen.SoEditor to R.string.tab_so,
+    Screen.McpLog to R.string.tab_mcp_log,
     Screen.Settings to R.string.tab_settings,
 )
 
@@ -159,13 +164,27 @@ fun AppNavGraph() {
             composable(Screen.SoEditor.route) { SoEditorScreen() }
             composable(Screen.Settings.route) {
                 SettingsScreen(
-                    onOpenMcpLog = { navController.navigate(Screen.McpLog.route) }
+                    onOpenMcpSettings = { navController.navigate(Screen.McpSettings.route) },
+                    onOpenAbout = { navController.navigate(Screen.About.route) },
                 )
             }
 
-            // ========== MCP 日志 ==========
+            // ========== MCP 日志（顶层 Tab）==========
             composable(Screen.McpLog.route) {
-                McpLogScreen(onBack = { navController.popBackStack() })
+                McpLogScreen(onBack = null)
+            }
+
+            // ========== MCP 配置（二级 Screen）==========
+            composable(Screen.McpSettings.route) {
+                McpSettingsScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenLog = { navController.navigate(Screen.McpLog.route) },
+                )
+            }
+
+            // ========== 关于（二级 Screen）==========
+            composable(Screen.About.route) {
+                AboutScreen(onBack = { navController.popBackStack() })
             }
 
             // ========== 项目详情 ==========

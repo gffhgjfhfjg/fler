@@ -130,22 +130,26 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
-     * 清理项目缓存文件（APK 导入副本、SO 提取产物、SO 导入副本、补丁导出）。
-     * 不清理引擎文件（由清除引擎按钮负责）。
+     * 清理项目缓存文件（APK 导入副本、SO 提取产物、SO 导入副本、分析数据库、补丁导出）。
+     * 不清理引擎文件（由清除引擎按钮负责），也不清理 Room 数据库。
      */
     fun cleanProjectCache() {
         viewModelScope.launch {
             val freed = withContext(Dispatchers.IO) {
                 var total = 0L
                 val cache = application.cacheDir
-                // 删除 apk_import_* / so_import_* / extracted_* / patches/ 目录
                 cache.listFiles()?.forEach { f ->
                     val name = f.name
+                    val isAnalysisDb = f.isFile && name.startsWith("analysis_") && name.endsWith(".db") ||
+                        f.isFile && name.startsWith("analysis_") && name.endsWith("-wal") ||
+                        f.isFile && name.startsWith("analysis_") && name.endsWith("-shm")
                     if (name.startsWith("apk_import_") ||
                         name.startsWith("so_import_") ||
                         name.startsWith("extracted_") ||
                         name == "patches" ||
-                        name == "blutter_tmp"
+                        name == "blutter_tmp" ||
+                        name == "fler-engines.7z" ||
+                        isAnalysisDb
                     ) {
                         total += f.walkTopDown().filter { it.isFile }.sumOf { it.length() }
                         f.deleteRecursively()

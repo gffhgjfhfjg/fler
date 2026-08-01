@@ -30,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -48,7 +49,7 @@ import java.util.Locale
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun McpLogScreen(
-    onBack: () -> Unit,
+    onBack: (() -> Unit)? = null,
     viewModel: McpLogViewModel = hiltViewModel(),
 ) {
     val entries by viewModel.entries.collectAsStateWithLifecycle()
@@ -71,8 +72,10 @@ fun McpLogScreen(
             TopAppBar(
                 title = { Text("MCP 日志") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        }
                     }
                 },
                 actions = {
@@ -136,31 +139,48 @@ private fun McpLogRow(entry: McpLogEntry) {
         "I" -> Color(0xFF1976D2)
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 2.dp),
-        verticalAlignment = Alignment.Top
+            .padding(horizontal = 12.dp, vertical = 2.dp)
     ) {
-        Text(
-            text = "[${entry.level}]",
-            style = MaterialTheme.typography.labelSmall,
-            fontFamily = FontFamily.Monospace,
-            color = levelColor,
-            modifier = Modifier.padding(end = 8.dp)
-        )
-        Text(
-            text = timeFormat.format(Date(entry.timestamp)),
-            style = MaterialTheme.typography.labelSmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(end = 8.dp)
-        )
-        Text(
-            text = entry.message,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(
+                text = "[${entry.level}]",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = levelColor,
+                modifier = Modifier.padding(end = 8.dp)
+            )
+            Text(
+                text = timeFormat.format(Date(entry.timestamp)),
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 8.dp)
+            )
+            Text(
+                text = entry.message,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+        // 请求日志：第二行展示方法名 + 解析后的参数 JSON
+        if (entry.method != null) {
+            val paramsText = entry.paramsJson?.takeIf { it.isNotBlank() } ?: "{}"
+            Text(
+                text = "  → $paramsText",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 8.dp, top = 1.dp)
+            )
+        }
     }
 }

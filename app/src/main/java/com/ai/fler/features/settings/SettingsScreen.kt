@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -45,8 +46,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ai.fler.feature.settings.McpUiState
 import com.ai.fler.feature.settings.SettingsViewModel
 import com.ai.fler.features.engine.EngineDownloadScreen
+import com.ai.fler.ui.components.CardListTile
 
 /**
  * 设置 Tab。
@@ -56,7 +59,8 @@ import com.ai.fler.features.engine.EngineDownloadScreen
 @Composable
 fun SettingsScreen(
     modifier: Modifier = Modifier,
-    onOpenMcpLog: () -> Unit = {},
+    onOpenMcpSettings: () -> Unit = {},
+    onOpenAbout: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
@@ -105,17 +109,11 @@ fun SettingsScreen(
             )
         }
 
-        // MCP 服务器
+        // MCP 服务器（紧凑入口，详细配置在二级 Screen）
         item {
-            McpSettingsCard(
+            McpEntryCard(
                 state = mcpState,
-                onSetBindMode = { viewModel.mcpSetBindMode(it) },
-                onSetPort = { viewModel.mcpSetPort(it) },
-                onSetToken = { viewModel.mcpSetToken(it) },
-                onSetPatchEnabled = { viewModel.mcpSetPatchEnabled(it) },
-                onStart = { viewModel.mcpStartServer() },
-                onStop = { viewModel.mcpStopServer() },
-                onOpenLog = onOpenMcpLog,
+                onClick = onOpenMcpSettings
             )
         }
 
@@ -130,7 +128,7 @@ fun SettingsScreen(
 
         // 关于
         item {
-            AboutCard()
+            AboutCard(onClick = onOpenAbout)
         }
     }
 
@@ -139,7 +137,7 @@ fun SettingsScreen(
             onDismissRequest = { showCacheCleanConfirm = false },
             title = { Text("清理项目缓存") },
             text = {
-                Text("将删除 APK/SO 导入副本、提取产物、补丁导出文件。引擎文件不受影响。")
+                Text("将删除 APK/SO 导入副本、提取产物、分析数据库（analysis_*.db）、残留引擎包文件与补丁导出文件。引擎文件与已导入的分析记录不受影响。")
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -197,18 +195,25 @@ private fun UpdateCheckCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 已安装版本列表
-            if (installedVersions.isNotEmpty()) {
-                Text(
-                    text = "已安装 ${installedVersions.size} 个版本:",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = installedVersions.joinToString(", "),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
+            // 当前引擎版本（单卡片，不再展示完整已安装版本列表）
+            val currentVersion = installedVersions.firstOrNull()
+            if (currentVersion != null) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "当前引擎: Dart $currentVersion",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             } else {
                 Text(
                     text = "尚未安装任何引擎",
@@ -447,40 +452,35 @@ private fun SourceItem(label: String, url: String) {
 }
 
 @Composable
-private fun AboutCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp)
-        ) {
-            Text(
-                text = "关于",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "fler",
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium
-            )
-            Text(
-                text = "版本 ${com.ai.fler.BuildConfig.VERSION_NAME} (${com.ai.fler.BuildConfig.VERSION_CODE})",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Dart/Flutter 逆向分析工具",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+private fun McpEntryCard(
+    state: McpUiState,
+    onClick: () -> Unit
+) {
+    val statusText = if (state.isRunning) "运行中" else "已停止"
+    val urlText = if (state.isRunning) {
+        (state.localUrl.ifBlank { state.lanUrl }).let {
+            if (it.isNotBlank()) "本机 $it" else statusText
         }
+    } else {
+        "点击进入详细配置"
     }
+    CardListTile(
+        title = "MCP 服务器 · $statusText",
+        subtitle = urlText,
+        leadingIcon = Icons.Outlined.Storage,
+        onClick = onClick,
+    )
+}
+
+@Composable
+private fun AboutCard(
+    onClick: () -> Unit
+) {
+    CardListTile(
+        title = "关于",
+        subtitle = "fler ${com.ai.fler.BuildConfig.VERSION_NAME} · 开源项目与第三方库",
+        onClick = onClick,
+    )
 }
 
 @Composable
@@ -505,7 +505,7 @@ private fun CacheCleanCard(
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "APK/SO 导入副本、提取产物、补丁导出文件。引擎文件不受影响。",
+                text = "APK/SO 导入副本、提取产物、分析数据库（analysis_*.db）、残留引擎包文件与补丁导出文件。引擎文件与已导入的分析记录不受影响。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

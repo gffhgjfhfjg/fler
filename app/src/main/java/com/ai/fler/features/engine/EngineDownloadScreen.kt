@@ -67,21 +67,6 @@ fun EngineDownloadScreen(
             )
         }
 
-        // 已安装版本列表
-        if (uiState.isReady && uiState.installedVersions.isNotEmpty()) {
-            Text(
-                text = "已安装版本",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            uiState.installedVersions.forEach { version ->
-                CardListTile(
-                    title = "Dart $version",
-                    subtitle = "引擎版本",
-                    onClick = {},
-                )
-            }
-        }
-
         // 下载进度
         uiState.progress?.let { progress ->
             if (progress.phase != EnginePackManager.EngineProgress.Phase.IDLE &&

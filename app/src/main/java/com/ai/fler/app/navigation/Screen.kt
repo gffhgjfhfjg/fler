@@ -19,8 +19,14 @@ sealed class Screen(val route: String) {
     /** 设置 Tab。 */
     data object Settings : Screen("settings")
 
-    /** MCP 服务器日志页。 */
+    /** MCP 服务器日志页（顶层 Tab）。 */
     data object McpLog : Screen("mcp_log")
+
+    /** MCP 服务器配置页（二级 Screen，从设置页进入）。 */
+    data object McpSettings : Screen("mcp_settings")
+
+    /** 关于页（开源项目与第三方库说明）。 */
+    data object About : Screen("about")
 
     /** SO 编辑器详情页（带文件路径、可选偏移和方法长度）。 */
     data object SoEditorDetail : Screen("so_editor/{filePath}?offset={offset}&length={length}") {
@@ -64,5 +70,6 @@ sealed class Screen(val route: String) {
 val TopLevelTabs: List<Screen> = listOf(
     Screen.Projects,
     Screen.SoEditor,
+    Screen.McpLog,
     Screen.Settings,
 )

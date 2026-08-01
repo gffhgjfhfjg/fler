@@ -34,6 +34,28 @@ class McpLogger @Inject constructor() {
         _entries.value = (_entries.value + entry).takeLast(MAX_ENTRIES)
     }
 
+    /**
+     * 记录一条带结构化请求信息的日志（method + params JSON + 客户端地址）。
+     * 用于 MCP 日志页直接展示请求参数。
+     */
+    fun logRequest(
+        method: String,
+        paramsJson: String?,
+        remote: String?,
+        level: String = "I",
+    ) {
+        val entry = McpLogEntry(
+            seq = seqCounter++,
+            timestamp = System.currentTimeMillis(),
+            level = level,
+            message = "请求: $method",
+            method = method,
+            paramsJson = paramsJson,
+            remote = remote,
+        )
+        _entries.value = (_entries.value + entry).takeLast(MAX_ENTRIES)
+    }
+
     fun clear() {
         _entries.value = emptyList()
     }
@@ -49,4 +71,10 @@ data class McpLogEntry(
     val timestamp: Long,
     val level: String,
     val message: String,
+    /** JSON-RPC 方法名（如 tools/call），非请求日志为 null。 */
+    val method: String? = null,
+    /** 请求参数 JSON 字符串（解析后的 params），非请求日志为 null。 */
+    val paramsJson: String? = null,
+    /** 客户端地址，非请求日志为 null。 */
+    val remote: String? = null,
 )

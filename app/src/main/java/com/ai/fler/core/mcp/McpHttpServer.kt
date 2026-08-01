@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedInputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -94,8 +95,8 @@ class McpHttpServer(
             when {
                 req.method == "GET" && req.path == "/sse" -> handleLegacySse(socket, output)
                 req.method == "GET" && req.path == "/mcp" -> handleSse(socket, output)
-                req.method == "POST" && req.path == "/message" -> handleMessage(req, output)
-                req.method == "POST" && req.path == "/mcp" -> handleStreamable(req, output)
+                req.method == "POST" && req.path == "/message" -> handleMessage(req, remote, output)
+                req.method == "POST" && req.path == "/mcp" -> handleStreamable(req, remote, output)
                 else -> writeResponse(output, 404, "text/plain", "not found")
             }
         } catch (_: Exception) {
@@ -132,9 +133,9 @@ class McpHttpServer(
         logger.info("SSE 会话断开: ${session.id.take(8)}")
     }
 
-    private fun handleMessage(req: Request, output: OutputStream) {
+    private fun handleMessage(req: Request, remote: String, output: OutputStream) {
         val sessionId = req.query["sessionId"]
-        val response = dispatch(req.body)
+        val response = dispatch(req.body, remote)
         if (response == null) {
             writeResponse(output, 202, "text/plain", "")
             return
@@ -148,9 +149,9 @@ class McpHttpServer(
         }
     }
 
-    private fun handleStreamable(req: Request, output: OutputStream) {
+    private fun handleStreamable(req: Request, remote: String, output: OutputStream) {
         val accept = req.headers["accept"] ?: ""
-        val response = dispatch(req.body)
+        val response = dispatch(req.body, remote)
         if (response == null) {
             writeResponse(output, 202, "text/plain", "")
             return
@@ -165,7 +166,7 @@ class McpHttpServer(
     }
 
     /** 解析 JSON-RPC 消息并调用协议分发（在 IO 调度执行 suspend 工具）。 */
-    private fun dispatch(body: String): kotlinx.serialization.json.JsonObject? {
+    private fun dispatch(body: String, remote: String = "?"): kotlinx.serialization.json.JsonObject? {
         if (body.isBlank()) return McpErrors.errorJson(null, McpErrors.INVALID_REQUEST, "空请求")
         val request = try {
             json.parseToJsonElement(body).jsonObject
@@ -173,6 +174,14 @@ class McpHttpServer(
             logger.error("JSON-RPC 解析失败: ${e.message}")
             return McpErrors.errorJson(null, McpErrors.PARSE_ERROR, "JSON 解析失败: ${e.message}")
         }
+        // 结构化记录请求（方法名 + 参数 JSON + 客户端地址）
+        val method = request["method"]?.let {
+            runCatching { it.jsonPrimitive.content }.getOrNull()
+        }
+        val paramsJson = request["params"]?.let {
+            runCatching { it.toString() }.getOrNull()
+        }
+        logger.logRequest(method ?: "?", paramsJson, remote)
         val response = runBlocking(Dispatchers.IO) { protocol.handle(request) }
         if (response != null && response["error"] != null) {
             logger.warn("JSON-RPC 错误: ${response["error"]}")
