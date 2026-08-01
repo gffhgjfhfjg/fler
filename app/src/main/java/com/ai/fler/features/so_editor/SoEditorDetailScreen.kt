@@ -1,5 +1,8 @@
 package com.ai.fler.features.so_editor
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,6 +33,9 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * SO 编辑器详情页（从产物 / 方法列表跳转进来）。
@@ -54,6 +60,18 @@ fun SoEditorDetailScreen(
     val currentTab by viewModel.currentTab.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    // SAF CreateDocument：导出补丁到用户可读位置（Documents 等），与 SoEditorScreen 一致
+    val createDocLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri: Uri? ->
+        uri?.let {
+            scope.launch {
+                val ok = viewModel.exportPatchesToUri(it)
+                snackbarHostState.showSnackbar(if (ok) "已导出" else "导出失败")
+            }
+        }
+    }
 
     // 方法编辑模式：methodLength>0 时只展示该方法范围
     val isMethodMode = methodLength > 0L
@@ -129,17 +147,13 @@ fun SoEditorDetailScreen(
                             contentDescription = "撤销"
                         )
                     }
-                    // 导出补丁按钮
+                    // 导出补丁按钮（SAF 让用户选保存位置，默认文件名含时间戳）
                     IconButton(
                         onClick = {
-                            scope.launch {
-                                val file = viewModel.exportPatchesToCache()
-                                if (file != null) {
-                                    snackbarHostState.showSnackbar("已导出: ${file.name}")
-                                } else {
-                                    snackbarHostState.showSnackbar("无补丁可导出")
-                                }
-                            }
+                            val name = uiState.fileName.removeSuffix(".so")
+                            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
+                                .format(Date())
+                            createDocLauncher.launch("${name}_$ts.patch")
                         },
                         enabled = uiState.isFileOpen
                     ) {
