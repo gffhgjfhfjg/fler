@@ -2,8 +2,6 @@ package com.ai.fler.app.navigation
 
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.WindowInsets
@@ -23,11 +21,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -72,9 +68,6 @@ private val tabLabels: Map<Screen, Int> = mapOf(
     Screen.McpLog to R.string.tab_mcp_log,
     Screen.Settings to R.string.tab_settings,
 )
-
-/** 底部导航 label 淡入淡出时长（毫秒），改这里即可调整动画速度。 */
-private const val TAB_LABEL_FADE_MS = 180
 
 /**
  * 应用根导航图。
@@ -155,21 +148,9 @@ fun AppNavGraph() {
                                 Icon(imageVector = icon, contentDescription = null)
                             }
                         },
-                        // 默认只显示图标；选中该页时文字由下往上平滑弹出（graphicsLayer 无布局回流）
-                        label = {
-                            val progress by animateFloatAsState(
-                                targetValue = if (isSelected) 1f else 0f,
-                                animationSpec = tween(durationMillis = TAB_LABEL_FADE_MS),
-                                label = "tab-label"
-                            )
-                            Text(
-                                text = stringResource(tabLabels[tab]!!),
-                                modifier = Modifier.graphicsLayer {
-                                    alpha = progress
-                                    translationY = (1f - progress) * 8.dp.toPx()
-                                }
-                            )
-                        },
+                        // 默认只显示图标；选中该页时才显示文字（M3 内置 label 淡入动画）
+                        alwaysShowLabel = false,
+                        label = { Text(stringResource(tabLabels[tab]!!)) },
                     )
                 }
             }
