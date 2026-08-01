@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -154,19 +155,18 @@ fun AppNavGraph() {
                                 Icon(imageVector = icon, contentDescription = null)
                             }
                         },
-                        // 默认只显示图标；选中该页时才显示文字（手动 alpha+缩放动画，时长可调）
+                        // 默认只显示图标；选中该页时文字由下往上平滑弹出（graphicsLayer 无布局回流）
                         label = {
-                            val labelAlpha by animateFloatAsState(
+                            val progress by animateFloatAsState(
                                 targetValue = if (isSelected) 1f else 0f,
                                 animationSpec = tween(durationMillis = TAB_LABEL_FADE_MS),
-                                label = "tab-label-alpha"
+                                label = "tab-label"
                             )
                             Text(
                                 text = stringResource(tabLabels[tab]!!),
                                 modifier = Modifier.graphicsLayer {
-                                    alpha = labelAlpha
-                                    scaleX = 0.95f + 0.05f * labelAlpha
-                                    scaleY = 0.95f + 0.05f * labelAlpha
+                                    alpha = progress
+                                    translationY = (1f - progress) * 8.dp.toPx()
                                 }
                             )
                         },
