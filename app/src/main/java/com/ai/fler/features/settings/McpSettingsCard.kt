@@ -37,7 +37,6 @@ import com.ai.fler.feature.settings.McpUiState
 @Composable
 fun McpSettingsCard(
     state: McpUiState,
-    onToggleEnabled: (Boolean) -> Unit,
     onSetBindMode: (McpConfig.BindMode) -> Unit,
     onSetPort: (Int) -> Unit,
     onSetToken: (String) -> Unit,
@@ -113,15 +112,6 @@ fun McpSettingsCard(
             }
 
             Spacer(modifier = Modifier.height(4.dp))
-
-            // 启用开关
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("启用服务器", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                Switch(checked = state.enabled, onCheckedChange = onToggleEnabled)
-            }
 
             // 绑定模式
             Text("绑定模式", style = MaterialTheme.typography.bodyMedium)

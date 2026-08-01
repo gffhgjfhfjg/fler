@@ -108,7 +108,6 @@ fun SettingsScreen(
         item {
             McpSettingsCard(
                 state = mcpState,
-                onToggleEnabled = { viewModel.mcpSetEnabled(it) },
                 onSetBindMode = { viewModel.mcpSetBindMode(it) },
                 onSetPort = { viewModel.mcpSetPort(it) },
                 onSetToken = { viewModel.mcpSetToken(it) },

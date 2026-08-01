@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -68,34 +69,31 @@ class SettingsViewModel @Inject constructor(
     }
 
     private suspend fun combineMcpState() {
-        val config = mcpConfig
-        val enabled = config.enabled.value
-        val bindMode = config.bindMode.value
-        val port = config.port.value
-        val token = config.token.value
-        val patchEnabled = config.patchEnabled.value
-        mcpServerManager.status.collect { status: McpStatus ->
-            _mcpState.value = McpUiState(
-                enabled = enabled,
-                bindMode = bindMode,
-                port = port,
-                token = token,
-                patchEnabled = patchEnabled,
+        combine(
+            mcpConfig.enabled,
+            mcpConfig.bindMode,
+            mcpConfig.port,
+            mcpConfig.token,
+            mcpConfig.patchEnabled,
+        ) { enabled, bindMode, port, token, patchEnabled ->
+            McpConfigSnapshot(enabled, bindMode, port, token, patchEnabled)
+        }.combine(mcpServerManager.status) { cfg, status ->
+            McpUiState(
+                enabled = cfg.enabled,
+                bindMode = cfg.bindMode,
+                port = cfg.port,
+                token = cfg.token,
+                patchEnabled = cfg.patchEnabled,
                 isRunning = status.isRunning,
                 activeSessions = status.activeSessions,
                 localUrl = status.localUrl,
                 lanUrl = status.lanUrl,
                 errorMessage = status.errorMessage,
             )
-        }
+        }.collect { _mcpState.value = it }
     }
 
     // ========== MCP Server ==========
-
-    fun mcpSetEnabled(value: Boolean) {
-        mcpConfig.setEnabled(value)
-        if (value) mcpStartServer() else mcpStopServer()
-    }
 
     fun mcpStartServer() {
         mcpConfig.setEnabled(true)
@@ -270,4 +268,13 @@ data class McpUiState(
     val localUrl: String = "",
     val lanUrl: String = "",
     val errorMessage: String? = null,
+)
+
+/** MCP 配置快照（combine 中间值）。 */
+private data class McpConfigSnapshot(
+    val enabled: Boolean,
+    val bindMode: com.ai.fler.core.mcp.McpConfig.BindMode,
+    val port: Int,
+    val token: String,
+    val patchEnabled: Boolean,
 )
