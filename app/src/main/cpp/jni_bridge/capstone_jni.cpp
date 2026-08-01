@@ -9,7 +9,8 @@
 static const char* TAG = "FlerCapstoneJNI";
 
 // Capstone 常量（不引头文件，与引擎包内 capstone 4.x ABI 一致）
-#define CS_ARCH_ARM64 3
+// 注意：cs_arch 是 0 基枚举，CS_ARCH_ARM64 = 1（3 是 CS_ARCH_X86，会把 ARM64 按 x86 解码）
+#define CS_ARCH_ARM64 1
 #define CS_MODE_ARM 0
 
 // Capstone 函数指针
