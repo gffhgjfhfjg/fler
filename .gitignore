@@ -1,0 +1,25 @@
+# ── Gradle ──
+.gradle/
+build/
+/app/build/
+*.iml
+.kotlin/
+
+# ── Local / IDE ──
+/local.properties
+local.properties
+.idea/
+captures/
+.externalNativeBuild
+.cxx
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── fler 运行/下载产物（不入库）──
+fler-engines/
+*.7z
+*.zip
+*.log
+*.bak

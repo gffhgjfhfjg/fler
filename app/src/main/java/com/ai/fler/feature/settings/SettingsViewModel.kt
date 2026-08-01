@@ -1,0 +1,181 @@
+package com.ai.fler.feature.settings
+
+import android.app.Application
+import android.content.Context
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.ai.fler.core.service.EnginePackManager
+import com.ai.fler.core.service.EngineSourceConfig
+import com.ai.fler.core.service.EngineUpdate
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import javax.inject.Inject
+
+/**
+ * 设置 ViewModel。
+ *
+ * 管理设置页面的状态，包括引擎更新检测、下载源配置和项目缓存清理。
+ */
+@HiltViewModel
+class SettingsViewModel @Inject constructor(
+    private val application: Application,
+    private val enginePackManager: EnginePackManager,
+    private val sourceConfig: EngineSourceConfig
+) : ViewModel() {
+
+    private val _updateState = MutableStateFlow(UpdateCheckState())
+    val updateState: StateFlow<UpdateCheckState> = _updateState.asStateFlow()
+
+    private val _installedVersions = MutableStateFlow<List<String>>(emptyList())
+    val installedVersions: StateFlow<List<String>> = _installedVersions.asStateFlow()
+
+    private val _sourceState = MutableStateFlow(sourceStateFromConfig())
+    val sourceState: StateFlow<EngineSourceState> = _sourceState.asStateFlow()
+
+    /** 缓存清理结果（释放字节数）；null 表示未操作。 */
+    private val _cacheCleanResult = MutableStateFlow<Long?>(null)
+    val cacheCleanResult: StateFlow<Long?> = _cacheCleanResult.asStateFlow()
+
+    init {
+        loadInstalledVersions()
+        // 引擎版本变化（下载完成/清除）时实时刷新已安装版本，无需重启
+        viewModelScope.launch {
+            enginePackManager.versionsEpoch.collect {
+                _installedVersions.value = enginePackManager.listInstalledVersions()
+            }
+        }
+    }
+
+    /**
+     * 清理项目缓存文件（APK 导入副本、SO 提取产物、SO 导入副本、补丁导出）。
+     * 不清理引擎文件（由清除引擎按钮负责）。
+     */
+    fun cleanProjectCache() {
+        viewModelScope.launch {
+            val freed = withContext(Dispatchers.IO) {
+                var total = 0L
+                val cache = application.cacheDir
+                // 删除 apk_import_* / so_import_* / extracted_* / patches/ 目录
+                cache.listFiles()?.forEach { f ->
+                    val name = f.name
+                    if (name.startsWith("apk_import_") ||
+                        name.startsWith("so_import_") ||
+                        name.startsWith("extracted_") ||
+                        name == "patches" ||
+                        name == "blutter_tmp"
+                    ) {
+                        total += f.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                        f.deleteRecursively()
+                    }
+                }
+                total
+            }
+            _cacheCleanResult.value = freed
+        }
+    }
+
+    fun clearCacheCleanResult() {
+        _cacheCleanResult.value = null
+    }
+
+    /**
+     * 从配置读取当前源状态。
+     */
+    private fun sourceStateFromConfig(): EngineSourceState {
+        return EngineSourceState(
+            primaryUrl = sourceConfig.primaryUrl,
+            fallbackUrl = sourceConfig.fallbackUrl,
+            checksumUrl = sourceConfig.checksumUrl,
+            versionUrl = sourceConfig.versionUrl,
+            isCustom = sourceConfig.isCustom()
+        )
+    }
+
+    /**
+     * 加载本地已安装版本。
+     */
+    fun loadInstalledVersions() {
+        viewModelScope.launch {
+            try {
+                _installedVersions.value = enginePackManager.listInstalledVersions()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
+     * 检查引擎更新。
+     */
+    fun checkForUpdates() {
+        viewModelScope.launch {
+            _updateState.value = UpdateCheckState(isChecking = true)
+
+            try {
+                val update = enginePackManager.checkForUpdates()
+                _updateState.value = if (update != null) {
+                    UpdateCheckState(update = update, hasUpdate = true)
+                } else {
+                    UpdateCheckState(hasUpdate = false, lastChecked = System.currentTimeMillis())
+                }
+            } catch (e: Exception) {
+                _updateState.value = UpdateCheckState(
+                    errorMessage = e.message ?: "检查更新失败"
+                )
+            }
+        }
+    }
+
+    /**
+     * 保存下载源配置。
+     */
+    fun saveSourceConfig(
+        primaryUrl: String,
+        fallbackUrl: String,
+        checksumUrl: String,
+        versionUrl: String
+    ) {
+        sourceConfig.primaryUrl = primaryUrl.trim()
+        sourceConfig.fallbackUrl = fallbackUrl.trim()
+        sourceConfig.checksumUrl = checksumUrl.trim()
+        sourceConfig.versionUrl = versionUrl.trim()
+
+        _sourceState.value = sourceStateFromConfig()
+    }
+
+    /**
+     * 重置下载源为默认值。
+     */
+    fun resetSourceConfig() {
+        sourceConfig.resetToDefault()
+        _sourceState.value = sourceStateFromConfig()
+    }
+}
+
+/**
+ * 更新检测状态。
+ */
+data class UpdateCheckState(
+    val isChecking: Boolean = false,
+    val hasUpdate: Boolean = false,
+    val update: EngineUpdate? = null,
+    val lastChecked: Long = 0L,
+    val errorMessage: String? = null
+)
+
+/**
+ * 引擎下载源状态。
+ */
+data class EngineSourceState(
+    val primaryUrl: String = "",
+    val fallbackUrl: String = "",
+    val checksumUrl: String = "",
+    val versionUrl: String = "",
+    val isCustom: Boolean = false
+)

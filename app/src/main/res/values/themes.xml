@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose-compatible base theme (no action bar; UI rendered in Compose). -->
+    <style name="Theme.Fler" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/fler_primary</item>
+        <item name="android:windowBackground">@color/white</item>
+    </style>
+</resources>

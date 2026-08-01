@@ -1,0 +1,14 @@
+# 统一换行符：文本文件提交时以 LF 规范化
+* text=auto
+
+# 脚本必须保持 LF（Windows 下 CRLF 会导致 sh 执行失败）
+*.sh text eol=lf
+gradlew text eol=lf
+**/gradlew text eol=lf
+
+# 二进制明确不转换
+*.png binary
+*.jpg binary
+*.webp binary
+*.so binary
+*.7z binary
