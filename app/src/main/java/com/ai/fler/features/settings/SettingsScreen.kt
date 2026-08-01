@@ -21,14 +21,11 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -42,6 +39,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -114,8 +112,8 @@ fun SettingsScreen(
         item {
             EngineSourceCard(
                 state = sourceState,
-                onSave = { primary, fallback, checksum, version ->
-                    viewModel.saveSourceConfig(primary, fallback, checksum, version)
+                onSave = { primary, fallback, checksum, version, proxy ->
+                    viewModel.saveSourceConfig(primary, fallback, checksum, version, proxy)
                 },
                 onReset = { viewModel.resetSourceConfig() }
             )
@@ -238,17 +236,17 @@ private fun EngineVersionCard(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     installedVersions.forEach { version ->
-                        AssistChip(
-                            onClick = {},
-                            label = { Text("Dart $version") },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.Memory,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(AssistChipDefaults.IconSize)
-                                )
-                            }
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer
+                        ) {
+                            Text(
+                                text = "Dart $version",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
                     }
                 }
             } else {
@@ -486,14 +484,16 @@ private fun progressDetail(progress: com.ai.fler.core.service.EnginePackManager.
 @Composable
 private fun EngineSourceCard(
     state: com.ai.fler.feature.settings.EngineSourceState,
-    onSave: (String, String, String, String) -> Unit,
+    onSave: (String, String, String, String, String) -> Unit,
     onReset: () -> Unit
 ) {
     var isEditing by remember { mutableStateOf(false) }
+    var showAdvanced by remember { mutableStateOf(false) }
     var primaryUrl by remember(state) { mutableStateOf(state.primaryUrl) }
     var fallbackUrl by remember(state) { mutableStateOf(state.fallbackUrl) }
     var checksumUrl by remember(state) { mutableStateOf(state.checksumUrl) }
     var versionUrl by remember(state) { mutableStateOf(state.versionUrl) }
+    var githubProxy by remember(state) { mutableStateOf(state.githubProxy) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -529,33 +529,51 @@ private fun EngineSourceCard(
                 // 编辑模式
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
-                        value = primaryUrl,
-                        onValueChange = { primaryUrl = it },
-                        label = { Text("主下载地址 (GitHub)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = fallbackUrl,
-                        onValueChange = { fallbackUrl = it },
-                        label = { Text("备用地址 (GitHub)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = checksumUrl,
-                        onValueChange = { checksumUrl = it },
-                        label = { Text("校验地址") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
                         value = versionUrl,
                         onValueChange = { versionUrl = it },
-                        label = { Text("版本信息地址") },
+                        label = { Text("版本信息地址 (version.json)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    OutlinedTextField(
+                        value = githubProxy,
+                        onValueChange = { githubProxy = it },
+                        label = { Text("GitHub 加速前缀") },
+                        placeholder = { Text("如 https://gh-proxy.com（留空关闭）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    // 高级选项（自建源用）
+                    OutlinedButton(
+                        onClick = { showAdvanced = !showAdvanced },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (showAdvanced) "隐藏高级选项" else "高级选项")
+                    }
+                    if (showAdvanced) {
+                        OutlinedTextField(
+                            value = primaryUrl,
+                            onValueChange = { primaryUrl = it },
+                            label = { Text("主下载地址 (GitHub)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = fallbackUrl,
+                            onValueChange = { fallbackUrl = it },
+                            label = { Text("备用地址 (GitHub)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = checksumUrl,
+                            onValueChange = { checksumUrl = it },
+                            label = { Text("校验地址") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -569,7 +587,7 @@ private fun EngineSourceCard(
                         }
                         Button(
                             onClick = {
-                                onSave(primaryUrl, fallbackUrl, checksumUrl, versionUrl)
+                                onSave(primaryUrl, fallbackUrl, checksumUrl, versionUrl, githubProxy)
                                 isEditing = false
                             },
                             modifier = Modifier.weight(1f)
@@ -581,10 +599,14 @@ private fun EngineSourceCard(
             } else {
                 // 展示模式
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SourceItem(label = "版本信息", url = state.versionUrl)
+                    SourceItem(
+                        label = "GitHub 加速",
+                        url = if (state.githubProxy.isBlank()) "未启用" else state.githubProxy
+                    )
                     SourceItem(label = "主下载", url = state.primaryUrl)
                     SourceItem(label = "备用", url = state.fallbackUrl)
                     SourceItem(label = "校验", url = state.checksumUrl)
-                    SourceItem(label = "版本", url = state.versionUrl)
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))

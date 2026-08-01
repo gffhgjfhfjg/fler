@@ -437,9 +437,9 @@ class SoEditorViewModel @Inject constructor(
         _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = address)
         _flashOffset.value = address
         viewModelScope.launch {
-            val blinkOn = 150L
-            val blinkOff = 100L
-            val cycles = 4
+            val blinkOn = 250L
+            val blinkOff = 150L
+            val cycles = 3
             for (i in 0 until cycles) {
                 delay(blinkOn)
                 if (_flashOffset.value != address) return@launch

@@ -31,7 +31,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -148,12 +147,11 @@ fun HexEditorTab(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedTextField(
+                CompactTextField(
                     value = newByteValue,
                     onValueChange = { newByteValue = it.take(2) },
                     modifier = Modifier.weight(1f),
-                    label = { Text("新字节 (hex)") },
-                    singleLine = true,
+                    placeholder = "新字节 (hex)",
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
                 )
                 TextButton(
@@ -198,14 +196,13 @@ private fun HexNavigationBar(
             )
         }
 
-        OutlinedTextField(
-            value = inputOffset,
-            onValueChange = onInputOffsetChange,
-            modifier = Modifier.weight(1f),
-            placeholder = { Text("偏移 (hex 或 dec)") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
-        )
+                CompactTextField(
+                    value = inputOffset,
+                    onValueChange = onInputOffsetChange,
+                    modifier = Modifier.weight(1f),
+                    placeholder = "偏移 (hex 或 dec)",
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+                )
 
         IconButton(
             onClick = onJumpToOffset,

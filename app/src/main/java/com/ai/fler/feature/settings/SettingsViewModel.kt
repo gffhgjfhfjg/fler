@@ -174,6 +174,7 @@ class SettingsViewModel @Inject constructor(
             fallbackUrl = sourceConfig.fallbackUrl,
             checksumUrl = sourceConfig.checksumUrl,
             versionUrl = sourceConfig.versionUrl,
+            githubProxy = sourceConfig.githubProxy,
             isCustom = sourceConfig.isCustom()
         )
     }
@@ -231,12 +232,14 @@ class SettingsViewModel @Inject constructor(
         primaryUrl: String,
         fallbackUrl: String,
         checksumUrl: String,
-        versionUrl: String
+        versionUrl: String,
+        githubProxy: String
     ) {
         sourceConfig.primaryUrl = primaryUrl.trim()
         sourceConfig.fallbackUrl = fallbackUrl.trim()
         sourceConfig.checksumUrl = checksumUrl.trim()
         sourceConfig.versionUrl = versionUrl.trim()
+        sourceConfig.githubProxy = githubProxy.trim()
 
         _sourceState.value = sourceStateFromConfig()
     }
@@ -269,6 +272,7 @@ data class EngineSourceState(
     val fallbackUrl: String = "",
     val checksumUrl: String = "",
     val versionUrl: String = "",
+    val githubProxy: String = "",
     val isCustom: Boolean = false
 )
 

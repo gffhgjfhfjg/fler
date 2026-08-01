@@ -38,6 +38,7 @@ class EnginePackManager @Inject constructor(
     private val downloader: DualSourceDownloader,
     private val extractor: EngineExtractor,
     private val engineLoader: EngineLoader,
+    private val sourceConfig: EngineSourceConfig,
 ) {
     private val engineDir: File by lazy { File(context.filesDir, "engines") }
 
@@ -148,6 +149,14 @@ class EnginePackManager @Inject constructor(
         try {
             val archiveFile = File(context.cacheDir, "fler-engines.7z")
 
+            // 获取远程版本信息：优先用 version.json 的下载/校验地址（方案 B），失败回退默认源
+            val remote = downloader.fetchVersionInfo()
+            val downloadUrls = remote?.downloadUrl?.let {
+                listOf(it, sourceConfig.primaryUrl, sourceConfig.fallbackUrl)
+            }
+            val checksumUrl = remote?.checksumUrl?.takeIf { it.isNotBlank() }
+                ?: sourceConfig.checksumUrl
+
             // 1+2. 下载 + SHA256 校验（失败自动重试，最多 MAX_DOWNLOAD_ATTEMPTS 次）
             var attempt = 0
             while (true) {
@@ -157,17 +166,21 @@ class EnginePackManager @Inject constructor(
                 _progress.value = EngineProgress(EngineProgress.Phase.DOWNLOADING)
 
                 try {
-                    downloader.downloadEnginePack(archiveFile) { downloaded, total, speed ->
-                        val p = EngineProgress(
-                            phase = EngineProgress.Phase.DOWNLOADING,
-                            downloadedBytes = downloaded,
-                            totalBytes = total,
-                            speed = speed,
-                        )
-                        _progress.value = p
-                        // 实时字节进度也发送给 flow 订阅者（进度条/通知）
-                        trySend(p)
-                    }
+                    downloader.downloadEnginePack(
+                        archiveFile,
+                        urls = downloadUrls,
+                        onProgress = { downloaded, total, speed ->
+                            val p = EngineProgress(
+                                phase = EngineProgress.Phase.DOWNLOADING,
+                                downloadedBytes = downloaded,
+                                totalBytes = total,
+                                speed = speed,
+                            )
+                            _progress.value = p
+                            // 实时字节进度也发送给 flow 订阅者（进度条/通知）
+                            trySend(p)
+                        }
+                    )
 
                     Log.i(TAG, "下载完成，文件大小: ${archiveFile.length()} bytes, 路径: ${archiveFile.absolutePath}")
 
@@ -181,7 +194,7 @@ class EnginePackManager @Inject constructor(
                         throw IllegalStateException("下载的文件不是有效的 7z 归档，可能下载不完整")
                     }
 
-                    val expectedSha256 = downloader.fetchChecksum()
+                    val expectedSha256 = downloader.fetchChecksum(checksumUrl)
                     if (expectedSha256 != null) {
                         Log.i(TAG, "获取到校验和: ${expectedSha256.take(16)}...")
                         val isValid = extractor.verifyChecksum(archiveFile, expectedSha256)

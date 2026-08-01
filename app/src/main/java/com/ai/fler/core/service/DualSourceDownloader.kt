@@ -30,17 +30,23 @@ class DualSourceDownloader @Inject constructor(
      *
      * @param target 目标文件路径
      * @param onProgress 进度回调：(已下载字节, 总字节, 速度字符串)
+     * @param urls 候选下载地址；缺省用 [EngineSourceConfig.primaryUrl] / [EngineSourceConfig.fallbackUrl]。
+     *        主下载（第一个）走 GitHub 加速代理，备用下载保持原始 GitHub 地址。
      * @return 下载完成后的文件
      * @throws IllegalStateException 所有源均下载失败
      */
     suspend fun downloadEnginePack(
         target: File,
         onProgress: (downloaded: Long, total: Long, speed: String) -> Unit,
+        urls: List<String>? = null,
     ): File = withContext(Dispatchers.IO) {
-        val sources = listOf(sourceConfig.primaryUrl, sourceConfig.fallbackUrl)
+        val fallback = urls?.getOrNull(1) ?: sourceConfig.fallbackUrl
+        val main = urls?.firstOrNull() ?: sourceConfig.primaryUrl
+        // 主下载走代理（resolveUrl），备用保持原始 GitHub 地址
+        val candidates = listOf(resolveUrl(main), fallback)
         var lastException: Exception? = null
 
-        for (url in sources) {
+        for (url in candidates) {
             try {
                 Log.i(TAG, "尝试下载源: $url")
                 downloadFromSource(url, target, onProgress)
@@ -60,22 +66,29 @@ class DualSourceDownloader @Inject constructor(
     /**
      * 下载 SHA256 校验和。
      *
+     * @param url 校验文件地址；缺省用 [EngineSourceConfig.checksumUrl]。先走代理，失败回退原始地址。
      * 支持多种格式：
      * - 单行纯哈希: "abcdef1234567890..."
      * - 单行哈希+文件名: "abcdef1234567890...  fler-engines.7z"
      * - 多行 checksums.txt: 每行 "哈希  文件名"，查找 fler-engines.7z 对应的哈希
      */
-    suspend fun fetchChecksum(): String? = withContext(Dispatchers.IO) {
-        try {
-            val request = Request.Builder().url(sourceConfig.checksumUrl).build()
+    suspend fun fetchChecksum(url: String? = null): String? = withContext(Dispatchers.IO) {
+        val target = url ?: sourceConfig.checksumUrl
+        val resolved = resolveUrl(target)
+        fetchChecksumFrom(resolved) ?: if (resolved != target) fetchChecksumFrom(target) else null
+    }
+
+    private fun fetchChecksumFrom(url: String): String? {
+        return try {
+            val request = Request.Builder().url(url).build()
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    val content = response.body?.string()?.trim() ?: return@use null
+                    val content = response.body?.string()?.trim() ?: return null
                     val hash = parseChecksumContent(content)
-                    Log.i(TAG, "校验和获取成功: ${hash?.take(16) ?: "null"}... url=${sourceConfig.checksumUrl}")
+                    Log.i(TAG, "校验和获取成功: ${hash?.take(16) ?: "null"}... url=$url")
                     hash
                 } else {
-                    Log.w(TAG, "校验和请求失败: HTTP ${response.code}, url=${sourceConfig.checksumUrl}")
+                    Log.w(TAG, "校验和请求失败: HTTP ${response.code}, url=$url")
                     null
                 }
             }
@@ -214,11 +227,30 @@ class DualSourceDownloader @Inject constructor(
     }
 
     /**
+     * GitHub 加速：配置了代理前缀时，把 GitHub 域名 URL 前缀为 $proxy$url。
+     * 仅对 github.com / raw.githubusercontent.com 生效，避免破坏自建下载源。
+     */
+    private fun resolveUrl(url: String): String {
+        val proxy = sourceConfig.githubProxy
+        if (proxy.isBlank()) return url
+        if (!isGithubUrl(url)) return url
+        if (url.startsWith(proxy)) return url
+        return "$proxy$url"
+    }
+
+    private fun isGithubUrl(url: String): Boolean {
+        return url.startsWith("https://github.com/") ||
+            url.startsWith("http://github.com/") ||
+            url.startsWith("https://raw.githubusercontent.com/") ||
+            url.startsWith("http://raw.githubusercontent.com/")
+    }
+
+    /**
      * 获取远程版本信息 JSON。
      *
      * 格式：
      * ```json
-     * {"version":"1.0.0","dartVersions":["3.12.2","3.13.0"],"sizeBytes":12345678,"releaseNotes":"..."}
+     * {"version":"1.0.0","dartVersions":["3.12.2","3.13.0"],"sizeBytes":12345678,"releaseNotes":"...","downloadUrl":"...","checksumUrl":"..."}
      * ```
      */
     suspend fun fetchVersionInfo(): RemoteVersionInfo? = withContext(Dispatchers.IO) {
@@ -227,20 +259,26 @@ class DualSourceDownloader @Inject constructor(
             Log.i(TAG, "未配置版本信息 URL，跳过更新检查")
             return@withContext null
         }
-        try {
+        val resolved = resolveUrl(url)
+        fetchVersionFrom(resolved) ?: if (resolved != url) fetchVersionFrom(url) else null
+    }
+
+    private fun fetchVersionFrom(url: String): RemoteVersionInfo? {
+        return try {
             val request = Request.Builder().url(url).build()
             okHttpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    val json = response.body?.string() ?: return@use null
-                    return@withContext parseVersionJson(json)
+                    val json = response.body?.string() ?: return null
+                    parseVersionJson(json)
                 } else {
                     Log.w(TAG, "版本信息请求失败: HTTP ${response.code}, url=$url")
+                    null
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "获取版本信息异常: ${e.message}", e)
+            null
         }
-        null
     }
 
     private fun parseVersionJson(json: String): RemoteVersionInfo? {
@@ -253,10 +291,12 @@ class DualSourceDownloader @Inject constructor(
             // dartVersions 是数组
             val dartVersions = extractJsonArray(json, "dartVersions")
 
-            // downloadUrl 优先取 JSON 字段，缺省回退到主下载源
+            // downloadUrl / checksumUrl 优先取 JSON 字段，缺省回退到主下载源
             val downloadUrl = extractJsonField(json, "downloadUrl")
                 ?.takeIf { it.isNotBlank() }
                 ?: sourceConfig.primaryUrl
+            val checksumUrl = extractJsonField(json, "checksumUrl")
+                ?.takeIf { it.isNotBlank() }
 
             RemoteVersionInfo(
                 version = version,
@@ -264,6 +304,7 @@ class DualSourceDownloader @Inject constructor(
                 sizeBytes = sizeBytes,
                 releaseNotes = releaseNotes,
                 downloadUrl = downloadUrl,
+                checksumUrl = checksumUrl,
             )
         } catch (_: Exception) {
             null
@@ -292,6 +333,7 @@ data class RemoteVersionInfo(
     val sizeBytes: Long,
     val releaseNotes: String?,
     val downloadUrl: String,
+    val checksumUrl: String? = null,
 )
 
 private class HttpException(code: Int, override val message: String) : Exception("HTTP $code: $message")

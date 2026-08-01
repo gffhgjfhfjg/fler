@@ -21,6 +21,7 @@ class EngineSourceConfig @Inject constructor(
         private const val KEY_FALLBACK_URL = "fallback_url"
         private const val KEY_CHECKSUM_URL = "checksum_url"
         private const val KEY_VERSION_URL = "version_url"
+        private const val KEY_GITHUB_PROXY = "github_proxy"
 
         // 默认地址（v0.3.10 起：引擎改为内存直导 DB（classes/methods/pp/strings），
         // 修复产物页类/方法为空；PRODUCT 布局宏已含，分析成功）
@@ -56,12 +57,18 @@ class EngineSourceConfig @Inject constructor(
         get() = prefs.getString(KEY_VERSION_URL, DEFAULT_VERSION_URL) ?: DEFAULT_VERSION_URL
         set(value) = prefs.edit().putString(KEY_VERSION_URL, value).apply()
 
+    /** GitHub 加速前缀（如 https://gh-proxy.com），空表示关闭。 */
+    var githubProxy: String
+        get() = prefs.getString(KEY_GITHUB_PROXY, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_GITHUB_PROXY, value.trim().trimEnd('/')).apply()
+
     /** 是否使用了自定义地址。 */
     fun isCustom(): Boolean {
         return primaryUrl != DEFAULT_PRIMARY_URL ||
             fallbackUrl != DEFAULT_FALLBACK_URL ||
             checksumUrl != DEFAULT_CHECKSUM_URL ||
-            versionUrl != DEFAULT_VERSION_URL
+            versionUrl != DEFAULT_VERSION_URL ||
+            githubProxy.isNotBlank()
     }
 
     /** 重置为默认地址。 */

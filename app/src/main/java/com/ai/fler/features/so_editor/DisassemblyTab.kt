@@ -423,14 +423,11 @@ private fun DisassemblyNavigationBar(
                     )
                 }
 
-                OutlinedTextField(
+                CompactTextField(
                     value = inputAddress,
                     onValueChange = onInputAddressChange,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(40.dp),
-                    placeholder = { Text("地址 (hex 或 dec)") },
-                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    placeholder = "地址 (hex 或 dec)",
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
                 )
 
@@ -462,21 +459,12 @@ private fun DisassemblyNavigationBar(
                 .padding(horizontal = 12.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedTextField(
+            CompactTextField(
                 value = searchQuery,
                 onValueChange = onSearchQueryChange,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(40.dp),
-                placeholder = { Text("搜索指令...") },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                },
-                singleLine = true,
+                modifier = Modifier.weight(1f),
+                placeholder = "搜索指令...",
+                leadingIcon = Icons.Default.Search,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
             )
             IconButton(
