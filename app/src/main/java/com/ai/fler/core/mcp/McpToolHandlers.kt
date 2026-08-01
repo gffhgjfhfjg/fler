@@ -2,6 +2,7 @@ package com.ai.fler.core.mcp
 
 import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
+import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.AddressTranslator
 import com.ai.fler.core.service.EngineLoader
 import com.ai.fler.data.dao.AnalysisDao
@@ -520,8 +521,8 @@ class McpToolHandlers @Inject constructor(
             val so = p.str("soPath") ?: throw McpToolException("soPath 缺失")
             val offset = p.long("offset") ?: throw McpToolException("offset 缺失")
             val asm = p.str("assembly") ?: throw McpToolException("assembly 缺失")
-            val newBytes = CapstoneBindings.assembleWithCapstone(capstonePath, asm, offset)
-                ?: throw McpToolException("Capstone 无法汇编: $asm")
+            val newBytes = KeystoneBindings.asm(asm, offset)
+                ?: throw McpToolException("Keystone 无法汇编: $asm")
             val result = patchService.apply(so, offset, newBytes)
             buildJsonObject {
                 put("ok", result.ok)

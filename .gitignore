@@ -23,3 +23,6 @@ fler-engines/
 *.zip
 *.log
 *.bak
+
+# ── keystone 静态库（GitHub Actions 交叉编译产物，构建期 fetchKeystone 下载）──
+/app/libs/

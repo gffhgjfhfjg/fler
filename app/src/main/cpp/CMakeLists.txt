@@ -21,6 +21,15 @@ endif()
 # ========== 头文件路径 ==========
 include_directories(
     .
+    keystone_include
+)
+
+# ========== Keystone 静态库（GitHub Actions 交叉编译产物） ==========
+# 产物：myfler/keystone-build Release（libkeystone-arm64-v8a.a），
+# 由 app/build.gradle.kts 的 fetchKeystone 任务下载到 app/libs/arm64-v8a/
+add_library(keystone STATIC IMPORTED)
+set_target_properties(keystone PROPERTIES
+    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/arm64-v8a/libkeystone.a"
 )
 
 # ========== 查找 Android 系统库 ==========
@@ -45,10 +54,12 @@ add_library(fler_jni SHARED
     jni_bridge/elf_parser_jni.cpp
     jni_bridge/arm64_encoder_jni.cpp
     jni_bridge/capstone_jni.cpp
+    jni_bridge/keystone_jni.cpp
 )
 
 target_link_libraries(fler_jni
     fler_native
+    keystone
     ${log-lib}
     ${android-lib}
 )

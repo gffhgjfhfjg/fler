@@ -1,3 +1,5 @@
+import java.net.URI
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -47,6 +49,7 @@ android {
             }
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -101,4 +104,39 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
+}
+
+// ══════════════════════════════════════════════════════════
+// Keystone 静态库获取（构建期下载，GitHub Actions 交叉编译产物）
+// 产物仓库：github.com/myfler/keystone-build
+// Release tag：keystone-latest-arm64-v1
+// ══════════════════════════════════════════════════════════
+val keystoneReleaseTag = "keystone-latest-arm64-v1"
+val keystoneBaseUrl = "https://github.com/myfler/keystone-build/releases/download/$keystoneReleaseTag"
+
+val fetchKeystone = tasks.register("fetchKeystone") {
+    // 构建期网络下载任务，与配置缓存不兼容
+    notCompatibleWithConfigurationCache("下载 keystone .a（构建期网络依赖）")
+    doLast {
+        // 执行期计算路径，避免配置缓存序列化 project File 引用
+        val dest = project.file("libs/arm64-v8a/libkeystone.a")
+        if (dest.exists() && dest.length() > 0) {
+            logger.lifecycle("keystone: 已存在 ${dest.absolutePath}（${dest.length()} 字节），跳过下载")
+            return@doLast
+        }
+        dest.parentFile.mkdirs()
+        val url = URI("$keystoneBaseUrl/libkeystone-arm64-v8a.a").toURL()
+        logger.lifecycle("keystone: 下载 $url")
+        url.openStream().use { input ->
+            dest.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (dest.length() == 0L) {
+            throw GradleException("keystone 下载失败或为空: $url")
+        }
+        logger.lifecycle("keystone: 已下载 ${dest.length()} 字节 -> ${dest.absolutePath}")
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(fetchKeystone)
 }

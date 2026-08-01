@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.ai.fler.core.jni.Arm64EncoderBindings
 import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
+import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.BackupManager
 import com.ai.fler.core.service.EngineLoader
 import com.ai.fler.core.service.PatchExporter
@@ -304,10 +305,10 @@ class SoEditorViewModel @Inject constructor(
         engineLoader.engineDirectory().resolve("lib/libcapstone.so").absolutePath
 
     /**
-     * 编码一条 ARM64 指令：优先 Capstone cs_asm，失败回退自研编码器。
+     * 编码一条 ARM64 指令：优先 Keystone（完整 AArch64 汇编器），失败回退自研编码器。
      *
-     * cs_asm 对部分形式（pre/post 变址 `!`、ldur/stur 等）不支持，
-     * 自研编码器覆盖常用指令（LDR/STR/LDP/STP/ADD/MOV/B/BL/NOP 等）。
+     * Keystone 支持完整 AArch64（pre/post 变址、ldur/stur 等），
+     * 自研编码器覆盖常用指令作兜底。
      *
      * @param assembly 完整指令文本（如 "MOV W0, #1"）
      * @param address 指令所在地址（分支指令偏移量计算依赖它）
@@ -315,14 +316,14 @@ class SoEditorViewModel @Inject constructor(
      */
     private fun encodeInstruction(assembly: String, address: Long): ByteArray? {
         if (assembly.isBlank()) return null
-        // 1) Capstone cs_asm
-        val capstoneBytes = try {
-            CapstoneBindings.assembleWithCapstone(capstonePath(), assembly, address)
+        // 1) Keystone（完整 AArch64 汇编）
+        val keystoneBytes = try {
+            KeystoneBindings.asm(assembly, address)
         } catch (e: Exception) {
-            Log.w(TAG, "Capstone cs_asm 汇编失败: $assembly", e)
+            Log.w(TAG, "Keystone 汇编失败: $assembly", e)
             null
         }
-        if (capstoneBytes != null && capstoneBytes.isNotEmpty()) return capstoneBytes
+        if (keystoneBytes != null && keystoneBytes.isNotEmpty()) return keystoneBytes
 
         // 2) 回退自研编码器
         return try {
