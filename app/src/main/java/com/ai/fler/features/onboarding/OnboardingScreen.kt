@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -48,7 +49,8 @@ import kotlinx.coroutines.launch
  * 1. 下载引擎包
  * 2. 选择 APK 分析
  * 3. 浏览产物
- * 4. 编辑 SO 文件
+ * 4. 了解 MCP 服务器
+ * 5. 编辑 SO 文件
  */
 @Composable
 fun OnboardingScreen(
@@ -69,6 +71,11 @@ fun OnboardingScreen(
             icon = Icons.Default.Science,
             title = "运行分析",
             description = "一键启动 Blutter 分析，\n生成类列表、方法和补丁点信息。"
+        ),
+        OnboardingPage(
+            icon = Icons.Default.Hub,
+            title = "MCP 服务器",
+            description = "内置 MCP 服务器，可让 Claude 等 AI 助手直接查询分析结果\n（类/方法/PP、反汇编、补丁）。\n在设置页配置端口、Token 与局域网开关。"
         ),
         OnboardingPage(
             icon = Icons.Default.Edit,

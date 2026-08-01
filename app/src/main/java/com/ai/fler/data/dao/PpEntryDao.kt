@@ -29,6 +29,15 @@ interface PpEntryDao {
     @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND type = 'String' ORDER BY vm_offset")
     fun getStringsByAnalysisId(analysisId: Long): Flow<List<PpEntry>>
 
+    @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND type = 'String' ORDER BY vm_offset")
+    suspend fun getStringsByAnalysisIdList(analysisId: Long): List<PpEntry>
+
+    @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND type = 'String' AND description LIKE '%' || :query || '%' LIMIT :limit")
+    suspend fun searchStrings(analysisId: Long, query: String, limit: Int): List<PpEntry>
+
+    @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND vm_offset = :vmOffset")
+    suspend fun getPpByVmOffset(analysisId: Long, vmOffset: Long): List<PpEntry>
+
     @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId ORDER BY caller_count DESC LIMIT :limit")
     fun getTopCallersByAnalysisId(analysisId: Long, limit: Int = 50): Flow<List<PpEntry>>
 

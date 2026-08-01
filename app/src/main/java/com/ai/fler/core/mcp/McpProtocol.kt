@@ -23,6 +23,7 @@ import kotlinx.serialization.json.addJsonObject
 class McpProtocol(
     private val handlers: McpToolHandlers,
     private val logger: McpLogger,
+    private val resourceProvider: McpResourceProvider? = null,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -43,12 +44,10 @@ class McpProtocol(
             method == "ping" -> result(id, buildJsonObject {})
             method == "tools/list" -> result(id, toolsList())
             method == "tools/call" -> toolsCall(id, params)
-            method == "resources/list" -> result(id, buildJsonObject { putJsonArray("resources") {} })
-            method == "resources/read" ->
-                McpErrors.errorJson(id, McpErrors.INVALID_PARAMS, "resources/read 未提供（请使用工具）")
-            method == "prompts/list" -> result(id, buildJsonObject { putJsonArray("prompts") {} })
-            method == "prompts/get" ->
-                McpErrors.errorJson(id, McpErrors.INVALID_PARAMS, "prompts/get 未提供")
+            method == "resources/list" -> resourcesList(id)
+            method == "resources/read" -> resourcesRead(id, params)
+            method == "prompts/list" -> result(id, promptsList())
+            method == "prompts/get" -> promptsGet(id, params)
             else -> McpErrors.errorJson(id, McpErrors.METHOD_NOT_FOUND, "方法未找到: $method")
         }
     }
@@ -90,8 +89,7 @@ class McpProtocol(
         }
     }
 
-    private suspend fun toolsCall(id: JsonElement?, params: JsonObject): JsonObject {
-        val name = params["name"]?.jsonPrimitive?.contentOrNull
+    private suspend fun toolsCall(id: JsonElement?, params: JsonObject): JsonObject {        val name = params["name"]?.jsonPrimitive?.contentOrNull
             ?: return McpErrors.errorJson(id, McpErrors.INVALID_PARAMS, "缺少工具名")
         val tool = handlers.tools[name]
             ?: return McpErrors.errorJson(id, McpErrors.TOOL_NOT_FOUND, "工具不存在: $name")
@@ -134,6 +132,97 @@ class McpProtocol(
             logger.error("工具调用异常: $name - ${e.message}")
             McpErrors.errorJson(id, McpErrors.SERVER_ERROR, "工具执行异常: ${e.message}")
         }
+    }
+
+    // ========== resources ==========
+
+    private suspend fun resourcesList(id: JsonElement?): JsonObject {
+        val resources = resourceProvider?.listResources().orEmpty()
+        return result(id, buildJsonObject {
+            putJsonArray("resources") {
+                resources.forEach { r ->
+                    addJsonObject {
+                        put("uri", r.uri)
+                        put("name", r.name)
+                        put("mimeType", r.mimeType)
+                    }
+                }
+            }
+        })
+    }
+
+    private suspend fun resourcesRead(id: JsonElement?, params: JsonObject): JsonObject {
+        val uri = params["uri"]?.jsonPrimitive?.contentOrNull
+            ?: return McpErrors.errorJson(id, McpErrors.INVALID_PARAMS, "缺少 uri")
+        val text = resourceProvider?.readResource(uri)
+            ?: return McpErrors.errorJson(id, McpErrors.INVALID_PARAMS, "资源不存在: $uri")
+        return result(id, buildJsonObject {
+            putJsonArray("contents") {
+                addJsonObject {
+                    put("uri", uri)
+                    put("mimeType", "text/plain")
+                    put("text", text)
+                }
+            }
+        })
+    }
+
+    // ========== prompts ==========
+
+    private fun promptsList(): JsonObject = buildJsonObject {
+        putJsonArray("prompts") {
+            addJsonObject {
+                put("name", "analyze_method")
+                put("description", "引导分析指定 Dart 方法（反汇编 + 调用关系 + PP 引用）")
+                putJsonArray("arguments") {
+                    addJsonObject {
+                        put("name", "analysisId")
+                        put("description", "分析记录 ID")
+                        put("required", true)
+                    }
+                    addJsonObject {
+                        put("name", "methodName")
+                        put("description", "方法名")
+                        put("required", true)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun promptsGet(id: JsonElement?, params: JsonObject): JsonObject {
+        val name = params["name"]?.jsonPrimitive?.contentOrNull
+        if (name != "analyze_method") {
+            return McpErrors.errorJson(id, McpErrors.INVALID_PARAMS, "提示不存在: $name")
+        }
+        val arguments = params["arguments"]?.jsonObject
+        val analysisId = arguments?.get("analysisId")?.jsonPrimitive?.contentOrNull ?: ""
+        val methodName = arguments?.get("methodName")?.jsonPrimitive?.contentOrNull ?: ""
+        val promptText = buildString {
+            append("请分析以下 Dart 方法（App 内分析 ID: $analysisId，方法名: $methodName）。\n")
+            append("步骤：\n")
+            append("1) 用 get_method 获取反汇编 src_code；\n")
+            append("2) 用 get_method_callers 找调用者；\n")
+            append("3) 用 get_pp_references / get_pp_entry 查相关 PP 条目；\n")
+            append("4) 结合 search_strings 定位关键字符串；\n")
+            append("5) 如需修改，用 assemble_instruction 预览机器码、patch_instruction 写补丁。\n")
+            append("目标：解释方法逻辑、指出可改写的指令，并说明风险。")
+        }
+        return result(id, buildJsonObject {
+            putJsonObject("prompt") {
+                put("name", "analyze_method")
+                put("description", "引导分析指定 Dart 方法")
+                putJsonArray("messages") {
+                    addJsonObject {
+                        put("role", "user")
+                        putJsonObject("content") {
+                            put("type", "text")
+                            put("text", promptText)
+                        }
+                    }
+                }
+            }
+        })
     }
 
     // ========== 辅助 ==========
