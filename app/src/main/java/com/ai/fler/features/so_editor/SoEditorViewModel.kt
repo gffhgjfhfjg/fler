@@ -7,9 +7,11 @@ import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
 import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.BackupManager
+import com.ai.fler.core.service.EngineLoader
 import com.ai.fler.core.service.PatchExporter
 import com.ai.fler.data.dao.AddressMappingDao
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -34,7 +36,8 @@ class SoEditorViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val addressMappingDao: AddressMappingDao,
     private val backupManager: BackupManager,
-    private val patchExporter: PatchExporter
+    private val patchExporter: PatchExporter,
+    private val engineLoader: EngineLoader
 ) : ViewModel() {
 
     companion object {
@@ -115,6 +118,19 @@ class SoEditorViewModel @Inject constructor(
 
     fun setSelectedOffset(offset: Long) {
         _selectedOffset.value = offset
+    }
+
+    /**
+     * 关闭当前文件，回到文件选择/最近列表（SO 编辑器返回按钮）。
+     */
+    fun closeFile() {
+        currentFilePath = ""
+        currentFileSize = 0
+        _uiState.value = SoEditorUiState()
+        _hexData.value = HexDataState()
+        _disassemblyData.value = DisassemblyDataState()
+        _currentTab.value = EditorTab.STRUCTURE
+        _selectedOffset.value = 0L
     }
 
     // ========== 打开文件 ==========
@@ -328,15 +344,55 @@ class SoEditorViewModel @Inject constructor(
      * 注意：自研解码器与 capstone 解码均已移除，SO 编辑器不再内置反汇编。
      * 汇编内容请通过 ASM 浏览（分析时生成的 src_code）查看；此处置空并提示。
      */
+    /**
+     * 从文件读取字节并反汇编（分段，每页 4096 字节）。
+     *
+     * 用引擎包已加载的 libcapstone.so（[CapstoneBindings.disassembleWithCapstone]）解码；
+     * 引擎包不可用时置空并提示。
+     * 保留 [DisassemblyDataState.highlightAddress]（若已设置），便于编辑/撤销后刷新仍高亮。
+     */
     fun loadDisassembly(offset: Long, size: Long = DISASM_PAGE_SIZE) {
-        _disassemblyData.value = DisassemblyDataState(
-            baseAddress = offset,
-            loadedSize = size,
-            instructions = emptyList(),
-            isLoading = false,
-            errorMessage = "反汇编引擎已移除（自研解码器 / capstone 均删除），请通过 ASM 浏览查看 src_code"
-        )
+        viewModelScope.launch {
+            val previousHighlight = _disassemblyData.value.highlightAddress
+            _disassemblyData.value = _disassemblyData.value.copy(isLoading = true)
+            try {
+                var capstoneError: String? = null
+                val result = withContext(Dispatchers.IO) {
+                    val bytes = readFileBytes(offset, size)
+                    if (bytes.isEmpty()) {
+                        emptyList<com.ai.fler.core.jni.DisasmInstruction>()
+                    } else {
+                        CapstoneBindings.disassembleWithCapstone(capstonePath(), bytes, offset)?.also {
+                            if (it.isEmpty()) capstoneError = "该区域无法用 Capstone 解码"
+                        } ?: run {
+                            capstoneError = "Capstone 反汇编不可用（请先下载引擎包）"
+                            emptyList()
+                        }
+                    }
+                }
+                _disassemblyData.value = DisassemblyDataState(
+                    baseAddress = offset,
+                    loadedSize = size,
+                    highlightAddress = previousHighlight,
+                    instructions = result,
+                    isLoading = false,
+                    errorMessage = capstoneError
+                )
+            } catch (e: Exception) {
+                _disassemblyData.value = DisassemblyDataState(
+                    baseAddress = offset,
+                    loadedSize = size,
+                    highlightAddress = previousHighlight,
+                    isLoading = false,
+                    errorMessage = e.message
+                )
+            }
+        }
     }
+
+    /** 引擎包内 libcapstone.so 的绝对路径。 */
+    private fun capstonePath(): String =
+        engineLoader.engineDirectory().resolve("lib/libcapstone.so").absolutePath
 
     /**
      * 设置/清除高亮地址（编辑或撤销后调用，让 UI 高亮被修改的指令行）。

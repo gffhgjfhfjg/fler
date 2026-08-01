@@ -22,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FileOpen
@@ -128,6 +129,17 @@ fun SoEditorScreen(
                         text = uiState.fileName.ifBlank { "SO 编辑器" },
                         style = MaterialTheme.typography.titleMedium
                     )
+                },
+                navigationIcon = {
+                    // 打开文件后显示返回按钮，回到最近文件/选择列表
+                    if (uiState.isFileOpen) {
+                        IconButton(onClick = { viewModel.closeFile() }) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "返回"
+                            )
+                        }
+                    }
                 },
                 actions = {
                     // 打开文件按钮（始终可见，支持随时切换文件）

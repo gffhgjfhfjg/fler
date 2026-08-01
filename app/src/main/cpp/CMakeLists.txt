@@ -51,6 +51,7 @@ target_link_libraries(fler_native
 add_library(fler_jni SHARED
     jni_bridge/blutter_jni.cpp
     jni_bridge/elf_parser_jni.cpp
+    jni_bridge/capstone_jni.cpp
     jni_bridge/keystone_jni.cpp
 )
 

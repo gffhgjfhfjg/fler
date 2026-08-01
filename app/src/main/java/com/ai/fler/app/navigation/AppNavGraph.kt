@@ -213,8 +213,7 @@ fun AppNavGraph() {
             }
 
             // ========== ASM 方法列表 ==========
-            // 点击方法直接跳转 SO 编辑器（不再经过 AsmBrowserScreen 中间层）。
-            // AsmBrowser 路由保留但不从方法列表进入，避免「又进入一层页面」的体验问题。
+            // 点击方法 → AsmBrowser（查看 src_code），AsmBrowser 内「在 SO 中编辑」→ SO 编辑器。
             composable(
                 route = Screen.AsmList.route,
                 arguments = listOf(navArgument("analysisId") { type = NavType.LongType })
@@ -224,13 +223,13 @@ fun AppNavGraph() {
                     analysisId = analysisId,
                     onBack = { navController.popBackStack() },
                     onMethodClick = { aId, methodId ->
-                        scope.launch { editMethodInSo(aId, methodId) }
+                        navController.navigate(Screen.AsmBrowser.createRoute(aId, methodId))
                     }
                 )
             }
 
             // ========== ASM 内容 ==========
-            // 单方法 Blutter 伪代码查看页（保留路由，但不作为方法列表的默认跳转目标）。
+            // 单方法 src_code 查看页（Blutter 反汇编伪代码）；「在 SO 中编辑」→ SO 编辑器。
             composable(
                 route = Screen.AsmBrowser.route,
                 arguments = listOf(
