@@ -269,8 +269,8 @@ class SoEditorViewModel @Inject constructor(
     /**
      * 汇编指令补丁：把人类可读的汇编指令（如 "MOV W0, #1"）编码为机器码并写入文件。
      *
-     * 使用 Capstone cs_asm（[CapstoneBindings.assembleWithCapstone]）编码，
-     * 支持完整 ARM64 指令集；分支指令偏移量由指令地址（offset）正确计算。
+     * 编码走 [encodeInstruction]：优先 Capstone cs_asm（完整指令集 + 分支地址正确），
+     * cs_asm 不支持的形式回退自研编码器（[Arm64EncoderBindings]）。
      *
      * @param offset 文件偏移（指令起始地址）
      * @param instruction 指令名（如 "MOV" / "RET" / "NOP"），大小写不敏感
@@ -282,16 +282,9 @@ class SoEditorViewModel @Inject constructor(
             try {
                 // 1. 汇编：指令文本 -> 机器码字节
                 val assembly = if (args.isBlank()) instruction.trim() else "${instruction.trim()} ${args.trim()}"
-                val newBytes = CapstoneBindings.assembleWithCapstone(
-                    capstonePath(),
-                    assembly,
-                    offset
-                ) ?: run {
-                    Log.w(TAG, "汇编失败: $assembly（Capstone cs_asm 无法编码）")
-                    return@withContext false
-                }
-                if (newBytes.isEmpty()) {
-                    Log.w(TAG, "汇编失败: $assembly（编码结果为空）")
+                val newBytes = encodeInstruction(assembly, offset)
+                if (newBytes == null) {
+                    Log.w(TAG, "汇编失败: $assembly（Capstone cs_asm 与自研编码器都无法编码）")
                     return@withContext false
                 }
 
@@ -311,21 +304,59 @@ class SoEditorViewModel @Inject constructor(
         engineLoader.engineDirectory().resolve("lib/libcapstone.so").absolutePath
 
     /**
-     * 用 Capstone 汇编一条指令（供指令编辑对话框实时校验预览）。
+     * 编码一条 ARM64 指令：优先 Capstone cs_asm，失败回退自研编码器。
+     *
+     * cs_asm 对部分形式（pre/post 变址 `!`、ldur/stur 等）不支持，
+     * 自研编码器覆盖常用指令（LDR/STR/LDP/STP/ADD/MOV/B/BL/NOP 等）。
      *
      * @param assembly 完整指令文本（如 "MOV W0, #1"）
      * @param address 指令所在地址（分支指令偏移量计算依赖它）
-     * @return 机器码字节；Capstone 不可用或汇编失败返回 null
+     * @return 机器码字节；两种编码器都失败返回 null
      */
-    fun assembleInstruction(assembly: String, address: Long): ByteArray? {
+    private fun encodeInstruction(assembly: String, address: Long): ByteArray? {
         if (assembly.isBlank()) return null
-        return try {
+        // 1) Capstone cs_asm
+        val capstoneBytes = try {
             CapstoneBindings.assembleWithCapstone(capstonePath(), assembly, address)
         } catch (e: Exception) {
-            Log.w(TAG, "Capstone 汇编失败: $assembly", e)
+            Log.w(TAG, "Capstone cs_asm 汇编失败: $assembly", e)
+            null
+        }
+        if (capstoneBytes != null && capstoneBytes.isNotEmpty()) return capstoneBytes
+
+        // 2) 回退自研编码器
+        return try {
+            val trimmed = assembly.trim()
+            val sp = trimmed.indexOfFirst { it == ' ' || it == '\t' }
+            val inst = if (sp < 0) trimmed.uppercase() else trimmed.substring(0, sp).uppercase()
+            val args = if (sp < 0) "" else trimmed.substring(sp + 1).trim()
+            val code = Arm64EncoderBindings().encode(inst, args)
+            if (code == 0L) {
+                Log.w(TAG, "自研编码器无法编码: $assembly")
+                null
+            } else {
+                byteArrayOf(
+                    (code and 0xFF).toByte(),
+                    ((code shr 8) and 0xFF).toByte(),
+                    ((code shr 16) and 0xFF).toByte(),
+                    ((code shr 24) and 0xFF).toByte(),
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "自研编码器异常: $assembly", e)
             null
         }
     }
+
+    /**
+     * 编码一条 ARM64 指令（供指令编辑对话框实时校验预览）。
+     *
+     * @param assembly 完整指令文本（如 "MOV W0, #1"）
+     * @param address 指令所在地址（分支指令偏移量计算依赖它）
+     * @return 机器码字节；Capstone 与自研编码器都失败返回 null
+     */
+    fun assembleInstruction(assembly: String, address: Long): ByteArray? =
+        encodeInstruction(assembly, address)
 
     /**
      * 从文件读取字节并反汇编（分段，每页 4096 字节）。

@@ -233,11 +233,14 @@ private fun validateAsmText(
 ): ValidationResult? {
     val parsed = parseAsmText(text) ?: return null
     val (inst, args) = parsed
-    // 用 Capstone cs_asm 编码预览
+    // 用 Capstone cs_asm + 自研编码器编码预览
     return try {
         val bytes = encode(text.trim())
         if (bytes == null || bytes.isEmpty()) {
-            ValidationResult(inst, args, errorMessage = "Capstone 无法编码该指令")
+            ValidationResult(
+                inst, args,
+                errorMessage = "无法编码该指令（capstone/自研编码器均不支持该形式）；请尝试输入 NOP / MOV W0, #1 / B #0x... 等"
+            )
         } else {
             ValidationResult(inst, args, encodedBytes = bytes)
         }
