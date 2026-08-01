@@ -128,7 +128,8 @@ fun DisassemblyTab(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (isMethodMode) "该方法无可汇编字节（检查文件偏移或方法长度）" else "暂无汇编数据",
+                        text = disassemblyData.errorMessage
+                            ?: if (isMethodMode) "该方法无可汇编字节（检查文件偏移或方法长度）" else "暂无汇编数据",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

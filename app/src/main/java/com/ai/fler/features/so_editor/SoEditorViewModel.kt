@@ -7,12 +7,9 @@ import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.ai.fler.core.jni.Arm64EncoderBindings
-import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
 import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.BackupManager
-import com.ai.fler.core.service.EngineLoader
 import com.ai.fler.core.service.PatchExporter
 import com.ai.fler.data.dao.AddressMappingDao
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -37,8 +34,7 @@ class SoEditorViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val addressMappingDao: AddressMappingDao,
     private val backupManager: BackupManager,
-    private val patchExporter: PatchExporter,
-    private val engineLoader: EngineLoader
+    private val patchExporter: PatchExporter
 ) : ViewModel() {
 
     companion object {
@@ -270,8 +266,7 @@ class SoEditorViewModel @Inject constructor(
     /**
      * 汇编指令补丁：把人类可读的汇编指令（如 "MOV W0, #1"）编码为机器码并写入文件。
      *
-     * 编码走 [encodeInstruction]：优先 Capstone cs_asm（完整指令集 + 分支地址正确），
-     * cs_asm 不支持的形式回退自研编码器（[Arm64EncoderBindings]）。
+     * 编码走 [encodeInstruction]（Keystone 完整 AArch64 汇编）。
      *
      * @param offset 文件偏移（指令起始地址）
      * @param instruction 指令名（如 "MOV" / "RET" / "NOP"），大小写不敏感
@@ -285,7 +280,7 @@ class SoEditorViewModel @Inject constructor(
                 val assembly = if (args.isBlank()) instruction.trim() else "${instruction.trim()} ${args.trim()}"
                 val newBytes = encodeInstruction(assembly, offset)
                 if (newBytes == null) {
-                    Log.w(TAG, "汇编失败: $assembly（Capstone cs_asm 与自研编码器都无法编码）")
+                    Log.w(TAG, "汇编失败: $assembly（Keystone 无法编码）")
                     return@withContext false
                 }
 
@@ -300,51 +295,19 @@ class SoEditorViewModel @Inject constructor(
 
     // ========== 反汇编 ==========
 
-    /** 引擎包内 libcapstone.so 的绝对路径。 */
-    private fun capstonePath(): String =
-        engineLoader.engineDirectory().resolve("lib/libcapstone.so").absolutePath
-
     /**
-     * 编码一条 ARM64 指令：优先 Keystone（完整 AArch64 汇编器），失败回退自研编码器。
-     *
-     * Keystone 支持完整 AArch64（pre/post 变址、ldur/stur 等），
-     * 自研编码器覆盖常用指令作兜底。
+     * 编码一条 ARM64 指令：仅使用 Keystone（完整 AArch64 汇编器）。
      *
      * @param assembly 完整指令文本（如 "MOV W0, #1"）
      * @param address 指令所在地址（分支指令偏移量计算依赖它）
-     * @return 机器码字节；两种编码器都失败返回 null
+     * @return 机器码字节；Keystone 失败返回 null
      */
     private fun encodeInstruction(assembly: String, address: Long): ByteArray? {
         if (assembly.isBlank()) return null
-        // 1) Keystone（完整 AArch64 汇编）
-        val keystoneBytes = try {
-            KeystoneBindings.asm(assembly, address)
+        return try {
+            KeystoneBindings.asm(assembly, address)?.takeIf { it.isNotEmpty() }
         } catch (e: Exception) {
             Log.w(TAG, "Keystone 汇编失败: $assembly", e)
-            null
-        }
-        if (keystoneBytes != null && keystoneBytes.isNotEmpty()) return keystoneBytes
-
-        // 2) 回退自研编码器
-        return try {
-            val trimmed = assembly.trim()
-            val sp = trimmed.indexOfFirst { it == ' ' || it == '\t' }
-            val inst = if (sp < 0) trimmed.uppercase() else trimmed.substring(0, sp).uppercase()
-            val args = if (sp < 0) "" else trimmed.substring(sp + 1).trim()
-            val code = Arm64EncoderBindings().encode(inst, args)
-            if (code == 0L) {
-                Log.w(TAG, "自研编码器无法编码: $assembly")
-                null
-            } else {
-                byteArrayOf(
-                    (code and 0xFF).toByte(),
-                    ((code shr 8) and 0xFF).toByte(),
-                    ((code shr 16) and 0xFF).toByte(),
-                    ((code shr 24) and 0xFF).toByte(),
-                )
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "自研编码器异常: $assembly", e)
             null
         }
     }
@@ -354,51 +317,25 @@ class SoEditorViewModel @Inject constructor(
      *
      * @param assembly 完整指令文本（如 "MOV W0, #1"）
      * @param address 指令所在地址（分支指令偏移量计算依赖它）
-     * @return 机器码字节；Capstone 与自研编码器都失败返回 null
+     * @return 机器码字节；Keystone 失败返回 null
      */
     fun assembleInstruction(assembly: String, address: Long): ByteArray? =
         encodeInstruction(assembly, address)
 
     /**
-     * 从文件读取字节并反汇编（分段，每页 4096 字节）。
+     * 加载反汇编数据。
      *
-     * 优先用引擎包已加载的 libcapstone.so（[CapstoneBindings.disassembleWithCapstone]，
-     * 完整正确的 ARM64 反汇编）；引擎包不可用（返回 null）时回退自研解码器
-     * [Arm64EncoderBindings.disassemble]。
-     * 保留 [DisassemblyDataState.highlightAddress]（若已设置），便于编辑/撤销后刷新仍高亮。
+     * 注意：自研解码器与 capstone 解码均已移除，SO 编辑器不再内置反汇编。
+     * 汇编内容请通过 ASM 浏览（分析时生成的 src_code）查看；此处置空并提示。
      */
     fun loadDisassembly(offset: Long, size: Long = DISASM_PAGE_SIZE) {
-        viewModelScope.launch {
-            val previousHighlight = _disassemblyData.value.highlightAddress
-            _disassemblyData.value = _disassemblyData.value.copy(isLoading = true)
-            try {
-                val result = withContext(Dispatchers.IO) {
-                    val bytes = readFileBytes(offset, size)
-                    if (bytes.isEmpty()) {
-                        emptyList<com.ai.fler.core.jni.DisasmInstruction>()
-                    } else {
-                        // Capstone 解码优先（完整正确）；不可用时回退自研解码器
-                        CapstoneBindings.disassembleWithCapstone(capstonePath(), bytes, offset)
-                            ?: Arm64EncoderBindings().disassemble(bytes, offset)
-                    }
-                }
-                _disassemblyData.value = DisassemblyDataState(
-                    baseAddress = offset,
-                    loadedSize = size,
-                    highlightAddress = previousHighlight,
-                    instructions = result,
-                    isLoading = false
-                )
-            } catch (e: Exception) {
-                _disassemblyData.value = DisassemblyDataState(
-                    baseAddress = offset,
-                    loadedSize = size,
-                    highlightAddress = previousHighlight,
-                    isLoading = false,
-                    errorMessage = e.message
-                )
-            }
-        }
+        _disassemblyData.value = DisassemblyDataState(
+            baseAddress = offset,
+            loadedSize = size,
+            instructions = emptyList(),
+            isLoading = false,
+            errorMessage = "反汇编引擎已移除（自研解码器 / capstone 均删除），请通过 ASM 浏览查看 src_code"
+        )
     }
 
     /**

@@ -1,10 +1,8 @@
 package com.ai.fler.core.mcp
 
-import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
 import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.AddressTranslator
-import com.ai.fler.core.service.EngineLoader
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
@@ -24,7 +22,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
-import java.io.RandomAccessFile
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -40,7 +37,6 @@ class McpToolHandlers @Inject constructor(
     private val dartMethodDao: DartMethodDao,
     private val ppEntryDao: PpEntryDao,
     private val addressTranslator: AddressTranslator,
-    private val engineLoader: EngineLoader,
     private val config: McpConfig,
     private val patchService: McpPatchService,
 ) {
@@ -51,9 +47,6 @@ class McpToolHandlers @Inject constructor(
         val inputSchema: JsonObject,
         val handler: suspend (JsonObject) -> JsonElement,
     )
-
-    private val capstonePath: String
-        get() = engineLoader.engineDirectory().resolve("lib/libcapstone.so").absolutePath
 
     val tools: Map<String, McpTool> = buildList {
         addAll(buildAnalysisTools())
@@ -340,12 +333,12 @@ class McpToolHandlers @Inject constructor(
         },
     )
 
-    // ========== 反汇编 / ELF / 地址工具 ==========
+    // ========== ELF / 地址工具 ==========
 
     private fun buildDisasmTools(): List<McpTool> = listOf(
         McpTool(
             name = "disassemble_range",
-            description = "用 Capstone 反汇编 so 文件指定偏移范围（SKIPDATA，不可解码字显示为 .byte）",
+            description = "反汇编 so 指定偏移范围（已移除：自研解码器 / capstone 均删除；请用 get_method 查看 src_code）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -356,27 +349,9 @@ class McpToolHandlers @Inject constructor(
                 putJsonArray("required") { add("soPath"); add("offset") }
             }
         ) { p ->
-            val so = p.str("soPath") ?: throw McpToolException("soPath 缺失")
-            val offset = p.long("offset") ?: throw McpToolException("offset 缺失")
-            val size = (p.long("size") ?: 4096L).coerceIn(4, 65536)
-            val bytes = readFileBytes(so, offset, size)
-            if (bytes.isEmpty()) return@McpTool buildJsonObject { put("empty", true); put("reason", "偏移越界或文件不可读") }
-            val insns = CapstoneBindings.disassembleWithCapstone(capstonePath, bytes, offset)
-                ?: return@McpTool buildJsonObject { put("empty", true); put("reason", "Capstone 不可用") }
             buildJsonObject {
-                put("baseAddress", offset)
-                put("count", insns.size)
-                putJsonArray("instructions") {
-                    insns.forEach { it ->
-                        addJsonObject {
-                            put("address", it.address)
-                            put("size", it.size)
-                            put("mnemonic", it.mnemonic)
-                            put("opStr", it.opStr)
-                            put("bytes", it.bytes.joinToString(" ") { b -> b.toUByte().toString(16).uppercase().padStart(2, '0') })
-                        }
-                    }
-                }
+                put("empty", true)
+                put("reason", "反汇编引擎已移除（自研解码器 / capstone 均已删除）；请通过 get_method 查看 src_code")
             }
         },
         McpTool(
@@ -577,25 +552,6 @@ class McpToolHandlers @Inject constructor(
     private fun requirePatchEnabled() {
         if (!config.patchEnabled.value) {
             throw McpToolException("补丁工具未启用（需在设置页开启并确认客户端调用）")
-        }
-    }
-
-    // ========== 文件读取 ==========
-
-    private fun readFileBytes(path: String, offset: Long, size: Long): ByteArray {
-        return try {
-            RandomAccessFile(path, "r").use { raf ->
-                val fileLen = raf.length()
-                val start = offset.coerceAtLeast(0)
-                if (start >= fileLen) return ByteArray(0)
-                val len = size.coerceIn(1, fileLen - start).toInt()
-                raf.seek(start)
-                val buf = ByteArray(len)
-                raf.readFully(buf)
-                buf
-            }
-        } catch (e: Exception) {
-            ByteArray(0)
         }
     }
 
