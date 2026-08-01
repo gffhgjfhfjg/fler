@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.Fler" parent="android:Theme.Material.NoActionBar">
-        <item name="android:statusBarColor">@color/fler_primary</item>
         <item name="android:windowBackground">@color/black</item>
     </style>
 </resources>

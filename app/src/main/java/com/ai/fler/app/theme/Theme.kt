@@ -10,7 +10,6 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -92,8 +91,12 @@ fun FlerTheme(
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            window.statusBarColor = colorScheme.primary.toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
+            // 沉浸式：不设纯色 statusBarColor（enableEdgeToEdge 已设透明），
+            // 仅控制系统栏图标深浅对比（跟随明暗主题）。
+            WindowCompat.getInsetsController(window, view).apply {
+                isAppearanceLightStatusBars = !darkTheme
+                isAppearanceLightNavigationBars = !darkTheme
+            }
         }
     }
 
