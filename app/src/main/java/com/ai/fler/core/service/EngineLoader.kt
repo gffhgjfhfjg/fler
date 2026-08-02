@@ -37,10 +37,12 @@ class EngineLoader @Inject constructor(
     /**
      * 必须严格按依赖顺序加载。
      * ICU 库用于 Dart VM 的国际化支持。
+     *
+     * 注：libcapstone.so 已移除——capstone 静态链接进 fler_jni.so，SO 编辑器
+     * 反汇编不再依赖引擎包；blutter 引擎也改为静态 capstone。
      */
     private val sharedLibs = listOf(
         "lib/libc++_shared.so",
-        "lib/libcapstone.so",
         "lib/libicudata.so",
         "lib/libicuuc.so",
     )

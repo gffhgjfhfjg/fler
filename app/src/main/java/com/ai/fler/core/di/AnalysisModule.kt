@@ -1,0 +1,69 @@
+package com.ai.fler.core.di
+
+import com.ai.fler.core.analysis.AnalysisSession
+import com.ai.fler.core.analysis.EngineRegistry
+import com.ai.fler.core.analysis.AnalysisEnginePriority
+import com.ai.fler.core.analysis.EmulationEnginePriority
+import com.ai.fler.core.analysis.assembler.KeystoneAssembler
+import com.ai.fler.core.analysis.engine.RizinEngine
+import com.ai.fler.core.analysis.engine.SelfAnalysisEngine
+import com.ai.fler.core.analysis.engine.UnicornEnginePlaceholder
+import com.ai.fler.core.analysis.engine.UnidbgEnginePlaceholder
+import com.ai.fler.core.service.BackupManager
+import com.ai.fler.core.service.EngineLoader
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import javax.inject.Singleton
+
+/**
+ * 分析 / 仿真引擎的 DI 注册模块。
+ *
+ * - EngineRegistry: 注册中心，所有引擎在此按优先级登记。
+ * - AnalysisSession: 统一会话门面（UI / MCP 入口）。
+ * - RizinEngine: isAvailable=false，占位；静态库就位后自动升为优先。
+ * - SelfAnalysisEngine: fallback，低优先级但默认可用。
+ * - Unicorn/Unidbg 引擎：占位，isAvailable=false，后续接 lib 后替换。
+ */
+@Module
+@InstallIn(SingletonComponent::class)
+object AnalysisModule {
+
+    @Provides
+    @Singleton
+    fun provideEngineRegistry(
+        keystoneAssembler: KeystoneAssembler
+    ): EngineRegistry {
+        val reg = EngineRegistry()
+
+        // 分析引擎：按优先级
+        reg.registerAnalysis(RizinEngine(), AnalysisEnginePriority.RIZIN)
+        reg.registerAnalysis(
+            SelfAnalysisEngine(keystoneAssembler),
+            AnalysisEnginePriority.SELF_ANALYSIS
+        )
+
+        // 仿真引擎：占位
+        reg.registerEmulation(
+            UnicornEnginePlaceholder(),
+            EmulationEnginePriority.UNICORN
+        )
+        reg.registerEmulation(
+            UnidbgEnginePlaceholder(),
+            EmulationEnginePriority.UNIDBG
+        )
+        return reg
+    }
+
+    @Provides
+    @Singleton
+    fun provideKeystoneAssembler(): KeystoneAssembler = KeystoneAssembler()
+
+    @Provides
+    @Singleton
+    fun provideAnalysisSession(
+        registry: EngineRegistry,
+        backupManager: BackupManager
+    ): AnalysisSession = AnalysisSession(registry, backupManager)
+}

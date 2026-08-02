@@ -149,9 +149,17 @@ fun SoEditorScreen(
                     )
                 },
                 navigationIcon = {
-                    // 打开文件后显示返回按钮，回到最近文件/选择列表
+                    // 打开文件后显示返回按钮：
+                    // - 在非结构 Tab 下：返回到结构 Tab
+                    // - 在结构 Tab 下：关闭文件，回到最近文件列表
                     if (uiState.isFileOpen) {
-                        IconButton(onClick = { viewModel.closeFile() }) {
+                        IconButton(onClick = {
+                            if (currentTab == EditorTab.STRUCTURE) {
+                                viewModel.closeFile()
+                            } else {
+                                viewModel.setTab(EditorTab.STRUCTURE)
+                            }
+                        }) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "返回"
@@ -357,13 +365,25 @@ private fun SoEditorContent(
                         sections = uiState.sections,
                         symbols = uiState.symbols,
                         dynamicSymbols = uiState.dynamicSymbols,
+                        functions = uiState.functions,
+                        strings = uiState.strings,
                         onSectionClick = { section ->
                             viewModel.loadHexData(section.offset, section.size)
                             viewModel.setSelectedOffset(section.offset)
                         },
                         onSymbolClick = { symbol ->
+                            // 保存地址 → 切回结构Tab时该行闪烁 + 滚动保持
+                            viewModel.setStructureFlashAddress(symbol.address)
+                            viewModel.setTab(EditorTab.DISASSEMBLY)
                             viewModel.loadDisassembly(symbol.address)
-                        }
+                        },
+                        onFunctionClick = { func ->
+                            viewModel.setStructureFlashAddress(func.vaddr)
+                            viewModel.setTab(EditorTab.DISASSEMBLY)
+                            viewModel.loadDisassembly(func.vaddr)
+                        },
+                        onStringsTabSelected = { viewModel.loadStrings() },
+                        viewModel = viewModel
                     )
                 }
 

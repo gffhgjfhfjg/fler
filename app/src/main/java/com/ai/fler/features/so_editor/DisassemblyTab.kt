@@ -2,6 +2,7 @@ package com.ai.fler.features.so_editor
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,12 +27,15 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -50,7 +54,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.ai.fler.core.jni.DisasmInstruction
+import com.ai.fler.core.analysis.DisasmInstruction
 import kotlinx.coroutines.launch
 
 /**
@@ -80,6 +84,8 @@ fun DisassemblyTab(
     val disassemblyData by viewModel.disassemblyData.collectAsStateWithLifecycle()
     val selectedOffset by viewModel.selectedOffset.collectAsStateWithLifecycle()
     val patchedOffsets by viewModel.patchedOffsets.collectAsStateWithLifecycle()
+    val xrefData by viewModel.xrefData.collectAsStateWithLifecycle()
+    val functionOverlay by viewModel.functionOverlay.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
@@ -89,6 +95,8 @@ fun DisassemblyTab(
     var editingInstruction by remember { mutableStateOf<DisasmInstruction?>(null) }
     // 指令帮助对话框
     var showAsmHelp by remember { mutableStateOf(false) }
+    // 交叉引用面板
+    var showXrefSheet by remember { mutableStateOf(false) }
 
     // 初始加载（非方法模式才自动加载默认页；方法模式由调用方主动 loadDisassembly）
     LaunchedEffect(Unit) {
@@ -149,12 +157,18 @@ fun DisassemblyTab(
                     searchQuery = searchQuery,
                     highlightAddress = disassemblyData.highlightAddress,
                     patchedOffsets = patchedOffsets,
+                    functionOverlay = functionOverlay,
                     listState = listState,
                     onInstructionClick = { instruction ->
-                        // 1. 通知外部（设置 patchAddress 等）
+                        // 点击 = 编辑汇编指令
                         onInstructionClick(instruction.address)
-                        // 2. 打开汇编编辑对话框
                         editingInstruction = instruction
+                    },
+                    onInstructionLongClick = { instruction ->
+                        // 长按 = 交叉引用面板
+                        onInstructionClick(instruction.address)
+                        viewModel.loadXrefs(instruction.address)
+                        showXrefSheet = true
                     },
                     modifier = Modifier.fillMaxSize()
                 )
@@ -203,6 +217,19 @@ fun DisassemblyTab(
     // 指令帮助文档
     if (showAsmHelp) {
         AsmHelpDialog(onDismiss = { showAsmHelp = false })
+    }
+
+    // 交叉引用面板
+    if (showXrefSheet) {
+        XrefBottomSheet(
+            xrefData = xrefData,
+            onDismiss = { showXrefSheet = false },
+            onXrefClick = { addr ->
+                showXrefSheet = false
+                viewModel.loadDisassembly(addr)
+                viewModel.setHighlightAddress(addr)
+            }
+        )
     }
 }
 
@@ -486,8 +513,10 @@ private fun DisassemblyListView(
     searchQuery: String,
     highlightAddress: Long?,
     patchedOffsets: Set<Long>,
+    functionOverlay: Map<Long, String>,
     listState: LazyListState,
     onInstructionClick: (DisasmInstruction) -> Unit,
+    onInstructionLongClick: (DisasmInstruction) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val filteredInstructions = if (searchQuery.isBlank()) {
@@ -518,24 +547,369 @@ private fun DisassemblyListView(
             // 导致 LazyColumn 抛 "Key was already used" 崩溃
             key = { it.first.address }
         ) { (instruction, isMatch) ->
+            // 函数边界标注：如果该地址是某个函数的起始地址，显示函数名
+            val funcName = functionOverlay[instruction.address]
+            if (funcName != null) {
+                FunctionLabel(funcName)
+            }
             DisassemblyRow(
                 instruction = instruction,
                 isMatch = isMatch,
                 isFlash = highlightAddress != null && instruction.address == highlightAddress,
                 isPatched = instruction.address in patchedOffsets,
-                onClick = { onInstructionClick(instruction) }
+                onClick = { onInstructionClick(instruction) },
+                onLongClick = { onInstructionLongClick(instruction) }
             )
         }
     }
 }
 
+/** 函数边界标注行。 */
+@Composable
+private fun FunctionLabel(name: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f))
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "▶",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.width(16.dp)
+        )
+        Text(
+            text = name,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** 交叉引用面板。 */
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun XrefBottomSheet(
+    xrefData: XrefDataState,
+    onDismiss: () -> Unit,
+    onXrefClick: (Long) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // 类型筛选：null=全部，否则只显示指定类型
+    var typeFilter: com.ai.fler.core.analysis.XrefType? by remember { mutableStateOf(null) }
+    // 搜索关键字：地址 hex 匹配
+    var searchQuery by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+
+    // 扁平化数据：to/from 合并，带 tag 区分
+    val flatItems: List<Triple<Boolean, com.ai.fler.core.analysis.Xref, Long>> = remember(xrefData, typeFilter, searchQuery) {
+        val list = mutableListOf<Triple<Boolean, com.ai.fler.core.analysis.Xref, Long>>()
+        // isTo=true → 调用方（xref.from 是跳转地址）；isTo=false → 被调用（xref.to 是地址）
+        for (xref in xrefData.xrefsTo) {
+            list.add(Triple(true, xref, xref.from))
+        }
+        for (xref in xrefData.xrefsFrom) {
+            list.add(Triple(false, xref, xref.to))
+        }
+        // 类型筛选
+        val filtered1 = if (typeFilter == null) list else list.filter { it.second.type == typeFilter }
+        // 搜索筛选
+        if (searchQuery.isBlank()) filtered1 else {
+            val q = searchQuery.uppercase()
+            filtered1.filter {
+                val hex = it.third.toString(16).uppercase()
+                hex.contains(q) || ("0x$hex").contains(q)
+            }
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            // 标题
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "交叉引用",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "0x${xrefData.address.toString(16).uppercase()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            if (xrefData.isLoading) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                return@Column
+            }
+
+            if (xrefData.xrefsTo.isEmpty() && xrefData.xrefsFrom.isEmpty()) {
+                Text(
+                    text = "无交叉引用",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                return@Column
+            }
+
+            // 搜索框
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                placeholder = { Text("搜索地址 (如 0x1234 或 1234)") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "搜索",
+                        modifier = Modifier.size(20.dp)
+                    )
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(8.dp)
+            )
+
+            // 类型筛选 Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                XrefTypeChip(
+                    label = "全部 (${xrefData.xrefsTo.size + xrefData.xrefsFrom.size})",
+                    selected = typeFilter == null,
+                    onClick = { typeFilter = null }
+                )
+                XrefTypeChip(
+                    label = "调用 (${xrefData.xrefsTo.size})",
+                    selected = typeFilter == com.ai.fler.core.analysis.XrefType.CALL,
+                    onClick = { typeFilter = com.ai.fler.core.analysis.XrefType.CALL }
+                )
+                XrefTypeChip(
+                    label = "跳转 (${xrefData.xrefsTo.count { it.type == com.ai.fler.core.analysis.XrefType.JUMP } + xrefData.xrefsFrom.count { it.type == com.ai.fler.core.analysis.XrefType.JUMP }})",
+                    selected = typeFilter == com.ai.fler.core.analysis.XrefType.JUMP,
+                    onClick = { typeFilter = com.ai.fler.core.analysis.XrefType.JUMP }
+                )
+                XrefTypeChip(
+                    label = "数据 (${xrefData.xrefsTo.count { it.type == com.ai.fler.core.analysis.XrefType.DATA || it.type == com.ai.fler.core.analysis.XrefType.STRING } + xrefData.xrefsFrom.count { it.type == com.ai.fler.core.analysis.XrefType.DATA || it.type == com.ai.fler.core.analysis.XrefType.STRING }})",
+                    selected = typeFilter == com.ai.fler.core.analysis.XrefType.DATA,
+                    onClick = { typeFilter = com.ai.fler.core.analysis.XrefType.DATA }
+                )
+            }
+
+            // 结果列表（固定高度 → 滚动条 + 完整列表不截断）
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(420.dp)  // 固定高度：BottomSheet 本身可以整体滑，但内部列表要独立滚动
+            ) {
+                if (flatItems.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "无匹配项",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        // 分组展示：先调用方，再被调用
+                        val hasTo = flatItems.any { it.first }
+                        val hasFrom = flatItems.any { !it.first }
+
+                        if (hasTo) {
+                            stickyHeader {
+                                Text(
+                                    text = "调用方 (${flatItems.count { it.first }})",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .padding(top = 4.dp, bottom = 4.dp)
+                                )
+                            }
+                            items(
+                                items = flatItems.filter { it.first },
+                                key = { "to_${it.second.from}_${it.second.to}_${it.second.type}" }
+                            ) { item ->
+                                XrefRow(
+                                    address = item.third,
+                                    type = item.second.type,
+                                    onClick = { onXrefClick(item.third) }
+                                )
+                            }
+                        }
+
+                        if (hasFrom) {
+                            stickyHeader {
+                                Text(
+                                    text = "被调用 (${flatItems.count { !it.first }})",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .padding(top = 12.dp, bottom = 4.dp)
+                                )
+                            }
+                            items(
+                                items = flatItems.filter { !it.first },
+                                key = { "from_${it.second.from}_${it.second.to}_${it.second.type}" }
+                            ) { item ->
+                                XrefRow(
+                                    address = item.third,
+                                    type = item.second.type,
+                                    onClick = { onXrefClick(item.third) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            // 底部计数
+            Text(
+                text = "显示 ${flatItems.size} 条 / 共 ${xrefData.xrefsTo.size + xrefData.xrefsFrom.size} 条",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+/** 交叉引用类型筛选 Chip。 */
+@Composable
+private fun XrefTypeChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val bg = if (selected)
+        MaterialTheme.colorScheme.primaryContainer
+    else
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+    val fg = if (selected)
+        MaterialTheme.colorScheme.onPrimaryContainer
+    else
+        MaterialTheme.colorScheme.onSurfaceVariant
+    androidx.compose.material3.Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable { onClick() },
+        color = bg,
+        contentColor = fg
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun XrefRow(
+    address: Long,
+    type: com.ai.fler.core.analysis.XrefType,
+    onClick: () -> Unit
+) {
+    val typeText = when (type) {
+        com.ai.fler.core.analysis.XrefType.CALL -> "CALL"
+        com.ai.fler.core.analysis.XrefType.JUMP -> "JUMP"
+        com.ai.fler.core.analysis.XrefType.DATA -> "DATA"
+        com.ai.fler.core.analysis.XrefType.STRING -> "STR"
+        com.ai.fler.core.analysis.XrefType.CODE -> "CODE"
+        com.ai.fler.core.analysis.XrefType.UNKNOWN -> "?"
+    }
+    val typeColor = when (type) {
+        com.ai.fler.core.analysis.XrefType.CALL -> Color(0xFF4CAF50)
+        com.ai.fler.core.analysis.XrefType.JUMP -> Color(0xFFFF9800)
+        com.ai.fler.core.analysis.XrefType.DATA -> Color(0xFF2196F3)
+        com.ai.fler.core.analysis.XrefType.STRING -> Color(0xFF9C27B0)
+        else -> Color.Gray
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = typeText,
+            style = MaterialTheme.typography.labelSmall,
+            color = typeColor,
+            modifier = Modifier
+                .background(typeColor.copy(alpha = 0.1f))
+                .padding(horizontal = 4.dp, vertical = 2.dp)
+                .width(48.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = "0x${address.toString(16).uppercase().padStart(8, '0')}",
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun DisassemblyRow(
     instruction: DisasmInstruction,
     isMatch: Boolean,
     isFlash: Boolean,
     isPatched: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
 ) {
     // 闪烁 > 未保存修改（红）> 搜索匹配
     val backgroundColor = when {
@@ -550,7 +924,10 @@ private fun DisassemblyRow(
         modifier = Modifier
             .fillMaxWidth()
             .background(backgroundColor)
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .padding(horizontal = 16.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

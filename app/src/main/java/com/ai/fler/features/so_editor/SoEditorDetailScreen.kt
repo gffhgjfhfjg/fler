@@ -138,7 +138,13 @@ fun SoEditorDetailScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = {
+                        if (currentTab == EditorTab.STRUCTURE) {
+                            onBack()
+                        } else {
+                            viewModel.setTab(EditorTab.STRUCTURE)
+                        }
+                    }) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "返回",
@@ -275,16 +281,27 @@ fun SoEditorDetailScreen(
                             sections = uiState.sections,
                             symbols = uiState.symbols,
                             dynamicSymbols = uiState.dynamicSymbols,
+                            functions = uiState.functions,
+                            strings = uiState.strings,
                             onSectionClick = { section ->
                                 viewModel.setSelectedOffset(section.offset)
                                 viewModel.setTab(EditorTab.HEX)
                                 viewModel.loadHexData(section.offset)
                             },
                             onSymbolClick = { symbol ->
+                                viewModel.setStructureFlashAddress(symbol.address)
                                 viewModel.setSelectedOffset(symbol.address)
                                 viewModel.setTab(EditorTab.DISASSEMBLY)
                                 viewModel.loadDisassembly(symbol.address)
                             },
+                            onFunctionClick = { func ->
+                                viewModel.setStructureFlashAddress(func.vaddr)
+                                viewModel.setSelectedOffset(func.vaddr)
+                                viewModel.setTab(EditorTab.DISASSEMBLY)
+                                viewModel.loadDisassembly(func.vaddr)
+                            },
+                            onStringsTabSelected = { viewModel.loadStrings() },
+                            viewModel = viewModel
                         )
                         EditorTab.HEX -> HexEditorTab(viewModel = viewModel)
                         EditorTab.DISASSEMBLY -> DisassemblyTab(

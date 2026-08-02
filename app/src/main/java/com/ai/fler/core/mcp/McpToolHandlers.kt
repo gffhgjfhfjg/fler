@@ -4,7 +4,6 @@ import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
 import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.AddressTranslator
-import com.ai.fler.core.service.EngineLoader
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
@@ -12,7 +11,9 @@ import com.ai.fler.data.dao.LibraryDao
 import com.ai.fler.data.dao.PpEntryDao
 import com.ai.fler.data.dao.ProjectDao
 import com.ai.fler.features.mcp.McpPatchService
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonArrayBuilder
 import kotlinx.serialization.json.JsonObject
@@ -43,9 +44,9 @@ class McpToolHandlers @Inject constructor(
     private val ppEntryDao: PpEntryDao,
     private val projectDao: ProjectDao,
     private val addressTranslator: AddressTranslator,
-    private val engineLoader: EngineLoader,
     private val config: McpConfig,
     private val patchService: McpPatchService,
+    private val engineMcp: EngineMcpToolRegistry,
 ) : McpResourceProvider {
 
     class McpTool(
@@ -55,15 +56,18 @@ class McpToolHandlers @Inject constructor(
         val handler: suspend (JsonObject) -> JsonElement,
     )
 
-    private val capstonePath: String
-        get() = engineLoader.engineDirectory().resolve("lib/libcapstone.so").absolutePath
+    private val mcpScope = CoroutineScope(SupervisorJob())
 
-    val tools: Map<String, McpTool> = buildList {
-        addAll(buildAnalysisTools())
-        addAll(buildBrowseTools())
-        addAll(buildDisasmTools())
-        addAll(buildPatchTools())
-    }.associateBy { it.name }
+    val tools: Map<String, McpTool> = buildMap {
+        buildList {
+            addAll(buildAnalysisTools())
+            addAll(buildBrowseTools())
+            addAll(buildDisasmTools())
+            addAll(buildPatchTools())
+        }.forEach { this[it.name] = it }
+        // Engine 能力自动暴露的工具（带 engine_ 前缀）
+        engineMcp.buildTools(mcpScope).forEach { (k, v) -> this[k] = v }
+    }
 
     // ========== 参数读取辅助 ==========
 
@@ -570,8 +574,8 @@ class McpToolHandlers @Inject constructor(
             val size = (p.long("size") ?: 4096L).coerceIn(4, 65536)
             val bytes = readFileBytes(so, offset, size)
             if (bytes.isEmpty()) return@McpTool buildJsonObject { put("empty", true); put("reason", "偏移越界或文件不可读") }
-            val insns = CapstoneBindings.disassembleWithCapstone(capstonePath, bytes, offset)
-                ?: return@McpTool buildJsonObject { put("empty", true); put("reason", "Capstone 不可用（请先下载引擎包）") }
+            val insns = CapstoneBindings.disassembleWithCapstone(bytes, offset)
+                ?: return@McpTool buildJsonObject { put("empty", true); put("reason", "Capstone 反汇编不可用") }
             buildJsonObject {
                 put("baseAddress", offset)
                 put("count", insns.size)

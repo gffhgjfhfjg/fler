@@ -16,6 +16,8 @@
 | P4 | 产物浏览 | ✅ 已完成（修复 1/4 数据链路） | 4/4 |
 | P5 | SO 编辑器 | ✅ 已完成（修复 3/5 真实数据） | 5/5 |
 | P6 | 集成收尾 | ✅ 已完成 | 4/7 |
+| P7 | MCP Server（内嵌） | ✅ 已完成 | 9/9 |
+| P8 | Rizin 集成（v2 架构） | 🟡 进行中 | 3/4 阶段 |
 
 > 状态：未开始 / 进行中 / 已完成 / 阻塞
 >
@@ -247,4 +249,54 @@ ativeAssemble）。产物：libfler_jni.so 6.2MB（--gc-sections 丢弃非 ARM64
 
 | 2026-08-01 | **【死路由审计 + AsmBrowser(src_code) 入口恢复 + capstone 反汇编恢复 + SO 返回按钮】**：(1) **死路由审计**：全项目仅 AsmBrowser（asm_browser/{analysisId}/{methodId}）为死路由——页面/ViewModel（读 src_code）代码完整但无任何导航入口；(2) **方案 A**：方法列表点击方法 → AsmBrowser 查看 src_code（AppNavGraph onMethodClick 改 navigate AsmBrowser），AsmBrowser 内「在 SO 中编辑」→ SO 编辑器；(3) **capstone 反汇编恢复**：恢复 capstone_jni.cpp（cs_disasm_iter 循环解码，不可解码字 .word，CS_ARCH_ARM64=1）+ CapstoneBindings.kt（disassembleWithCapstone）+ CMake；SoEditorViewModel.loadDisassembly 与 MCP disassemble_range 恢复 capstone 解码（引擎包不可用则置空提示），编码仍用 Keystone；(4) **SO 编辑器返回按钮**：新增 SoEditorViewModel.closeFile()（重置全部状态）+ SoEditorScreen TopAppBar navigationIcon（打开文件后显示 ArrowBack → 回最近文件/选择列表）。ssembleDebug BUILD SUCCESSFUL。 |
 
-| 2026-08-01 | **【Keystone 编码失败根因修复】**：指令编辑报'无法编码该指令'，真机 logcat FlerKeystoneJNI: ks_asm failed: 'ADD x0, x22, #0x3' errno=0（大写/小写均失败、errno=0）。定位：keystone 0.9.2 的 ARM64 ks_asm 返回值（stat_count）可能为 0，但 encoding/encoding_size 已填好（errno=0 表示无错误），JNI 以 count<=0 误判失败。**修复**：keystone_jni 改以 encoding_size==0 || !encoding 判断成败（不依赖 count）。另在 SoEditorViewModel.encodeInstruction 增加小写兜底（对话框预填大写 mnemonic，keystone 示例用小写）。ssembleDebug BUILD SUCCESSFUL。 |
+| 2026-08-01 | **【Keystone 编码失败根因修复】**：指令编辑报'无法编码该指令'，真机 logcat FlerKeystoneJNI: ks_asm failed: 'ADD x0, x22, #0x3' errno=0（大写/小写均失败、errno=0）。定位：keystone 0.9.2 的 ARM64 ks_asm 返回值（stat_count）可能为 0，但 encoding/encoding_size 已填好（errno=0 表示无错误），JNI 以 count<=0 误判失败。**修复**：keystone_jni 改以 encoding_size==0 || !encoding 判断成败（不依赖 count）。另在 SoEditorViewModel.encodeInstruction 增加小写兜底（对话框预填大写 mnemonic，keystone 示例用小写）。ssembleDebug BUILD SUCCESSFUL。 |
+
+| 2026-08-02 | **【Rizin 集成方案 v2 调研完成】**：输出 [rizin-integration-plan.md](file:///c:/Users/Len/AndroidStudioProjects/fler/rizin-integration-plan.md) v2 + [rizin-integration-research.md](file:///c:/Users/Len/AndroidStudioProjects/fler/rizin-integration-research.md)。核心方案：① 引擎抽象层 `BinaryAnalysisEngine` / `EmulationEngine` + `EngineRegistry` 注册中心 + `AnalysisSession` 统一会话层，新增引擎零改动现有代码；② MCP 服务自动暴露 Engine 能力（`EngineMcpToolRegistry`）；③ Capstone 三方共用方案 A——blutter/Rizin/App 共用同一份 `libcapstone.so`，Rizin 静态库编译时 `-Duse_sys_capstone=enabled` + `find_library`；④ 为 Unicorn/unidbg 预留 `EmulationEngine` 插槽。 |
+
+| 2026-08-02 | **【P7-Engine 抽象层落地（Rizin 集成 v2 第 1 阶段）】**：按 [rizin-integration-plan.md](file:///c:/Users/Len/AndroidStudioProjects/fler/rizin-integration-plan.md) v2 落地引擎抽象层 + 骨架实现，`compileDebugKotlin` BUILD SUCCESSFUL。新增文件清单：
+  **① 核心数据模型**（`core/analysis/`）：[AnalysisTypes.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/AnalysisTypes.kt)（AnalysisCapability 枚举 / OpenOptions / StringScanOptions / FileInfo / BasicBlock / Xref / ImportInfo / RelocInfo / StringInfo）、[SectionInfo.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/SectionInfo.kt)（+ fromElfSection 适配旧 ElfSection）、[SymbolInfo.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/SymbolInfo.kt)、[FunctionInfo.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/FunctionInfo.kt)、[DisasmInstruction.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/DisasmInstruction.kt)。
+  **② 抽象接口**：[BinaryAnalysisEngine.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/BinaryAnalysisEngine.kt)（open/close/sections/symbols/imports/entries/relocs/strings/fileInfo/functions/basicBlocks/xrefs/disasm/assemble/read/write/undo/closeAll）、[EmulationEngine.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/EmulationEngine.kt)（emulate/emulateRange/readReg/writeReg/mmap/memMap 基本仿真接口）。
+  **③ 调度层**：[EngineRegistry.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/EngineRegistry.kt)（按 Capability 挑选引擎 + 优先级排序）、[AnalysisSession.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/AnalysisSession.kt)（@Singleton，统一会话，UI/MCP 共用；`withEngine` suspend lambda；sessionId 管理；autoAnalyze 钩子）。
+  **④ 引擎实现**：[engine/SelfAnalysisEngine.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/engine/SelfAnalysisEngine.kt)（fallback，适配旧 ElfParserBindings + CapstoneBindings，含 scanStrings 实现）、[engine/PlaceholderEngines.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/engine/PlaceholderEngines.kt)（RizinEngine / UnicornEnginePlaceholder / UnidbgEnginePlaceholder 骨架，抛 NotImplementedError）、[assembler/KeystoneAssembler.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/assembler/KeystoneAssembler.kt)（独立汇编器，不依赖分析引擎）。
+  **⑤ Hilt DI**：[di/AnalysisModule.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/di/AnalysisModule.kt)（注册所有分析/仿真引擎到 EngineRegistry；@Singleton AnalysisSession 注入）。
+  **⑥ ViewModel 重构**：[SoEditorViewModel.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/features/so_editor/SoEditorViewModel.kt)（所有 elf/symbol/disasm 读写改走 `AnalysisSession`，不再直接耦合 `ElfParserBindings/CapstoneBindings`；新增 `removeRecent` 给 UI 最近文件删除按钮；保留 `applyInstructionPatch` 汇编→机器码→写盘链路）。
+  **⑦ UI 适配**：[StructureTab.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/features/so_editor/StructureTab.kt) / [DisassemblyTab.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/features/so_editor/DisassemblyTab.kt) 改用 `core.analysis.*Info` 数据模型。
+  **⑧ MCP 自动暴露**：[mcp/EngineMcpToolRegistry.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/mcp/EngineMcpToolRegistry.kt)（`engine_list_engines` / `engine_open` / `engine_close` / `engine_auto_analyze` / `engine_list_sections` / `engine_list_symbols` / `engine_list_functions` / `engine_scan_strings` / `engine_disasm` / `engine_read_bytes` / `engine_patch_bytes` / `engine_patch_instruction`；后续 Rizin/Unicorn 只要把能力写进 `capabilities` 自动生成工具，MCP 层零改动）。
+  **修复的编译问题**：① SectionInfo 中未定义的 `SHF_READ` 改为用 `SHF_ALLOC` 推断 r 位；② SelfAnalysisEngine.scanStrings 的 lambda 内非法 `return` 重写为安全的 when 结构；③ EngineMcpToolRegistry 中 `p.value` 成员引用错误改为 `p.second`，`v.boolean` API 差异用 `as JsonPrimitive + content.toBooleanStrictOrNull()` 兼容；④ AnalysisSession 中 `withEngine` 函数未声明 suspend → 改为 suspend + suspend lambda；⑤ AnalysisModule 中误导入未使用的 PlaceholderEngines → 删除导入；⑥ SoEditorScreen 引用未定义的 `removeRecent` → 在 SoEditorViewModel 补齐。 |
+
+---
+
+## P8 Rizin 集成（v2 架构）
+
+**目标**：引入 Rizin 分析框架作为主引擎，替换 SelfAnalysisEngine 的 fallback 路径；为 Unicorn/unidbg 预留扩展插槽；Capstone 三方零冲突共用。
+
+> 详细方案见 [rizin-integration-plan.md](file:///c:/Users/Len/AndroidStudioProjects/fler/rizin-integration-plan.md) v2。
+
+| # | 任务 | 状态 | 完成时间 | 备注 |
+|---|------|------|----------|------|
+| P8-1 | 引擎抽象层 + 骨架落地 | [x] | 2026-08-02 | 12 个新文件（接口/数据模型/Registry/Session/SelfEngine/Placeholders/DI/MCP）；`compileDebugKotlin` 通过 |
+| P8-2 | 本地交叉编译 librizin.a + 依赖 .a | [x] | 2026-08-02 | 用户手动编译：Rizin v0.9.1 + Capstone 5.0.9，26 个 librz_*.a（~40MB）+ libcapstone.a（36MB），放入 `app/libs/arm64-v8a/`；头文件放入 `app/src/main/cpp/include/` |
+| P8-3 | RizinEngine JNI 实现（rizin_jni.cpp） | [x] | 2026-08-02 | 6 个 native 方法（open/close/analyze/cmdStr/readBytes/writeBytes）+ RizinJsonParser（8 种 JSON 解析）+ RizinEngine 12 个 capability 全实现；`assembleDebug` 通过 |
+| P8-4 | Capstone 三方共用真机验证 + LGPL 合规 | [ ] | — | 验证 blutter/Rizin/App 共用 libcapstone.so 零冲突；LICENSE 文档化 |
+| P8-5 | UI 适配（函数列表 + 交叉引用 + 函数边界） | [x] | 2026-08-02 | 结构 Tab 增函数子标签；汇编 Tab 增 xref 底部面板 + 函数边界标注；ViewModel 增 functions/xrefData/functionOverlay 状态 |
+
+**后续阶段（预留，不计入 P8）**：
+- v0.4.0 Unicorn 集成（实现 UnicornEngine + unicorn_jni.cpp）
+- v0.5.0 unidbg 集成（实现 UnidbgEngine + unidbg_jni.cpp）
+
+**验收标准**：
+- [ ] RizinEngine 通过所有 BinaryAnalysisEngine 接口方法
+- [ ] SO 编辑器使用 RizinEngine 替代 SelfAnalysisEngine 后，节区/符号/反汇编/函数识别能力提升
+- [ ] MCP `engine_*` 工具集通过 RizinEngine 实际工作
+- [ ] APK 体积增量 ≤ 8MB（librizin.a 静态链接后）
+- [ ] blutter + Rizin + App 三方共用 libcapstone.so 真机无 dlopen 冲突
+
+---
+
+## 变更记录（P8 补充）
+
+| 日期 | 变更 |
+|------|------|
+| 2026-08-02 | **【P8-2 + P8-3 RizinEngine JNI 激活】**：用户手动编译 Rizin v0.9.1 + Capstone 5.0.9 静态库（26 个 librz_*.a ~40MB + libcapstone.a 36MB），放入 `app/libs/arm64-v8a/`；头文件放入 `app/src/main/cpp/include/{capstone,rizin}/`。CMakeLists.txt 配置静态链接 + include 路径（`include/rizin` + `include/rizin/rz_util` + `include/rizin/sdb`）。新增 [rizin_jni.cpp](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/cpp/jni_bridge/rizin_jni.cpp)（6 个 native 方法：`nativeOpen` → `rz_core_new` + `rz_core_file_open` + `rz_core_bin_load`；`nativeClose` → `rz_core_free`；`nativeAnalyze` → `rz_core_analysis_all`；`nativeCmdStr` → `rz_core_cmd_str`；`nativeReadBytes` → `rz_io_nread_at`；`nativeWriteBytes` → `rz_core_write_at`；附 backtrace stub 解决 Android NDK 无 execinfo.h 问题）。新增 [RizinBindings.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/jni/RizinBindings.kt)（Kotlin JNI 声明）。新增 [RizinJsonParser.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/engine/RizinJsonParser.kt)（解析 8 种 Rizin JSON 输出：`ij`→FileInfo / `iSj`→SectionInfo / `isj`→SymbolInfo / `iij`→ImportInfo / `irj`→RelocInfo / `aflj`→FunctionInfo / `izzj`→StringInfo / `pdj`→DisasmInstruction / `axtj,axfj`→Xref / `afbj`→BasicBlock）。重写 [RizinEngine.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/engine/RizinEngine.kt)（`isAvailable=true`，12 个 capability 全实现：ELF_PARSING/DISASSEMBLY/ASSEMBLY/FUNCTION_ANALYSIS/XREF/CFG/STRING_SCAN/DEMANGLE/BYTE_EDIT/ADDRESS_TRANSLATION/BINARY_HASH/SIGNATURE_MATCH）。[PlaceholderEngines.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/core/analysis/engine/PlaceholderEngines.kt) 移除旧 RizinEngine 占位，只保留 Unicorn/Unidbg。引擎优先级：Rizin（高）> SelfAnalysis（fallback）。`assembleDebug` BUILD SUCCESSFUL。 |
+| 2026-08-02 | **【P8-5 UI 适配（函数列表 + 交叉引用 + 函数边界标注）】**：(1) **结构 Tab 增函数子标签**——[StructureTab.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/features/so_editor/StructureTab.kt) 新增第 4 个子标签「函数 (N)」，展示 Rizin `aaa` 识别的函数列表（`aflj`），每行显示函数名/签名/地址/大小，点击跳转反汇编 Tab 对应地址；新增 `FunctionsList` + `FunctionRow` composable。(2) **汇编 Tab 增函数边界标注**——[DisassemblyTab.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/features/so_editor/DisassemblyTab.kt) 反汇编列表中，函数起始地址上方显示 `▶ 函数名` 标注行（蓝色背景），一眼看到函数边界；新增 `FunctionLabel` composable。(3) **汇编 Tab 增交叉引用面板**——点击指令行弹出 `ModalBottomSheet`，显示「调用方」(xrefsTo，谁引用了我) 和「被调用」(xrefsFrom，我引用了谁) 两类引用，每行显示类型标签（CALL/JUMP/DATA/STR）+ 地址，点击跳转对应反汇编地址；新增 `XrefBottomSheet` + `XrefRow` composable。(4) **ViewModel 新增状态**——`SoEditorUiState` 增 `functions` 字段（openFile 时加载 `session.listFunctions()`）；新增 `xrefData: StateFlow<XrefDataState>`（点击指令时 `loadXrefs(addr)` 加载 `session.xrefsTo/xrefsFrom`）；新增 `functionOverlay: StateFlow<Map<Long,String>>`（反汇编加载后 `updateFunctionOverlay()` 匹配函数起始地址→函数名）。(5) **汇编优先 Keystone**——ViewModel `encodeInstruction` 已优先调用 `keystoneAssembler.assemble`，RizinEngine.assemble 仅作 MCP/Session 层 fallback。调用方更新：[SoEditorDetailScreen.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/features/so_editor/SoEditorDetailScreen.kt) + [SoEditorScreen.kt](file:///c:/Users/Len/AndroidStudioProjects/fler/app/src/main/java/com/ai/fler/features/so_editor/SoEditorScreen.kt) 传入 `functions` + `onFunctionClick`。`compileDebugKotlin` BUILD SUCCESSFUL。 |
+

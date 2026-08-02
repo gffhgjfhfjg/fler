@@ -24,9 +24,8 @@ import javax.inject.Singleton
  * 引擎目录布局（解压后）：
  * ```
  * filesDir/engines/
- * ├── lib/                          ← 共享库
- * │   ├── libc++_shared.so
- * │   └── libcapstone.so
+ * ├── lib/                          ← 共享库（capstone 已静态进 APK，不再随包）
+ * │   └── libc++_shared.so
  * ├── dartvm_3.13.0.so             ← 11 个版本引擎
  * ├── dartvm_3.12.1.so
  * └── ...
@@ -111,17 +110,19 @@ class EnginePackManager @Inject constructor(
      *
      * 严格条件（重启后也应满足，否则会触发重新下载）：
      * 1. 至少一个 dartvm_*.so 存在
-     * 2. 必要共享库齐全（libc++_shared.so、libcapstone.so）
+     * 2. 必要共享库齐全（libc++_shared.so）
      * 3. ICU 库（libicudata.so / libicuuc.so）可选，打包方式可能不同
+     *
+     * 注：libcapstone.so 已不需要——capstone 静态链接进 fler_jni.so，SO 编辑器
+     * 零引擎依赖；blutter 引擎包也改为静态 capstone（见 build-dartvm.sh）。
      */
     fun isEnginePackReady(): Boolean {
         val hasDartVm = engineDir.listFiles()?.any {
             it.name.startsWith("dartvm_") && it.name.endsWith(".so")
         } ?: false
         val libCxx = File(engineDir, "lib/libc++_shared.so")
-        val libCapstone = File(engineDir, "lib/libcapstone.so")
         // ICU 可选：部分引擎包将 ICU 静态链接进 dartvm，或打包方式不同
-        return hasDartVm && libCxx.exists() && libCapstone.exists()
+        return hasDartVm && libCxx.exists()
     }
 
     /**
