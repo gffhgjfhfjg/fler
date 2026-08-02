@@ -1,5 +1,6 @@
 package com.ai.fler.core.analysis.engine
 
+import android.util.Log
 import com.ai.fler.core.analysis.*
 import com.ai.fler.core.jni.RizinBindings
 import kotlinx.coroutines.Dispatchers
@@ -188,6 +189,37 @@ class RizinEngine : BinaryAnalysisEngine {
         val hexAddr = "0x${functionOffset.toString(16)}"
         val json = cmd(handle, "afbj @ $hexAddr") ?: return emptyList()
         return RizinJsonParser.parseBasicBlocks(json)
+    }
+
+    override suspend fun defineFunction(handle: AnalysisHandle, address: Long, name: String): Boolean {
+        val hexAddr = "0x${address.toString(16)}"
+        // 只设置 flag 名，不执行 af。
+        //
+        // 为什么不能执行 af：
+        //   af 在定义函数时会清除该地址范围内的已有 xref 条目（包括其他函数对本函数的调用）。
+        //   Blutter 分析的 Dart 函数地址通常不被 aaa 识别为函数（Flutter AOT 代码无标准序言），
+        //   所以 af 会为每个 Blutter 函数执行，破坏全部 xref 条目。
+        //   后续 aac/aar 无法可靠恢复这些 xref（调用方函数已被 aaa 分析过，不会重新扫描）。
+        //
+        // 为什么只设 flag 就够了：
+        //   UI 显示函数名靠 _dartFunctionLabels（从 Dao 查询 + 合并到 uiState.functions），
+        //   不需要 Rizin 的 function DB。f 命令设置 flag 名即可让 Rizin 内部查询时看到名称。
+        cmd(handle, "f $name @ $hexAddr")
+        return true
+    }
+
+    override suspend fun reanalyzeXrefs(handle: AnalysisHandle): Boolean {
+        // aac 遍历所有函数，分析函数内的调用指令，补充 xref 表。
+        // 注意：defineFunction 已不再调用 af，所以不会破坏 xref。
+        // 本方法主要用于其他场景（如手动 af 后）的 xref 重建。
+        val r = cmd(handle, "aac") ?: return false
+        val trimmed = r.trim().lowercase()
+        if (trimmed.startsWith("unknown")) {
+            Log.w(TAG, "aac 不可用，回退到 aar")
+            val r2 = cmd(handle, "aar") ?: return false
+            return !r2.trim().startsWith("error", ignoreCase = true)
+        }
+        return true
     }
 
     // ------------------------------------------------------------------

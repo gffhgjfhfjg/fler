@@ -92,6 +92,24 @@ interface BinaryAnalysisEngine {
     /** 某函数的基本块 CFG。 */
     suspend fun getFunctionCfg(handle: AnalysisHandle, functionOffset: Long): List<BasicBlock>
 
+    /**
+     * 在指定地址定义函数并命名（用于注入外部分析结果，如 Blutter 的 Dart 方法名）。
+     * 定义后，交叉引用分析可将对该地址的引用识别为函数调用。
+     *
+     * 默认实现返回 false（不支持）。RizinEngine 等支持函数分析的引擎可覆盖。
+     */
+    suspend fun defineFunction(handle: AnalysisHandle, address: Long, name: String): Boolean = false
+
+    /**
+     * 重新分析交叉引用（补充 xref 表）。
+     *
+     * defineFunction 已不再调用 af（改为只设 flag），因此不会破坏 xref 表。
+     * 本方法主要用于其他场景下的 xref 重建。
+     *
+     * 默认实现 no-op。RizinEngine 覆盖为 `aac` 命令。
+     */
+    suspend fun reanalyzeXrefs(handle: AnalysisHandle): Boolean = false
+
     // ------------------------------------------------------------------
     // 反汇编（capability = DISASSEMBLY）
     // ------------------------------------------------------------------

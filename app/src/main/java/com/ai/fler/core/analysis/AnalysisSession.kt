@@ -61,34 +61,57 @@ class AnalysisSession @Inject constructor(
         options: OpenOptions = OpenOptions(),
         requireCaps: List<AnalysisCapability> = emptyList()
     ): OpenResult {
-        val engine = registry.pickAnalysisFor(*requireCaps.toTypedArray())
-            ?: return OpenResult.Failure("没有可用的分析引擎（需要能力: $requireCaps）")
         if (!File(filePath).exists()) {
             return OpenResult.Failure("文件不存在: $filePath")
         }
 
         mutex.withLock {
-            // 相同路径已有会话则先关闭旧的
-            val oldH = pathToHandle[filePath]
-            if (oldH != null) {
-                sessions.remove(oldH)?.let { old ->
-                    try { registry.getAnalysis(old.engineId)?.close(AnalysisHandle(oldH)) } catch (_: Throwable) { /* noop */ }
+            // 相同路径已有会话则直接复用（不重新 open / 不重新 aaa 分析）
+            val existingH = pathToHandle[filePath]
+            if (existingH != null) {
+                val entry = sessions[existingH]
+                if (entry != null) {
+                    val engine = registry.getAnalysis(entry.engineId)
+                    if (engine != null && engine.isHandleValid(AnalysisHandle(existingH))) {
+                        currentHandle = AnalysisHandle(existingH)
+                        currentEngine = engine
+                        backupManager.setCurrentFile(filePath)
+                        return@withLock OpenResult.Success(
+                            AnalysisHandle(existingH), filePath, entry.engineId
+                        )
+                    }
+                    // handle 已失效，清理残留
+                    sessions.remove(existingH)
+                    pathToHandle.remove(filePath)
                 }
             }
         }
 
-        return when (val r = engine.open(filePath, options)) {
-            is OpenResult.Success -> mutex.withLock {
-                sessions[r.handle.value] = SessionEntry(r.handle, engine.engineId, filePath)
-                pathToHandle[filePath] = r.handle.value
-                currentHandle = r.handle
-                currentEngine = engine
-                // 切换 BackupManager 到该文件，加载持久化的撤销栈
-                backupManager.setCurrentFile(filePath)
-                OpenResult.Success(r.handle, filePath, engine.engineId)
-            }
-            is OpenResult.Failure -> r
+        // 按优先级获取所有匹配能力的引擎，逐个尝试直到成功
+        val engines = registry.listAnalysisSupporting(*requireCaps.toTypedArray())
+        if (engines.isEmpty()) {
+            return OpenResult.Failure("没有可用的分析引擎（需要能力: $requireCaps）")
         }
+
+        // 逐个尝试引擎，高优先级失败则降级到下一个
+        var lastReason: String? = null
+        for (engine in engines) {
+            when (val r = engine.open(filePath, options)) {
+                is OpenResult.Success -> return mutex.withLock {
+                    sessions[r.handle.value] = SessionEntry(r.handle, engine.engineId, filePath)
+                    pathToHandle[filePath] = r.handle.value
+                    currentHandle = r.handle
+                    currentEngine = engine
+                    backupManager.setCurrentFile(filePath)
+                    OpenResult.Success(r.handle, filePath, engine.engineId)
+                }
+                is OpenResult.Failure -> {
+                    lastReason = r.reason
+                    // 继续尝试下一个引擎
+                }
+            }
+        }
+        return OpenResult.Failure(lastReason ?: "所有引擎均无法打开文件")
     }
 
     /** 显式指定 engineId 打开（MCP 层或用户切换引擎时使用）。 */
@@ -156,6 +179,29 @@ class AnalysisSession @Inject constructor(
         withEngine { e, h -> e.findFunctionsByName(h, query) }.orEmpty()
     suspend fun getFunctionCfg(functionOffset: Long): List<BasicBlock> =
         withEngine { e, h -> e.getFunctionCfg(h, functionOffset) }.orEmpty()
+
+    /** 在指定地址定义函数并命名（注入 Blutter Dart 方法名等外部分析结果）。 */
+    suspend fun defineFunction(address: Long, name: String): Boolean =
+        withEngine { e, h -> e.defineFunction(h, address, name) } ?: false
+
+    /** 批量定义函数。返回成功定义的数量。 */
+    suspend fun defineFunctions(functions: List<Pair<Long, String>>): Int {
+        var count = 0
+        for ((addr, name) in functions) {
+            if (defineFunction(addr, name)) count++
+        }
+        return count
+    }
+
+    /**
+     * 重新分析交叉引用（补充 xref 表）。
+     *
+     * defineFunction 已改为只设 flag 不调 af，不会破坏 xref 表。
+     * 本方法主要用于其他场景下的 xref 重建。
+     * 仅对支持 FUNCTION_ANALYSIS 的引擎有效，其他引擎 no-op。
+     */
+    suspend fun reanalyzeXrefs(): Boolean =
+        withEngine { e, h -> e.reanalyzeXrefs(h) } ?: false
 
     suspend fun disassemble(offset: Long, size: Long): List<DisasmInstruction> =
         withEngine { e, h -> e.disassemble(h, offset, size) }.orEmpty()
