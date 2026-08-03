@@ -750,7 +750,7 @@ class SoEditorViewModel @Inject constructor(
     }
 }
 
-enum class EditorTab { STRUCTURE, HEX, DISASSEMBLY }
+enum class EditorTab { STRUCTURE, HEX, DISASSEMBLY, EMULATION }
 
 data class SoEditorUiState(
     val filePath: String = "",

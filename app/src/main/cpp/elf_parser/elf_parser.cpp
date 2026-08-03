@@ -50,6 +50,17 @@ struct Elf64_Sym {
     uint64_t st_size;
 };
 
+struct Elf64_Phdr {
+    uint32_t p_type;
+    uint32_t p_flags;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
+};
+
 // ELF 魔数
 constexpr uint8_t ELF_MAGIC[] = {0x7f, 'E', 'L', 'F'};
 constexpr uint16_t EM_AARCH64 = 183;
@@ -110,6 +121,7 @@ ElfParser* ElfParser::open(const char* path) {
     }
 
     parser->parseElfHeader();
+    parser->parseProgramHeaders();
     parser->parseSections();
     parser->parseSymbols();
 
@@ -123,6 +135,49 @@ void ElfParser::parseElfHeader() {
     machine_ = ehdr->e_machine;
     version_ = ehdr->e_version;
     flags_ = ehdr->e_flags;
+}
+
+/**
+ * 解析程序头表（仿真加载依赖）。
+ *
+ * 按 e_phoff/e_phnum/e_phentsize 定位，所有偏移做文件边界防御；
+ * e_phentsize 可能大于 sizeof(Elf64_Phdr)（扩展字段），按步长逐个读取。
+ */
+void ElfParser::parseProgramHeaders() {
+    auto* ehdr = static_cast<Elf64_Ehdr*>(mmap_);
+    if (ehdr->e_phnum == 0 || ehdr->e_phoff == 0) return;
+    if (ehdr->e_phentsize < sizeof(Elf64_Phdr)) return;
+
+    uint64_t phEnd = ehdr->e_phoff + static_cast<uint64_t>(ehdr->e_phnum) * ehdr->e_phentsize;
+    if (phEnd > fileSize_) return;
+
+    const auto* base = static_cast<const uint8_t*>(mmap_) + ehdr->e_phoff;
+    programHeaders_.reserve(ehdr->e_phnum);
+    for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
+        const auto* phdr = reinterpret_cast<const Elf64_Phdr*>(base + static_cast<uint64_t>(i) * ehdr->e_phentsize);
+        ProgramHeader ph;
+        ph.type = phdr->p_type;
+        ph.flags = phdr->p_flags;
+        ph.offset = phdr->p_offset;
+        ph.vaddr = phdr->p_vaddr;
+        ph.paddr = phdr->p_paddr;
+        ph.filesz = phdr->p_filesz;
+        ph.memsz = phdr->p_memsz;
+        ph.align = phdr->p_align;
+        programHeaders_.push_back(ph);
+    }
+}
+
+std::vector<ProgramHeader> ElfParser::getProgramHeaders() const {
+    return programHeaders_;
+}
+
+std::vector<ProgramHeader> ElfParser::getLoadSegments() const {
+    std::vector<ProgramHeader> loads;
+    for (const auto& ph : programHeaders_) {
+        if (ph.type == PT_LOAD) loads.push_back(ph);
+    }
+    return loads;
 }
 
 void ElfParser::parseSections() {

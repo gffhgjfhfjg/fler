@@ -59,6 +59,31 @@ data class ElfSymbol(
 }
 
 /**
+ * ELF PT_LOAD 段信息（仿真加载用）。
+ * 对应 C++ 层的 ProgramHeader 结构体（仅返回 PT_LOAD 类型）。
+ */
+data class ElfLoadSegment(
+    val type: Int,
+    val flags: Int,
+    val offset: Long,
+    val vaddr: Long,
+    val paddr: Long,
+    val filesz: Long,
+    val memsz: Long,
+    val align: Long
+) {
+    companion object {
+        const val PF_X = 0x1
+        const val PF_W = 0x2
+        const val PF_R = 0x4
+    }
+
+    val isExecutable: Boolean get() = (flags and PF_X) != 0
+    val isWritable: Boolean get() = (flags and PF_W) != 0
+    val isReadable: Boolean get() = (flags and PF_R) != 0
+}
+
+/**
  * ELF 解析器绑定。
  *
  * 通过 JNI 桥接调用 C++ 层的 ElfParser，
@@ -143,6 +168,23 @@ class ElfParserBindings : AutoCloseable {
     }
 
     /**
+     * 获取 ELF 入口点地址（e_entry）。
+     */
+    fun getEntry(): Long = nativeGetEntry(nativeHandle)
+
+    /**
+     * 获取所有 PT_LOAD 段（仿真加载用：按段映射内存并写入文件内容）。
+     */
+    fun getLoadSegments(): List<ElfLoadSegment> {
+        val array = nativeGetLoadSegments(nativeHandle) ?: return emptyList()
+        val result = mutableListOf<ElfLoadSegment>()
+        for (i in 0 until array.size) {
+            result.add(array[i])
+        }
+        return result
+    }
+
+    /**
      * 读取指定节区的原始数据。
      */
     fun getSectionData(sectionName: String): ByteArray {
@@ -168,6 +210,8 @@ class ElfParserBindings : AutoCloseable {
 
     private external fun nativeOpen(path: String): Long
     private external fun nativeClose(handle: Long)
+    private external fun nativeGetEntry(handle: Long): Long
+    private external fun nativeGetLoadSegments(handle: Long): Array<ElfLoadSegment>?
     private external fun nativeGetSections(handle: Long): Array<ElfSection>?
     private external fun nativeGetSymbols(handle: Long): Array<ElfSymbol>?
     private external fun nativeGetDynamicSymbols(handle: Long): Array<ElfSymbol>?

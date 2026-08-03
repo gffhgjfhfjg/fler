@@ -26,3 +26,6 @@ fler-engines/
 
 # ── keystone 静态库（GitHub Actions 交叉编译产物，构建期 fetchKeystone 下载）──
 /app/libs/
+
+# ── unicorn 源码与构建产物（scripts/build-unicorn.ps1 交叉编译）──
+/vendor/

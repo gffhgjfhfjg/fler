@@ -392,6 +392,11 @@ private fun SoEditorContent(
                 onClick = { onTabSelected(EditorTab.DISASSEMBLY) },
                 text = { Text("汇编") },
             )
+            Tab(
+                selected = currentTab == EditorTab.EMULATION,
+                onClick = { onTabSelected(EditorTab.EMULATION) },
+                text = { Text("仿真") },
+            )
         }
 
         // Tab 内容（方向性转场：下方滑入 + 淡入 / 上方滑出 + 淡出）
@@ -453,6 +458,13 @@ private fun SoEditorContent(
                         onInstructionClick = { address ->
                             viewModel.setSelectedOffset(address)
                         }
+                    )
+                }
+
+                EditorTab.EMULATION -> {
+                    EmulationTab(
+                        viewModel = hiltViewModel(),
+                        filePath = uiState.filePath
                     )
                 }
             }

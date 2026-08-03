@@ -48,6 +48,23 @@ static jobject symbolToJava(JNIEnv* env, const Symbol& sym) {
     return obj;
 }
 
+// 将 C++ ProgramHeader 转为 Java 对象
+// ElfLoadSegment 字段顺序：type(Int) flags(Int) offset(Long) vaddr(Long) paddr(Long) filesz(Long) memsz(Long) align(Long)
+// 对应 JVM 签名：(IIJJJJJJ)V
+static jobject loadSegmentToJava(JNIEnv* env, const ProgramHeader& ph) {
+    jclass cls = env->FindClass("com/ai/fler/core/jni/ElfLoadSegment");
+    jmethodID ctor = env->GetMethodID(cls, "<init>", "(IIJJJJJJ)V");
+    return env->NewObject(cls, ctor,
+        static_cast<jint>(ph.type),
+        static_cast<jint>(ph.flags),
+        static_cast<jlong>(ph.offset),
+        static_cast<jlong>(ph.vaddr),
+        static_cast<jlong>(ph.paddr),
+        static_cast<jlong>(ph.filesz),
+        static_cast<jlong>(ph.memsz),
+        static_cast<jlong>(ph.align));
+}
+
 // ========== ElfParser JNI ==========
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -118,6 +135,31 @@ Java_com_ai_fler_core_jni_ElfParserBindings_nativeGetDynamicSymbols(
         auto* sym = symbolToJava(env, symbols[i]);
         env->SetObjectArrayElement(arr, i, sym);
         env->DeleteLocalRef(sym);
+    }
+    return arr;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ai_fler_core_jni_ElfParserBindings_nativeGetEntry(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+    auto* parser = reinterpret_cast<ElfParser*>(handle);
+    if (!parser || !parser->isValid()) return 0;
+    return static_cast<jlong>(parser->getEntry());
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_ai_fler_core_jni_ElfParserBindings_nativeGetLoadSegments(
+    JNIEnv* env, jobject /*thiz*/, jlong handle) {
+    auto* parser = reinterpret_cast<ElfParser*>(handle);
+    if (!parser || !parser->isValid()) return nullptr;
+
+    auto segments = parser->getLoadSegments();
+    jclass cls = env->FindClass("com/ai/fler/core/jni/ElfLoadSegment");
+    jobjectArray arr = env->NewObjectArray(segments.size(), cls, nullptr);
+    for (size_t i = 0; i < segments.size(); ++i) {
+        auto* seg = loadSegmentToJava(env, segments[i]);
+        env->SetObjectArrayElement(arr, i, seg);
+        env->DeleteLocalRef(seg);
     }
     return arr;
 }

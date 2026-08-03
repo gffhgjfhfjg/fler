@@ -50,7 +50,10 @@ data class EmuStepResult(
 
 /** 停止原因。 */
 enum class StopReason {
-    NONE, BREAKPOINT, SINGLE_STEP, TIMEOUT, ERROR, INTERRUPTED
+    NONE, BREAKPOINT, SINGLE_STEP, TIMEOUT, ERROR, INTERRUPTED,
+
+    /** 执行到哨兵返回地址（LR 指向 0xDEADBEEF0000），视为函数返回。 */
+    FUNCTION_RETURN
 }
 
 /** 仿真会话句柄（独立于 [AnalysisHandle]）。 */
@@ -63,10 +66,10 @@ value class EmulationHandle(val value: Long) {
 }
 
 /**
- * 仿真引擎抽象接口（给 Unicorn / Unidbg 预留骨架）。
+ * 仿真引擎抽象接口。
  *
- * 现阶段没有实现类，[UnicornEnginePlaceholder] 与 [UnidbgEnginePlaceholder]
- * 仅声明骨架，让后续开发者直接实现即可；所有方法默认抛
+ * 实现：UnicornEngine（已集成，静态链接 libunicorn.a）；
+ * UnidbgEnginePlaceholder 仅为 Unidbg 预留骨架，方法抛
  * [NotImplementedError]，避免 UI 层误调。
  *
  * **与 BinaryAnalysisEngine 的关系**：
@@ -114,6 +117,12 @@ interface EmulationEngine {
 
     /** 单步一条指令。 */
     suspend fun step(handle: EmulationHandle): EmuStepResult
+
+    /**
+     * 请求中断正在运行的会话（跨线程安全，下一指令边界生效）。
+     * 默认空实现；支持运行中打断的引擎（Unicorn）覆写。
+     */
+    fun requestStop(handle: EmulationHandle) {}
 
     /** 设置 PC 指针。 */
     suspend fun setPc(handle: EmulationHandle, pc: Long)

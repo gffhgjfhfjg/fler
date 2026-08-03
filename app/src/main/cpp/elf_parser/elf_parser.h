@@ -50,6 +50,25 @@ struct Symbol {
     uint16_t shndx = 0;
 };
 
+// ELF 程序头信息（M1 仿真加载用：按 PT_LOAD 段映射内存）
+struct ProgramHeader {
+    uint32_t type;      // p_type：1=LOAD, 2=DYNAMIC ...
+    uint32_t flags;     // p_flags：1=X, 2=W, 4=R
+    uint64_t offset;    // 文件内偏移
+    uint64_t vaddr;     // 虚拟地址
+    uint64_t paddr;     // 物理地址（通常与 vaddr 相同）
+    uint64_t filesz;    // 文件中的大小
+    uint64_t memsz;     // 内存中的大小（>= filesz，多出部分为 BSS）
+    uint64_t align;     // 对齐
+};
+
+// PT_LOAD 程序头类型
+constexpr uint32_t PT_LOAD = 1;
+// p_flags 位
+constexpr uint32_t PF_X = 0x1;
+constexpr uint32_t PF_W = 0x2;
+constexpr uint32_t PF_R = 0x4;
+
 class ElfParser {
 public:
     static ElfParser* open(const char* path);
@@ -61,6 +80,10 @@ public:
 
     // === 只读接口 ===
     std::vector<Section> getSections() const;
+    // 程序头：全部 / 仅 PT_LOAD（仿真加载用）
+    std::vector<ProgramHeader> getProgramHeaders() const;
+    std::vector<ProgramHeader> getLoadSegments() const;
+    uint64_t getEntry() const { return entry_; }
     std::vector<Symbol> getSymbols() const;
     std::vector<Symbol> getDynamicSymbols() const;
     std::vector<uint8_t> getSectionData(const char* name) const;
@@ -84,6 +107,7 @@ private:
     size_t fileSize_ = 0;
 
     // 缓存解析结果
+    std::vector<ProgramHeader> programHeaders_;
     std::vector<Section> sections_;
     std::vector<Symbol> symbols_;          // .symtab
     std::vector<Symbol> dynSymbols_;      // .dynsym
@@ -91,6 +115,7 @@ private:
 
     void parseIfNeeded() const;
     void parseElfHeader();
+    void parseProgramHeaders();
     void parseSections();
     void parseSymbols();
     void parseSymbolTable(int sectionIndex, std::vector<Symbol>& out);

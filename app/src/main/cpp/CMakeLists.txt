@@ -49,6 +49,23 @@ set_target_properties(capstone PROPERTIES
 # 链接不会被提取；等 RizinEngine JNI 就位后自动生效。
 file(GLOB RIZIN_STATIC_LIBS "${FLER_LIBS_DIR}/librz_*.a")
 
+# Unicorn 仿真引擎静态库：build-unicorn workflow 产物（libunicorn.a + include/unicorn）。
+# ENABLE_UNICORN=OFF 或库文件缺失时优雅降级：不链接、不定义宏，
+# unicorn_jni.cpp 退化为安全 stub（isAvailable=false），构建保持可用。
+option(ENABLE_UNICORN "Build with Unicorn emulation engine" ON)
+set(UNICORN_LIB "${FLER_LIBS_DIR}/libunicorn.a")
+set(FLER_HAS_UNICORN OFF)
+if(ENABLE_UNICORN AND EXISTS "${UNICORN_LIB}")
+    set(FLER_HAS_UNICORN ON)
+    add_library(unicorn STATIC IMPORTED)
+    set_target_properties(unicorn PROPERTIES
+        IMPORTED_LOCATION "${UNICORN_LIB}"
+    )
+elseif(ENABLE_UNICORN)
+    message(WARNING "libunicorn.a 不存在（${UNICORN_LIB}），Unicorn 仿真禁用；"
+        "运行 build-unicorn workflow 并把产物放入 app/libs/arm64-v8a/")
+endif()
+
 # ========== 查找 Android 系统库 ==========
 find_library(log-lib log)
 find_library(android-lib android)
@@ -70,6 +87,7 @@ add_library(fler_jni SHARED
     jni_bridge/capstone_jni.cpp
     jni_bridge/keystone_jni.cpp
     jni_bridge/rizin_jni.cpp
+    jni_bridge/unicorn_jni.cpp
 )
 
 target_link_libraries(fler_jni
@@ -80,6 +98,11 @@ target_link_libraries(fler_jni
     ${log-lib}
     ${android-lib}
 )
+
+if(FLER_HAS_UNICORN)
+    target_compile_definitions(fler_jni PRIVATE FLER_ENABLE_UNICORN)
+    target_link_libraries(fler_jni unicorn)
+endif()
 
 # 导出符号可见性
 set_target_properties(fler_jni PROPERTIES

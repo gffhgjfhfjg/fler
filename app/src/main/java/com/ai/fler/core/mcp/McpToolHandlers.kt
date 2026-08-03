@@ -45,6 +45,7 @@ class McpToolHandlers @Inject constructor(
     private val config: McpConfig,
     private val patchService: McpPatchService,
     private val engineMcp: EngineMcpToolRegistry,
+    private val emulationMcp: EmulationMcpToolRegistry,
 ) : McpResourceProvider {
 
     class McpTool(
@@ -63,6 +64,8 @@ class McpToolHandlers @Inject constructor(
         }.forEach { this[it.name] = it }
         // Engine 能力自动暴露的工具（带 engine_ 前缀）
         engineMcp.buildTools().forEach { (k, v) -> this[k] = v }
+        // 仿真工具（带 emu_ 前缀，Unicorn 会话/调用/寄存器/内存/断点）
+        emulationMcp.buildTools().forEach { (k, v) -> this[k] = v }
     }
 
     // ========== 参数读取辅助 ==========

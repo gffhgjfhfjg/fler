@@ -8,7 +8,7 @@ import com.ai.fler.core.analysis.SoEditorCache
 import com.ai.fler.core.analysis.assembler.KeystoneAssembler
 import com.ai.fler.core.analysis.engine.RizinEngine
 import com.ai.fler.core.analysis.engine.SelfAnalysisEngine
-import com.ai.fler.core.analysis.engine.UnicornEnginePlaceholder
+import com.ai.fler.core.analysis.engine.UnicornEngine
 import com.ai.fler.core.analysis.engine.UnidbgEnginePlaceholder
 import com.ai.fler.core.service.BackupManager
 import com.ai.fler.core.service.EngineLoader
@@ -25,7 +25,7 @@ import javax.inject.Singleton
  * - AnalysisSession: 统一会话门面（UI / MCP 入口）。
  * - RizinEngine: isAvailable=false，占位；静态库就位后自动升为优先。
  * - SelfAnalysisEngine: fallback，低优先级但默认可用。
- * - Unicorn/Unidbg 引擎：占位，isAvailable=false，后续接 lib 后替换。
+ * - Unicorn/Unidbg 引擎：Unicorn 已集成（静态链接，isAvailable 运行时探测）；Unidbg 占位。
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -45,9 +45,9 @@ object AnalysisModule {
             AnalysisEnginePriority.SELF_ANALYSIS
         )
 
-        // 仿真引擎：占位
+        // 仿真引擎：Unicorn 已集成（编译期禁用/库缺失时 isAvailable=false 自动降级）
         reg.registerEmulation(
-            UnicornEnginePlaceholder(),
+            UnicornEngine(),
             EmulationEnginePriority.UNICORN
         )
         reg.registerEmulation(

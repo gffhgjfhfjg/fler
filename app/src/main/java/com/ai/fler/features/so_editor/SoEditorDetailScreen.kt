@@ -299,6 +299,11 @@ fun SoEditorDetailScreen(
                                 onClick = { viewModel.setTab(EditorTab.DISASSEMBLY) },
                                 text = { Text("汇编") },
                             )
+                            Tab(
+                                selected = currentTab == EditorTab.EMULATION,
+                                onClick = { viewModel.setTab(EditorTab.EMULATION) },
+                                text = { Text("仿真") },
+                            )
                         }
 
                         // Tab 内容：从汇编切回结构 Tab 时用快 fade(200ms)，其他方向保持滑入转场
@@ -352,6 +357,10 @@ fun SoEditorDetailScreen(
                                     onInstructionClick = { address ->
                                         viewModel.setSelectedOffset(address)
                                     },
+                                )
+                                EditorTab.EMULATION -> EmulationTab(
+                                    viewModel = hiltViewModel(),
+                                    filePath = filePath
                                 )
                             }
                         }
