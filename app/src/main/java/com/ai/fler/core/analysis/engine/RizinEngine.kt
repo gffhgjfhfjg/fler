@@ -185,19 +185,24 @@ class RizinEngine : BinaryAnalysisEngine {
     }
 
     override suspend fun getSymbols(handle: AnalysisHandle, includeDynamic: Boolean): List<SymbolInfo> {
-        // isj = 静态符号；isJj = 动态符号（大小写 J 表示动态），两者字段结构一致
-        if (includeDynamic) {
-            // 契约：includeDynamic=true 时需包含动态符号，两条命令分别查询后合并去重
-            val staticJson = cmd(handle, "isj") ?: return emptyList()
-            val dynamicJson = cmd(handle, "isJj") ?: return emptyList()
-            val merged = RizinJsonParser.parseSymbols(staticJson).toMutableList()
-            val seen = merged.map { it.address }.toMutableSet()
-            for (sym in RizinJsonParser.parseSymbols(dynamicJson)) {
-                if (sym.address !in seen) { merged.add(sym); seen.add(sym.address) }
-            }
-            return merged
+        // isj = 全部符号；iej = 导出（.dynsym 已定义）；iij = 导入（.dynsym 未定义）
+        val merged = RizinJsonParser.parseSymbols(cmd(handle, "isj") ?: return emptyList()).toMutableList()
+        if (!includeDynamic) return merged
+        val seen = merged.map { it.address to it.name }.toMutableSet()
+        for (sym in RizinJsonParser.parseSymbols(cmd(handle, "iej") ?: "")) {
+            if (sym.address to sym.name !in seen) { merged.add(sym); seen.add(sym.address to sym.name) }
         }
-        return RizinJsonParser.parseSymbols(cmd(handle, "isj") ?: return emptyList())
+        for (imp in RizinJsonParser.parseImports(cmd(handle, "iij") ?: "")) {
+            val sym = SymbolInfo(
+                name = imp.name,
+                address = imp.address,
+                size = 0,
+                type = RizinJsonParser.parseSymbolType(imp.type),
+                bind = if (imp.bind.lowercase() == "weak") SymbolBind.WEAK else SymbolBind.GLOBAL
+            )
+            if (sym.address to sym.name !in seen) { merged.add(sym); seen.add(sym.address to sym.name) }
+        }
+        return merged
     }
 
     override suspend fun getImports(handle: AnalysisHandle): List<ImportInfo> {
