@@ -288,6 +288,11 @@ class EmulationViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(errorMessage = null)
     }
 
+    /** 清空日志（UI 日志区标题栏按钮）。 */
+    fun clearLogs() {
+        _uiState.value = _uiState.value.copy(logs = emptyList())
+    }
+
     private fun appendLog(msg: String) {
         val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         val logs = _uiState.value.logs.toMutableList()
