@@ -32,7 +32,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -44,11 +46,16 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ai.fler.feature.output.AsmBrowserUiState
 import com.ai.fler.feature.output.AsmBrowserViewModel
+import com.ai.fler.ui.components.EmptyState
+import com.ai.fler.ui.components.ErrorState
 
 /**
  * ASM 浏览器界面。
  *
- * 展示汇编代码文件内容，支持搜索和行号显示。
+ * @param analysisId 分析记录 ID
+ * @param methodId 方法 ID（0=全部方法）
+ * @param onBack 返回回调
+ * @param onEditInSo 在 SO 编辑器中打开回调
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -122,14 +129,19 @@ fun AsmBrowserScreen(
                 }
 
                 uiState.errorMessage != null -> {
-                    AsmErrorContent(
+                    ErrorState(
                         message = uiState.errorMessage!!,
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
 
                 uiState.lines.isEmpty() -> {
-                    AsmEmptyContent(modifier = Modifier.align(Alignment.Center))
+                    EmptyState(
+                        icon = Icons.Default.ArrowBack,
+                        title = "暂无 ASM 内容",
+                        message = "请先完成分析，ASM 汇编结果将在此显示",
+                        modifier = Modifier.align(Alignment.Center)
+                    )
                 }
 
                 else -> {
@@ -211,17 +223,21 @@ private fun AsmLineList(
     searchQuery: String,
     modifier: Modifier = Modifier
 ) {
-    val filteredLines = if (searchQuery.isBlank()) {
-        lines.mapIndexed { index, line ->
-            AsmLineItem(number = index + 1, text = line, isMatch = false)
-        }
-    } else {
-        lines.mapIndexed { index, line ->
-            AsmLineItem(
-                number = index + 1,
-                text = line,
-                isMatch = line.contains(searchQuery, ignoreCase = true)
-            )
+    val filteredLines by remember(lines, searchQuery) {
+        derivedStateOf {
+            if (searchQuery.isBlank()) {
+                lines.mapIndexed { index, line ->
+                    AsmLineItem(number = index + 1, text = line, isMatch = false)
+                }
+            } else {
+                lines.mapIndexed { index, line ->
+                    AsmLineItem(
+                        number = index + 1,
+                        text = line,
+                        isMatch = line.contains(searchQuery, ignoreCase = true)
+                    )
+                }
+            }
         }
     }
 
@@ -273,48 +289,6 @@ private fun AsmLineRow(item: AsmLineItem) {
             fontFamily = FontFamily.Monospace,
             fontWeight = if (item.isMatch) FontWeight.Bold else FontWeight.Normal,
             color = if (item.isMatch) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-        )
-    }
-}
-
-@Composable
-private fun AsmEmptyContent(modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier.padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = "暂无 ASM 内容",
-            style = MaterialTheme.typography.titleMedium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "请先完成分析，ASM 汇编结果将在此显示",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun AsmErrorContent(
-    message: String,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier.padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = "加载失败",
-            style = MaterialTheme.typography.titleMedium,
-            color = Color.Red
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = message,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }

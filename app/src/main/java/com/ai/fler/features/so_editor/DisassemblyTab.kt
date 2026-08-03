@@ -1,5 +1,9 @@
 package com.ai.fler.features.so_editor
 
+import androidx.compose.animation.core.Animatable
+import com.ai.fler.ui.animation.AnimDuration
+import com.ai.fler.ui.animation.AnimEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -20,9 +24,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.HelpOutline
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,7 +42,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -47,6 +53,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -86,10 +93,23 @@ fun DisassemblyTab(
     val patchedOffsets by viewModel.patchedOffsets.collectAsStateWithLifecycle()
     val xrefData by viewModel.xrefData.collectAsStateWithLifecycle()
     val functionOverlay by viewModel.functionOverlay.collectAsStateWithLifecycle()
+    val flashTrigger by viewModel.flashTrigger.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
-    var inputAddress by remember { mutableStateOf(selectedOffset.toString()) }
+    // 呼吸脉冲动画：用 Animatable 驱动 0→1→0→1→0（2 次呼吸）
+    val pulseAlpha = remember { Animatable(0f) }
+    LaunchedEffect(disassemblyData.highlightAddress, flashTrigger) {
+        if (disassemblyData.highlightAddress == null) return@LaunchedEffect
+        pulseAlpha.snapTo(0f)
+        val cycles = 2
+        for (i in 0 until cycles) {
+            pulseAlpha.animateTo(1f, tween(AnimDuration.slow, easing = AnimEasing.entry))
+            pulseAlpha.animateTo(0f, tween(AnimDuration.slow, easing = AnimEasing.entry))
+        }
+    }
+
+    var inputAddress by remember { mutableStateOf("") }
     var searchQuery by remember { mutableStateOf("") }
     // 正在编辑的指令（null 表示对话框未打开）
     var editingInstruction by remember { mutableStateOf<DisasmInstruction?>(null) }
@@ -98,10 +118,22 @@ fun DisassemblyTab(
     // 交叉引用面板
     var showXrefSheet by remember { mutableStateOf(false) }
 
-    // 初始加载（非方法模式才自动加载默认页；方法模式由调用方主动 loadDisassembly）
+    // 初始加载：仅当 selectedOffset == 0（用户未指定目标地址）时自动加载偏移 0 起始的指令；
+    // 若用户已通过 onFunctionClick/onSymbolClick 设置了目标地址，则跳过自动加载，
+    // 避免与带 highlightAfterLoad 的 loadDisassembly 并发竞争覆盖。
     LaunchedEffect(Unit) {
-        if (!isMethodMode && disassemblyData.instructions.isEmpty()) {
+        if (!isMethodMode && disassemblyData.instructions.isEmpty() && !disassemblyData.isLoading && selectedOffset == 0L) {
             viewModel.loadDisassembly(selectedOffset)
+        }
+    }
+
+    // 数据更新后，滚动到 highlightAddress 对应的行（用 instructions 作 key，
+    // 闪烁 toggle 时 instructions 不变，不会重复触发）
+    LaunchedEffect(disassemblyData.instructions) {
+        val addr = disassemblyData.highlightAddress ?: return@LaunchedEffect
+        val idx = disassemblyData.instructions.indexOfFirst { it.address == addr }
+        if (idx >= 0) {
+            listState.scrollToItem(idx)
         }
     }
 
@@ -112,7 +144,11 @@ fun DisassemblyTab(
             onInputAddressChange = { inputAddress = it },
             onJumpToAddress = {
                 val address = inputAddress.toLongOrNull(16) ?: inputAddress.toLongOrNull() ?: 0L
-                viewModel.loadDisassembly(address)
+                // 传入 highlightAfterLoad = address 确保：
+                // 1. 加载 512 字节上下文（前文指令），定位更准确
+                // 2. 加载后自动滚动到目标地址行
+                // 3. 触发脉冲高亮动画，让用户清楚看到目标位置
+                viewModel.loadDisassembly(address, highlightAfterLoad = address)
             },
             onPrevPage = {
                 viewModel.loadDisassembly(disassemblyData.baseAddress - 4096)
@@ -158,6 +194,7 @@ fun DisassemblyTab(
                     highlightAddress = disassemblyData.highlightAddress,
                     patchedOffsets = patchedOffsets,
                     functionOverlay = functionOverlay,
+                    flashAlpha = pulseAlpha.value,
                     listState = listState,
                     onInstructionClick = { instruction ->
                         // 点击 = 编辑汇编指令
@@ -170,6 +207,7 @@ fun DisassemblyTab(
                         viewModel.loadXrefs(instruction.address)
                         showXrefSheet = true
                     },
+                    onLoadMoreBefore = { viewModel.loadMoreBefore() },
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -198,12 +236,11 @@ fun DisassemblyTab(
                             args = args
                         )
                         if (ok) {
-                            // 高亮被修改的指令，并用原 loadedSize 刷新（方法模式不会变成整 SO）
-                            viewModel.setHighlightAddress(instruction.address)
                             viewModel.loadDisassembly(
                                 disassemblyData.baseAddress,
                                 disassemblyData.loadedSize.takeIf { it > 0 }
-                                    ?: disassemblyData.instructions.size.toLong() * 4L
+                                    ?: disassemblyData.instructions.size.toLong() * 4L,
+                                highlightAfterLoad = instruction.address
                             )
                         }
                         editingInstruction = null
@@ -226,8 +263,7 @@ fun DisassemblyTab(
             onDismiss = { showXrefSheet = false },
             onXrefClick = { addr ->
                 showXrefSheet = false
-                viewModel.loadDisassembly(addr)
-                viewModel.setHighlightAddress(addr)
+                viewModel.loadDisassembly(addr, highlightAfterLoad = addr)
             }
         )
     }
@@ -330,7 +366,7 @@ private fun InstructionEditDialog(
                 )
                 IconButton(onClick = { showHelp = true }) {
                     Icon(
-                        imageVector = Icons.Default.HelpOutline,
+                        imageVector = Icons.AutoMirrored.Filled.HelpOutline,
                         contentDescription = "指令帮助"
                     )
                 }
@@ -445,7 +481,7 @@ private fun DisassemblyNavigationBar(
                     modifier = Modifier.size(36.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.KeyboardArrowLeft,
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
                         contentDescription = "上一页"
                     )
                 }
@@ -473,7 +509,7 @@ private fun DisassemblyNavigationBar(
                     modifier = Modifier.size(36.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.KeyboardArrowRight,
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                         contentDescription = "下一页"
                     )
                 }
@@ -499,7 +535,7 @@ private fun DisassemblyNavigationBar(
                 modifier = Modifier.size(36.dp)
             ) {
                 Icon(
-                    imageVector = Icons.Default.HelpOutline,
+                    imageVector = Icons.AutoMirrored.Filled.HelpOutline,
                     contentDescription = "指令帮助"
                 )
             }
@@ -514,18 +550,24 @@ private fun DisassemblyListView(
     highlightAddress: Long?,
     patchedOffsets: Set<Long>,
     functionOverlay: Map<Long, String>,
+    flashAlpha: Float,
     listState: LazyListState,
     onInstructionClick: (DisasmInstruction) -> Unit,
     onInstructionLongClick: (DisasmInstruction) -> Unit,
+    onLoadMoreBefore: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val filteredInstructions = if (searchQuery.isBlank()) {
-        instructions.map { it to false }
-    } else {
-        instructions.map { instruction ->
-            val matches = instruction.mnemonic.contains(searchQuery, ignoreCase = true) ||
-                instruction.opStr.contains(searchQuery, ignoreCase = true)
-            instruction to matches
+    val filteredInstructions by remember(instructions, searchQuery) {
+        derivedStateOf {
+            if (searchQuery.isBlank()) {
+                instructions.map { it to false }
+            } else {
+                instructions.map { instruction ->
+                    val matches = instruction.mnemonic.contains(searchQuery, ignoreCase = true) ||
+                        instruction.opStr.contains(searchQuery, ignoreCase = true)
+                    instruction to matches
+                }
+            }
         }
     }
 
@@ -534,6 +576,28 @@ private fun DisassemblyListView(
         val target = highlightAddress ?: return@LaunchedEffect
         val idx = filteredInstructions.indexOfFirst { it.first.address == target }
         if (idx >= 0) listState.animateScrollToItem(idx)
+    }
+
+    // 向上无限滚动：滚到顶部时自动往前加载更多指令
+    val prevSize = remember { mutableIntStateOf(instructions.size) }
+    LaunchedEffect(instructions.size) {
+        // 指令数量增加（往前追加了），保持当前可见项位置不变
+        val delta = instructions.size - prevSize.intValue
+        if (delta > 0 && prevSize.intValue > 0) {
+            // 新指令插入到头部，把滚动位置往后移 delta，保持视觉位置不变
+            listState.scrollToItem(
+                index = listState.firstVisibleItemIndex + delta,
+                scrollOffset = listState.firstVisibleItemScrollOffset
+            )
+        }
+        prevSize.intValue = instructions.size
+    }
+    val firstVisibleIndex by remember { derivedStateOf { listState.firstVisibleItemIndex } }
+    LaunchedEffect(firstVisibleIndex) {
+        // 滑到顶部前 3 条时触发加载
+        if (firstVisibleIndex <= 2 && instructions.isNotEmpty()) {
+            onLoadMoreBefore()
+        }
     }
 
     LazyColumn(
@@ -555,7 +619,8 @@ private fun DisassemblyListView(
             DisassemblyRow(
                 instruction = instruction,
                 isMatch = isMatch,
-                isFlash = highlightAddress != null && instruction.address == highlightAddress,
+                isFlash = flashAlpha > 0f && highlightAddress != null && instruction.address == highlightAddress,
+                flashAlpha = if (highlightAddress != null && instruction.address == highlightAddress) flashAlpha else 0f,
                 isPatched = instruction.address in patchedOffsets,
                 onClick = { onInstructionClick(instruction) },
                 onLongClick = { onInstructionLongClick(instruction) }
@@ -606,24 +671,29 @@ private fun XrefBottomSheet(
     var searchQuery by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
-    // 扁平化数据：to/from 合并，带 tag 区分
-    val flatItems: List<Triple<Boolean, com.ai.fler.core.analysis.Xref, Long>> = remember(xrefData, typeFilter, searchQuery) {
-        val list = mutableListOf<Triple<Boolean, com.ai.fler.core.analysis.Xref, Long>>()
+    // 扁平化数据：to/from 合并，带 tag 区分，附函数名（从 xrefData.xrefFunctionNames 取）
+    data class FlatItem(val isTo: Boolean, val xref: com.ai.fler.core.analysis.Xref, val address: Long, val functionName: String?)
+    val flatItems: List<FlatItem> = remember(xrefData, typeFilter, searchQuery) {
+        val list = mutableListOf<FlatItem>()
+        val fnMap = xrefData.xrefFunctionNames
         // isTo=true → 调用方（xref.from 是跳转地址）；isTo=false → 被调用（xref.to 是地址）
         for (xref in xrefData.xrefsTo) {
-            list.add(Triple(true, xref, xref.from))
+            val fn = fnMap[xref.from]
+            list.add(FlatItem(true, xref, xref.from, fn))
         }
         for (xref in xrefData.xrefsFrom) {
-            list.add(Triple(false, xref, xref.to))
+            val fn = fnMap[xref.to]
+            list.add(FlatItem(false, xref, xref.to, fn))
         }
         // 类型筛选
-        val filtered1 = if (typeFilter == null) list else list.filter { it.second.type == typeFilter }
+        val filtered1 = if (typeFilter == null) list else list.filter { it.xref.type == typeFilter }
         // 搜索筛选
         if (searchQuery.isBlank()) filtered1 else {
             val q = searchQuery.uppercase()
             filtered1.filter {
-                val hex = it.third.toString(16).uppercase()
-                hex.contains(q) || ("0x$hex").contains(q)
+                val hex = it.address.toString(16).uppercase()
+                hex.contains(q) || ("0x$hex").contains(q) ||
+                    (it.functionName?.uppercase()?.contains(q) == true)
             }
         }
     }
@@ -754,13 +824,13 @@ private fun XrefBottomSheet(
                         modifier = Modifier.fillMaxSize()
                     ) {
                         // 分组展示：先调用方，再被调用
-                        val hasTo = flatItems.any { it.first }
-                        val hasFrom = flatItems.any { !it.first }
+                        val hasTo = flatItems.any { it.isTo }
+                        val hasFrom = flatItems.any { !it.isTo }
 
                         if (hasTo) {
                             stickyHeader {
                                 Text(
-                                    text = "调用方 (${flatItems.count { it.first }})",
+                                    text = "调用方 (${flatItems.count { it.isTo }})",
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary,
@@ -771,13 +841,14 @@ private fun XrefBottomSheet(
                                 )
                             }
                             items(
-                                items = flatItems.filter { it.first },
-                                key = { "to_${it.second.from}_${it.second.to}_${it.second.type}" }
+                                items = flatItems.filter { it.isTo },
+                                key = { "to_${it.xref.from}_${it.xref.to}_${it.xref.type}" }
                             ) { item ->
                                 XrefRow(
-                                    address = item.third,
-                                    type = item.second.type,
-                                    onClick = { onXrefClick(item.third) }
+                                    address = item.address,
+                                    type = item.xref.type,
+                                    functionName = item.functionName,
+                                    onClick = { onXrefClick(item.address) }
                                 )
                             }
                         }
@@ -785,7 +856,7 @@ private fun XrefBottomSheet(
                         if (hasFrom) {
                             stickyHeader {
                                 Text(
-                                    text = "被调用 (${flatItems.count { !it.first }})",
+                                    text = "被调用 (${flatItems.count { !it.isTo }})",
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.secondary,
@@ -796,13 +867,14 @@ private fun XrefBottomSheet(
                                 )
                             }
                             items(
-                                items = flatItems.filter { !it.first },
-                                key = { "from_${it.second.from}_${it.second.to}_${it.second.type}" }
+                                items = flatItems.filter { !it.isTo },
+                                key = { "from_${it.xref.from}_${it.xref.to}_${it.xref.type}" }
                             ) { item ->
                                 XrefRow(
-                                    address = item.third,
-                                    type = item.second.type,
-                                    onClick = { onXrefClick(item.third) }
+                                    address = item.address,
+                                    type = item.xref.type,
+                                    functionName = item.functionName,
+                                    onClick = { onXrefClick(item.address) }
                                 )
                             }
                         }
@@ -858,6 +930,7 @@ private fun XrefTypeChip(
 private fun XrefRow(
     address: Long,
     type: com.ai.fler.core.analysis.XrefType,
+    functionName: String? = null,
     onClick: () -> Unit
 ) {
     val typeText = when (type) {
@@ -875,29 +948,45 @@ private fun XrefRow(
         com.ai.fler.core.analysis.XrefType.STRING -> Color(0xFF9C27B0)
         else -> Color.Gray
     }
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
-        Text(
-            text = typeText,
-            style = MaterialTheme.typography.labelSmall,
-            color = typeColor,
-            modifier = Modifier
-                .background(typeColor.copy(alpha = 0.1f))
-                .padding(horizontal = 4.dp, vertical = 2.dp)
-                .width(48.dp)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = "0x${address.toString(16).uppercase().padStart(8, '0')}",
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = typeText,
+                style = MaterialTheme.typography.labelSmall,
+                color = typeColor,
+                modifier = Modifier
+                    .background(typeColor.copy(alpha = 0.1f))
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                    .width(48.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "0x${address.toString(16).uppercase().padStart(8, '0')}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+        // 函数名（第二行，可选）
+        if (functionName != null) {
+            Text(
+                text = functionName,
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 56.dp, top = 2.dp)
+            )
+        }
     }
 }
 
@@ -907,22 +996,26 @@ private fun DisassemblyRow(
     instruction: DisasmInstruction,
     isMatch: Boolean,
     isFlash: Boolean,
+    flashAlpha: Float = 0f,
     isPatched: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
+    // 呼吸脉冲：直接用 Animatable 输出值（Animatable 已产生平滑曲线）
+    val a = if (isFlash) flashAlpha else 0f
     // 闪烁 > 未保存修改（红）> 搜索匹配
     val backgroundColor = when {
-        isFlash -> Color(0xFFD32F2F).copy(alpha = 0.85f)
+        isFlash -> Color(0xFFD32F2F).copy(alpha = (a * 0.85f).coerceIn(0f, 1f))
         isPatched -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
         isMatch -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
         else -> Color.Transparent
     }
-    val highlightTextColor = MaterialTheme.colorScheme.onError
+    val flashScale = 1f + a * 0.02f
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer { scaleX = flashScale; scaleY = flashScale }
             .background(backgroundColor)
             .combinedClickable(
                 onClick = onClick,
@@ -937,7 +1030,7 @@ private fun DisassemblyRow(
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
             color = when {
-                isFlash || isPatched -> MaterialTheme.colorScheme.error
+                isPatched -> MaterialTheme.colorScheme.error
                 else -> MaterialTheme.colorScheme.onSurfaceVariant
             },
             modifier = Modifier.width(96.dp)
@@ -951,7 +1044,7 @@ private fun DisassemblyRow(
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
             color = when {
-                isFlash || isPatched -> MaterialTheme.colorScheme.error
+                isPatched -> MaterialTheme.colorScheme.error
                 else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
             },
             modifier = Modifier.width(92.dp)
@@ -970,7 +1063,6 @@ private fun DisassemblyRow(
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 color = when {
-                    isFlash -> highlightTextColor
                     isPatched -> MaterialTheme.colorScheme.error
                     isMatch -> MaterialTheme.colorScheme.primary
                     // 分支指令用不同颜色
@@ -987,7 +1079,6 @@ private fun DisassemblyRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 color = when {
-                    isFlash -> highlightTextColor
                     isPatched -> MaterialTheme.colorScheme.error
                     else -> MaterialTheme.colorScheme.onSurface.copy(
                         alpha = if (isMatch) 1.0f else 0.8f

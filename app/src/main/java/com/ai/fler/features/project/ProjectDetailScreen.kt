@@ -184,7 +184,8 @@ fun ProjectDetailScreen(
                             analysis = analysis,
                             onPpBrowse = { onPpBrowse(analysis.id) },
                             onAsmBrowse = { onAsmBrowse(analysis.id) },
-                            onDelete = { viewModel.deleteAnalysis(analysis) }
+                            onDelete = { viewModel.deleteAnalysis(analysis) },
+                            modifier = Modifier.animateItem()
                         )
                     }
                 }
@@ -256,6 +257,20 @@ private fun ProjectInfoCard(project: Project) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            if (!project.packageName.isNullOrBlank()) {
+                Text(
+                    text = "包名: ${project.packageName}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (!project.apkVersion.isNullOrBlank()) {
+                Text(
+                    text = "版本: v${project.apkVersion}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             if (project.dartVersion != null) {
                 Text(
                     text = "Dart ${project.dartVersion}",
@@ -272,12 +287,13 @@ private fun AnalysisCard(
     analysis: Analysis,
     onPpBrowse: () -> Unit,
     onAsmBrowse: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {

@@ -46,6 +46,9 @@ interface AnalysisDao {
     @Query("UPDATE analyses SET classes_count = :classesCount, methods_count = :methodsCount, pp_entries_count = :ppEntriesCount WHERE id = :id")
     suspend fun updateCounts(id: Long, classesCount: Int, methodsCount: Int, ppEntriesCount: Int)
 
+    @Query("UPDATE analyses SET libapp_path = :libappPath, libflutter_path = :libflutterPath WHERE id = :id")
+    suspend fun updateLibPaths(id: Long, libappPath: String?, libflutterPath: String?)
+
     @Query("SELECT * FROM analyses ORDER BY started_at DESC LIMIT :limit")
     suspend fun getRecentList(limit: Int): List<Analysis>
 }

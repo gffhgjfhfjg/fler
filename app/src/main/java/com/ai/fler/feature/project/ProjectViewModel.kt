@@ -28,10 +28,12 @@ import com.ai.fler.data.entity.PpEntry
 import com.ai.fler.data.entity.Project
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -396,8 +398,8 @@ class ProjectViewModel @Inject constructor(
             val dbPath = File(context.cacheDir, "analysis_${analysisId}.db").absolutePath
             val cacheDir = context.cacheDir.absolutePath
 
-            // 调用 analyze 方法
-            val result = engine.analyze(libappPath, dbPath, cacheDir)
+            // 调用 analyze 方法（在 IO 线程执行，避免阻塞主线程）
+            val result = withContext(Dispatchers.IO) { engine.analyze(libappPath, dbPath, cacheDir) }
 
             // 转换结果
             val success = result.isSuccess
@@ -460,6 +462,13 @@ class ProjectViewModel @Inject constructor(
         analysisDao.completeAnalysis(
             id = analysisId,
             resultCode = if (result.success) Analysis.RESULT_SUCCESS else Analysis.RESULT_GENERIC_ERROR
+        )
+
+        // 保存 SO 路径到分析记录（供 SO 编辑器查询 Dart 方法标签）
+        analysisDao.updateLibPaths(
+            id = analysisId,
+            libappPath = extractResult.libapp?.path,
+            libflutterPath = extractResult.libflutter?.path
         )
 
         // 保存库信息

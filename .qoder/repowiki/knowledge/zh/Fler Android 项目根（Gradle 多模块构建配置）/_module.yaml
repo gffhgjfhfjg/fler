@@ -1,0 +1,21 @@
+schema_version: 1
+module_path: ""
+title: Fler Android 项目根（Gradle 多模块构建配置）
+scope:
+    - .gitignore
+    - .gitattributes
+    - gradle.properties
+    - settings.gradle.kts
+    - build.gradle.kts
+    - CODE_WIKI.md
+    - dev-plan.md
+    - dev-progress.md
+    - rizin-integration-plan.md
+    - 方案.md
+    - fler_dark_minimal_v1.png
+    - gradlew
+    - gradlew.bat
+    - rizin-integration-research.md
+source_files: []
+depends_on: []
+related_to: []

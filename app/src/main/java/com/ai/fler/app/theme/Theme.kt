@@ -3,7 +3,9 @@ package com.ai.fler.app.theme
 import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -12,6 +14,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 
 private val LightColors = lightColorScheme(
@@ -67,6 +70,17 @@ private val DarkColors = darkColorScheme(
 )
 
 /**
+ * fler 统一形状系统。
+ *
+ * 所有组件统一使用这套圆角值，避免各处硬编码不同圆角导致视觉不一致。
+ */
+val FlerShapes = Shapes(
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(16.dp),
+)
+
+/**
  * fler 主题入口。
  *
  * Android 12+ 默认启用 Material You 动态取色；老设备回退到 fler 自定义品牌蓝调色板。
@@ -103,6 +117,7 @@ fun FlerTheme(
     MaterialTheme(
         colorScheme = colorScheme,
         typography = FlerTypography,
+        shapes = FlerShapes,
         content = content,
     )
 }

@@ -44,7 +44,7 @@ class SoEditorViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "SoEditorViewModel"
-        const val HEX_PAGE_SIZE = 4096L
+        const val HEX_PAGE_SIZE = 2048L
         const val DISASM_PAGE_SIZE = 4096L
         const val MAX_RECENT_FILES = 10
     }
@@ -71,9 +71,9 @@ class SoEditorViewModel @Inject constructor(
     private val _flashOffset = MutableStateFlow<Long?>(null)
     val flashOffset: StateFlow<Long?> = _flashOffset.asStateFlow()
 
-    /** 汇编Tab呼吸脉冲 alpha（0=透明，1=全亮），UI 层用 animateFloatAsState 平滑过渡。 */
-    private val _flashAlpha = MutableStateFlow(0f)
-    val flashAlpha: StateFlow<Float> = _flashAlpha.asStateFlow()
+    /** 汇编Tab呼吸脉冲触发器（递增计数器，UI 层用 LaunchedEffect + Animatable 驱动动画）。 */
+    private val _flashTrigger = MutableStateFlow(0)
+    val flashTrigger: StateFlow<Int> = _flashTrigger.asStateFlow()
 
     /** 当前选中指令的交叉引用（点击指令行时加载）。 */
     private val _xrefData = MutableStateFlow<XrefDataState>(XrefDataState())
@@ -95,9 +95,9 @@ class SoEditorViewModel @Inject constructor(
     private val _structureFlashAddress = MutableStateFlow<Long?>(null)
     val structureFlashAddress: StateFlow<Long?> = _structureFlashAddress.asStateFlow()
 
-    /** 结构Tab呼吸脉冲 alpha（0=透明，1=全亮），由 triggerStructureFlash 用 Animatable 平滑驱动。 */
-    private val _structureFlashAlpha = MutableStateFlow(0f)
-    val structureFlashAlpha: StateFlow<Float> = _structureFlashAlpha.asStateFlow()
+    /** 结构Tab呼吸脉冲触发器（递增计数器，UI 层用 LaunchedEffect + Animatable 驱动动画）。 */
+    private val _structureFlashTrigger = MutableStateFlow(0)
+    val structureFlashTrigger: StateFlow<Int> = _structureFlashTrigger.asStateFlow()
 
     /** 结构Tab当前选中的子Tab ordinal（持久化，切到汇编再回来不丢）。 */
     private val _structureSubTab = MutableStateFlow(0)
@@ -105,6 +105,19 @@ class SoEditorViewModel @Inject constructor(
 
     private val _recentFiles = MutableStateFlow<List<RecentFile>>(emptyList())
     val recentFiles: StateFlow<List<RecentFile>> = _recentFiles.asStateFlow()
+
+    init {
+        // 启动时过滤一次最近文件列表：缓存被清理后文件可能不存在，避免用户点击打开空文件路径
+        viewModelScope.launch(Dispatchers.IO) {
+            val snapshot = _recentFiles.value
+            if (snapshot.isNotEmpty()) {
+                val existing = snapshot.filter { java.io.File(it.path).exists() }
+                if (existing.size != snapshot.size) {
+                    _recentFiles.value = existing
+                }
+            }
+        }
+    }
 
     fun setTab(tab: EditorTab) { _currentTab.value = tab }
 
@@ -115,14 +128,14 @@ class SoEditorViewModel @Inject constructor(
     fun closeFile() {
         savedSeq = -1L
         _flashOffset.value = null
-        _flashAlpha.value = 0f
+        _flashTrigger.value = 0
         _uiState.value = SoEditorUiState()
         _hexData.value = HexDataState()
         _disassemblyData.value = DisassemblyDataState()
         _currentTab.value = EditorTab.STRUCTURE
         _selectedOffset.value = 0L
         _structureFlashAddress.value = null
-        _structureFlashAlpha.value = 0f
+        _structureFlashTrigger.value = 0
         _structureSubTab.value = 0
         _dartFunctionLabels.value = emptyMap()
         // 不调 session.closeAll()：保留 Rizin 会话、soEditorCache、injectedSoPaths，
@@ -204,13 +217,18 @@ class SoEditorViewModel @Inject constructor(
                 functions = functions,
                 fileInfo = fileInfo,
                 isLoading = false,
-                isFileOpen = true
+                isFileOpen = true,
+                isAnalyzing = true
             )
             addToRecent(filePath)
             // 恢复该文件持久化的补丁高亮（上次修改过才有红色）
             restorePatchedOffsets()
+            // 给 UI 层一个帧渲染 "正在分析" 状态，再开始 xref 分析
+            delay(50)
             // 加载 Blutter 分析的 Dart 方法标签（如果有该 SO 的分析记录）
+            // 改为同步调用，确保 xref 分析完成后再显示编辑器内容
             loadDartFunctionLabels(filePath)
+            _uiState.value = _uiState.value.copy(isAnalyzing = false)
             Log.i(TAG, "打开文件成功: $filePath, ${sections.size} 节, ${staticSymbols.size + dynamicSymbols.size} 符号, engine=${result.engineId}")
         } catch (e: Exception) {
             Log.e(TAG, "打开文件失败", e)
@@ -246,18 +264,20 @@ class SoEditorViewModel @Inject constructor(
         }
     }
 
-    fun writeByte(offset: Long, newValue: Byte) {
-        viewModelScope.launch {
+    suspend fun writeByte(offset: Long, newValue: Byte): Boolean {
+        return withContext(Dispatchers.IO) {
             try {
-                val ok = withContext(Dispatchers.IO) {
-                    session.writeBytes(offset, byteArrayOf(newValue), _uiState.value.fileName)
-                }
+                val f = File(_uiState.value.filePath)
+                if (f.exists()) backupManager.createBackupIfNeeded(f)
+                val ok = session.writeBytes(offset, byteArrayOf(newValue), _uiState.value.fileName)
                 if (ok) {
                     refreshPatchedOffsets()
                     loadHexData(_hexData.value.offset, _hexData.value.data.size.toLong())
                 }
+                ok
             } catch (e: Exception) {
                 Log.e(TAG, "写入字节失败", e)
+                false
             }
         }
     }
@@ -419,22 +439,13 @@ class SoEditorViewModel @Inject constructor(
     fun setHighlightAddress(address: Long?) {
         if (address == null) {
             _flashOffset.value = null
-            _flashAlpha.value = 0f
             _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = null)
             return
         }
         _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = address)
         _flashOffset.value = address
-        // 离散 toggle：0→1→0→1→0，UI 层用 animateFloatAsState(tween 500ms) 平滑过渡
-        viewModelScope.launch {
-            val on = 500L; val off = 500L; val cycles = 2
-            for (i in 0 until cycles) {
-                _flashAlpha.value = 1f
-                delay(on)
-                _flashAlpha.value = 0f
-                if (i < cycles - 1) delay(off)
-            }
-        }
+        // 递增触发器，UI 层用 LaunchedEffect + Animatable 驱动 0→1→0→1→0 脉冲
+        _flashTrigger.value = _flashTrigger.value + 1
     }
 
     /** 加载指定地址的交叉引用（点击指令行时调用）。 */
@@ -444,10 +455,16 @@ class SoEditorViewModel @Inject constructor(
             try {
                 val to = session.xrefsTo(address)
                 val from = session.xrefsFrom(address)
+                // 为所有 xref 地址计算函数名（优先 Dart 标签，再查 FunctionInfo 包含关系）
+                val allXrefAddrs = mutableSetOf<Long>()
+                to.forEach { allXrefAddrs.add(it.from) }
+                from.forEach { allXrefAddrs.add(it.to) }
+                val fnNames = buildXrefFunctionNames(allXrefAddrs)
                 _xrefData.value = XrefDataState(
                     address = address,
                     xrefsTo = to,
                     xrefsFrom = from,
+                    xrefFunctionNames = fnNames,
                     isLoading = false
                 )
             } catch (e: Exception) {
@@ -455,6 +472,52 @@ class SoEditorViewModel @Inject constructor(
                 _xrefData.value = XrefDataState(address = address, isLoading = false)
             }
         }
+    }
+
+    /**
+     * 为一批 xref 地址计算函数名。
+     * 优先 [dartFunctionLabels]（ClassName.methodName），
+     * 再查 [uiState].functions 的包含关系（vaddr ≤ addr < vaddr+size）。
+     * 若两者都不命中，从函数列表找最近的函数起始地址。
+     */
+    private fun buildXrefFunctionNames(addresses: Set<Long>): Map<Long, String> {
+        if (addresses.isEmpty()) return emptyMap()
+        val dartLabels = _dartFunctionLabels.value
+        val functions = _uiState.value.functions
+        if (functions.isEmpty()) return emptyMap()
+
+        // 排序函数列表，用于二分查找最近的函数起始地址
+        val sorted = functions.sortedBy { it.vaddr }
+        val result = mutableMapOf<Long, String>()
+        for (addr in addresses) {
+            // 1) 精确命中 Dart 标签
+            if (addr in dartLabels) { result[addr] = dartLabels[addr]!!; continue }
+            // 2) 查找包含 addr 的函数
+            var found: String? = null
+            for (f in sorted) {
+                if (f.vaddr <= addr && (f.size <= 0 || addr < f.vaddr + f.size)) {
+                    // 对于 size=0 的函数，继续检查是否还有更精确的匹配
+                    if (f.size > 0) { found = f.name; break }
+                    // size=0 的暂存，继续找更精确的
+                    if (found == null) found = f.name
+                } else if (f.vaddr > addr) {
+                    break
+                }
+            }
+            if (found != null) {
+                result[addr] = found
+            } else {
+                // 3) 最接近的函数（addr 之前的最后一个函数）
+                val idx = sorted.binarySearchBy(addr) { it.vaddr }
+                val nearest = if (idx >= 0) sorted[idx]
+                else {
+                    val insertIdx = -idx - 1
+                    if (insertIdx > 0) sorted[insertIdx - 1] else null
+                }
+                if (nearest != null) result[addr] = nearest.name
+            }
+        }
+        return result
     }
 
     /** 清除交叉引用面板。 */
@@ -494,19 +557,12 @@ class SoEditorViewModel @Inject constructor(
         _structureFlashAddress.value = address
     }
 
-    /** 从汇编切回结构Tab时，触发呼吸脉冲（2次呼吸，0→1→0 离散 toggle，UI 层 animateFloatAsState 平滑过渡）。
+    /** 从汇编切回结构Tab时，触发呼吸脉冲（2次呼吸，0→1→0 由 UI 层 LaunchedEffect + Animatable 驱动）。
      *  flashAddress 保持不清空，下次切回来还能触发。 */
     fun triggerStructureFlash() {
         val addr = _structureFlashAddress.value ?: return
-        viewModelScope.launch {
-            val on = 500L; val off = 500L; val cycles = 2
-            for (i in 0 until cycles) {
-                _structureFlashAlpha.value = 1f
-                delay(on)
-                _structureFlashAlpha.value = 0f
-                if (i < cycles - 1) delay(off)
-            }
-        }
+        // 递增触发器，UI 层用 LaunchedEffect 监听后驱动 Animatable 动画
+        _structureFlashTrigger.value = _structureFlashTrigger.value + 1
     }
 
     /** 根据当前反汇编页的指令列表，更新函数边界标注。 */
@@ -527,73 +583,83 @@ class SoEditorViewModel @Inject constructor(
     }
 
     /** 加载 Blutter 分析的 Dart 方法标签到 SO 偏移的映射。 */
-    private fun loadDartFunctionLabels(soPath: String) {
-        viewModelScope.launch {
-            try {
-                // 1) 先看跨 ViewModel 的 DartLabels 缓存（命中则跳过 DAO 查询 + 标签构建）
-                val cachedLabels = soEditorCache.getDartLabels(soPath)
-                if (cachedLabels != null) {
-                    _dartFunctionLabels.value = cachedLabels.labels
-                    val existingAddrs = _uiState.value.functions.map { it.vaddr }.toSet()
-                    val merged = _uiState.value.functions + cachedLabels.dartFunctions.filter { it.vaddr !in existingAddrs }
-                    _uiState.value = _uiState.value.copy(functions = merged)
-                    // 即使命中 DartLabels 缓存，仍要检查 Rizin 注入状态（可能上次注入失败）
-                    if (soEditorCache.isInjected(soPath)) {
-                        Log.i(TAG, "Dart 方法标签 + Rizin 注入均已缓存: ${cachedLabels.labels.size} 条 (跳过全部)")
-                    } else {
-                        val pairs = cachedLabels.labels.map { (addr, name) -> addr to name }
-                        val injected = session.defineFunctions(pairs)
-                        soEditorCache.markInjected(soPath)
-                        // defineFunction 只设 flag 不调 af，不会破坏 xref 表
-                        // 此处调用 reanalyzeXrefs 仅作为补充扫描，非必需
-                        val rebuilt = session.reanalyzeXrefs()
-                        Log.i(TAG, "Dart 标签缓存命中但 Rizin 未注入: 注入 $injected 个, xref 补充扫描 $rebuilt")
-                    }
-                    return@launch
-                }
-
-                // 2) 缓存未命中：查 DAO → 构建标签 → 缓存 → 注入 Rizin
-                val methods = dartMethodDao.getMethodsBySoPath(soPath)
-                if (methods.isEmpty()) return@launch
-                val labels = mutableMapOf<Long, String>()
-                val dartFunctions = mutableListOf<FunctionInfo>()
-                for (m in methods) {
-                    val addr = m.method.functionOffset ?: continue
-                    if (addr <= 0) continue
-                    val name = "${m._className}.${m.method.methodName}"
-                    labels[addr] = name
-                    dartFunctions.add(
-                        FunctionInfo(
-                            name = name,
-                            offset = addr,
-                            vaddr = addr,
-                            size = m.method.functionSize ?: 0,
-                        )
-                    )
-                }
-                // 写入 DartLabels 缓存（跨 ViewModel 复用，避免下次再查 DAO）
-                soEditorCache.putDartLabels(soPath, SoEditorCache.DartLabels(labels, dartFunctions))
-
-                _dartFunctionLabels.value = labels
-                // 合并到 uiState.functions（去重：Blutter 优先于 Rizin）
+    private suspend fun loadDartFunctionLabels(soPath: String) {
+        try {
+            // 1) 先看跨 ViewModel 的 DartLabels 缓存（命中则跳过 DAO 查询 + 标签构建）
+            val cachedLabels = soEditorCache.getDartLabels(soPath)
+            if (cachedLabels != null) {
+                _dartFunctionLabels.value = cachedLabels.labels
                 val existingAddrs = _uiState.value.functions.map { it.vaddr }.toSet()
-                val merged = _uiState.value.functions + dartFunctions.filter { it.vaddr !in existingAddrs }
+                val merged = _uiState.value.functions + cachedLabels.dartFunctions.filter { it.vaddr !in existingAddrs }
                 _uiState.value = _uiState.value.copy(functions = merged)
-                // 仅首次打开该 SO 时注入 Rizin（flag 不可重复设置）
-                if (!soEditorCache.isInjected(soPath)) {
-                    val pairs = labels.map { (addr, name) -> addr to name }
+                // 即使命中 DartLabels 缓存，仍要检查 Rizin 注入状态（可能上次注入失败）
+                if (soEditorCache.isInjected(soPath)) {
+                    Log.i(TAG, "Dart 方法标签 + Rizin 注入均已缓存: ${cachedLabels.labels.size} 条")
+                    // 始终调用 reanalyzeXrefs()，确保 xref 表存在
+                    // 即使 Rizin 会话被重建，也能重新建立 xref 表
+                    val rebuilt = session.reanalyzeXrefs()
+                    Log.i(TAG, "xref 补充扫描: $rebuilt")
+                } else {
+                    val pairs = cachedLabels.labels.map { (addr, name) -> addr to name }
+                    // 注入前诊断（可选，用于排查地址空间问题）
+                    if (pairs.isNotEmpty()) {
+                        session.checkAddressSpace(pairs.first().first)
+                    }
+                    // 注入全部 Dart 函数作为 flag（只设名不调 af，不破坏 xref 表）
                     val injected = session.defineFunctions(pairs)
                     soEditorCache.markInjected(soPath)
-                    // defineFunction 只设 flag 不调 af，不会破坏 xref 表
-                    // 此处调用 reanalyzeXrefs 仅作为补充扫描，非必需
+                    // 补充扫描 xref（aar 不依赖函数边界，不影响已有 xref）
                     val rebuilt = session.reanalyzeXrefs()
-                    Log.i(TAG, "加载 Dart 方法标签: ${labels.size} 条 (Blutter), 函数合并后 ${merged.size} 条, Rizin 注入 $injected 个, xref 补充扫描 $rebuilt")
-                } else {
-                    Log.i(TAG, "Rizin 注入已缓存: ${labels.size} 条 (跳过 Rizin 注入)")
+                    Log.i(TAG, "Dart 标签缓存命中但 Rizin 未注入: 注入 $injected 个, xref 补充扫描 $rebuilt")
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "加载 Dart 方法标签失败（非关键）", e)
+                return
             }
+
+            // 2) 缓存未命中：查 DAO → 构建标签 → 缓存 → 注入 Rizin
+            val methods = dartMethodDao.getMethodsBySoPath(soPath)
+            if (methods.isEmpty()) return
+            val labels = mutableMapOf<Long, String>()
+            val dartFunctions = mutableListOf<FunctionInfo>()
+            for (m in methods) {
+                val addr = m.method.functionOffset ?: continue
+                if (addr <= 0) continue
+                val name = "${m._className}.${m.method.methodName}"
+                labels[addr] = name
+                dartFunctions.add(
+                    FunctionInfo(
+                        name = name,
+                        offset = addr,
+                        vaddr = addr,
+                        size = m.method.functionSize ?: 0,
+                    )
+                )
+            }
+            // 写入 DartLabels 缓存（跨 ViewModel 复用，避免下次再查 DAO）
+            soEditorCache.putDartLabels(soPath, SoEditorCache.DartLabels(labels, dartFunctions))
+
+            _dartFunctionLabels.value = labels
+            // 合并到 uiState.functions（去重：Blutter 优先于 Rizin）
+            val existingAddrs = _uiState.value.functions.map { it.vaddr }.toSet()
+            val merged = _uiState.value.functions + dartFunctions.filter { it.vaddr !in existingAddrs }
+            _uiState.value = _uiState.value.copy(functions = merged)
+            // 仅首次打开该 SO 时注入 Rizin（flag 不可重复设置）
+            if (!soEditorCache.isInjected(soPath)) {
+                val pairs = labels.map { (addr, name) -> addr to name }
+                // 注入前诊断（可选，用于排查地址空间问题）
+                if (pairs.isNotEmpty()) {
+                    session.checkAddressSpace(pairs.first().first)
+                }
+                // 注入全部 Dart 函数作为 flag（只设名不调 af，不破坏 xref 表）
+                val injected = session.defineFunctions(pairs)
+                soEditorCache.markInjected(soPath)
+                // 补充扫描 xref（aar 不依赖函数边界，不影响已有 xref）
+                val rebuilt = session.reanalyzeXrefs()
+                Log.i(TAG, "加载 Dart 方法标签: ${labels.size} 条 (Blutter), 函数合并后 ${merged.size} 条, Rizin 注入 $injected 个, xref 补充扫描 $rebuilt")
+            } else {
+                Log.i(TAG, "Rizin 注入已缓存: ${labels.size} 条 (跳过 Rizin 注入)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "加载 Dart 方法标签失败（非关键）", e)
         }
     }
 
@@ -692,6 +758,7 @@ data class SoEditorUiState(
     val fileInfo: FileInfo? = null,
     val isLoading: Boolean = false,
     val isFileOpen: Boolean = false,
+    val isAnalyzing: Boolean = false,
     val errorMessage: String? = null
 )
 
@@ -729,5 +796,6 @@ data class XrefDataState(
     val address: Long = 0,
     val xrefsTo: List<Xref> = emptyList(),   // 谁调用/引用了我
     val xrefsFrom: List<Xref> = emptyList(), // 我调用/引用了谁
+    val xrefFunctionNames: Map<Long, String> = emptyMap(), // xref 地址 → 函数名（含类名）
     val isLoading: Boolean = false
 )

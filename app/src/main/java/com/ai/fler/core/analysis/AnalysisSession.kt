@@ -196,7 +196,7 @@ class AnalysisSession @Inject constructor(
     /**
      * 重新分析交叉引用（补充 xref 表）。
      *
-     * defineFunction 已改为只设 flag 不调 af，不会破坏 xref 表。
+     * defineFunction 只设 flag 不调 af，不会破坏 xref 表。
      * 本方法主要用于其他场景下的 xref 重建。
      * 仅对支持 FUNCTION_ANALYSIS 的引擎有效，其他引擎 no-op。
      */
@@ -249,6 +249,29 @@ class AnalysisSession @Inject constructor(
     suspend fun sha256(): String? = withEngine { e, h -> e.sha256(h) }
     suspend fun crc32(offset: Long? = null, size: Long? = null): Long? =
         withEngine { e, h -> e.crc32(h, offset, size) }
+
+    // ------------------------------------------------------------------
+    // 诊断工具
+    // ------------------------------------------------------------------
+
+    /** 查询引擎配置项的值。 */
+    suspend fun getConfig(key: String): String? =
+        withEngine { e, h -> e.getConfig(h, key) }
+
+    /**
+     * 诊断地址空间状态，确认 Blutter 的 vaddr 与 Rizin 地址空间是否一致。
+     * 打印日志供 logcat 分析。
+     */
+    suspend fun checkAddressSpace(testAddr: Long) {
+        withEngine { e, h -> e.checkAddressSpace(h, testAddr) }
+    }
+
+    /**
+     * 注入后诊断：确认 defineFunction + reanalyzeXrefs 后 xref 是否重建成功。
+     */
+    suspend fun diagnosticAfterInjection(testAddr: Long) {
+        withEngine { e, h -> e.diagnosticAfterInjection(h, testAddr) }
+    }
 
     companion object {
         const val TAG = "AnalysisSession"

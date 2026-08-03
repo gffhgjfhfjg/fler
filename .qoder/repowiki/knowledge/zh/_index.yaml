@@ -1,0 +1,39 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: main
+nodes_managed: true
+exported_at: "2026-08-03T09:48:07Z"
+modules:
+    "":
+        dir_name: Fler Android 项目根（Gradle 多模块构建配置）
+        title: Fler Android 项目根（Gradle 多模块构建配置）
+        scope:
+            - .gitignore
+            - .gitattributes
+            - gradle.properties
+            - settings.gradle.kts
+            - build.gradle.kts
+            - CODE_WIKI.md
+            - dev-plan.md
+            - dev-progress.md
+            - rizin-integration-plan.md
+            - 方案.md
+            - fler_dark_minimal_v1.png
+            - gradlew
+            - gradlew.bat
+            - rizin-integration-research.md
+        source_files: []
+        children:
+            - app
+        depends_on: []
+        related_to: []
+    app:
+        dir_name: Fler Android 应用主模块（UI + JNI 桥接 + 二进制分析）
+        title: Fler Android 应用主模块（UI + JNI 桥接 + 二进制分析）
+        scope:
+            - app/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []

@@ -2,7 +2,6 @@ package com.ai.fler.features.so_editor
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,17 +12,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -31,13 +29,14 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,8 +45,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 
 /**
  * Hex 编辑器 Tab。
@@ -66,8 +67,11 @@ fun HexEditorTab(
     val patchedOffsets by viewModel.patchedOffsets.collectAsStateWithLifecycle()
     val flashOffset by viewModel.flashOffset.collectAsStateWithLifecycle()
 
-    var inputOffset by remember { mutableStateOf(selectedOffset.toString()) }
+    var inputOffset by remember { mutableStateOf("") }
     var selectedByteIndex by remember { mutableStateOf(-1) }
+    var newByteValue by remember { mutableStateOf("") }
+    var writeStatus by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
 
     // 初始加载数据
     LaunchedEffect(Unit) {
@@ -77,7 +81,7 @@ fun HexEditorTab(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        // 地址输入和导航（基于 hexData.offset 翻页，而非 selectedOffset）
+        // 地址输入和导航
         HexNavigationBar(
             inputOffset = inputOffset,
             onInputOffsetChange = { inputOffset = it },
@@ -93,7 +97,7 @@ fun HexEditorTab(
             }
         )
 
-        // Hex 数据显示（用 weight 占据剩余空间，保证底部输入栏始终可见）
+        // Hex 数据显示
         when {
             hexData.isLoading -> {
                 Box(
@@ -126,46 +130,68 @@ fun HexEditorTab(
                     flashOffset = flashOffset,
                     onByteClick = { index ->
                         selectedByteIndex = index
+                        newByteValue = ""
+                        writeStatus = ""
                     },
                     modifier = Modifier.weight(1f).fillMaxWidth()
                 )
             }
         }
 
-        // 选中字节信息 + 写入（底部固定栏，不会被导航栏遮挡）
+        // 选中字节信息 + 写入（底部固定栏）
         if (selectedByteIndex >= 0 && selectedByteIndex < hexData.data.size) {
             val byteOffset = hexData.offset + selectedByteIndex
             SelectedByteInfo(
                 byteValue = hexData.data[selectedByteIndex],
                 offset = byteOffset
             )
-            var newByteValue by remember(byteOffset) { mutableStateOf("") }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                CompactTextField(
+                OutlinedTextField(
                     value = newByteValue,
-                    onValueChange = { newByteValue = it.take(2) },
+                    onValueChange = { input ->
+                        // 只保留 hex 字符，最多 2 位
+                        val filtered = input.filter { it in "0123456789abcdefABCDEF" }.take(2)
+                        newByteValue = filtered.uppercase()
+                        writeStatus = ""
+                    },
                     modifier = Modifier.weight(1f),
-                    placeholder = "新字节 (hex)",
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+                    placeholder = { Text("新字节 (如 FF)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace)
                 )
-                TextButton(
+                Button(
                     onClick = {
                         val value = newByteValue.toIntOrNull(16)
                         if (value != null && value in 0..255) {
-                            viewModel.writeByte(byteOffset, value.toByte())
+                            val hexInput = newByteValue
+                            scope.launch {
+                                val ok = viewModel.writeByte(byteOffset, value.toByte())
+                                writeStatus = if (ok) "已写入 0x$hexInput" else "写入失败"
+                            }
                             newByteValue = ""
+                        } else {
+                            writeStatus = "无效值: $newByteValue"
                         }
                     },
-                    enabled = newByteValue.isNotBlank()
+                    enabled = newByteValue.length == 2
                 ) {
                     Text("写入")
                 }
+            }
+            if (writeStatus.isNotEmpty()) {
+                Text(
+                    text = writeStatus,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (writeStatus.startsWith("已写入")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 1.dp)
+                )
             }
         }
     }
@@ -183,12 +209,12 @@ private fun HexNavigationBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(horizontal = 8.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         IconButton(
             onClick = onPrevPage,
-            modifier = Modifier.size(36.dp)
+            modifier = Modifier.size(28.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.KeyboardArrowLeft,
@@ -196,17 +222,17 @@ private fun HexNavigationBar(
             )
         }
 
-                CompactTextField(
-                    value = inputOffset,
-                    onValueChange = onInputOffsetChange,
-                    modifier = Modifier.weight(1f),
-                    placeholder = "偏移 (hex 或 dec)",
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
-                )
+        CompactTextField(
+            value = inputOffset,
+            onValueChange = onInputOffsetChange,
+            modifier = Modifier.weight(1f),
+            placeholder = "偏移 (hex 或 dec)",
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+        )
 
         IconButton(
             onClick = onJumpToOffset,
-            modifier = Modifier.size(36.dp)
+            modifier = Modifier.size(28.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.Search,
@@ -216,7 +242,7 @@ private fun HexNavigationBar(
 
         IconButton(
             onClick = onNextPage,
-            modifier = Modifier.size(36.dp)
+            modifier = Modifier.size(28.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.KeyboardArrowRight,
@@ -236,11 +262,11 @@ private fun HexDataView(
     onByteClick: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val bytesPerRow = 16
+    val bytesPerRow = 8
     val rows = (data.size + bytesPerRow - 1) / bytesPerRow
     val listState = rememberLazyListState()
 
-    // 撤销跳转：闪烁地址所在行滚动到可视区
+    // 闪烁地址所在行滚动到可视区
     LaunchedEffect(flashOffset) {
         val fo = flashOffset ?: return@LaunchedEffect
         val idx = (fo - baseOffset).toInt()
@@ -251,9 +277,7 @@ private fun HexDataView(
 
     LazyColumn(
         state = listState,
-        modifier = modifier
-            .horizontalScroll(rememberScrollState())
-            .padding(vertical = 4.dp)
+        modifier = modifier.padding(vertical = 2.dp)
     ) {
         items(count = rows) { rowIndex ->
             val startIndex = rowIndex * bytesPerRow
@@ -286,21 +310,22 @@ private fun HexRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 1.dp),
+            .padding(horizontal = 6.dp, vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 偏移列
+        // 地址列 - 三等分第一列
         Text(
-            text = "0x${rowOffset.toString(16).uppercase().padStart(8, '0')}",
+            text = rowOffset.toString(16).uppercase().padStart(8, '0'),
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(80.dp)
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.weight(1f),
+            maxLines = 1
         )
 
-        // 字节列
-        Row(modifier = Modifier.width(200.dp)) {
-            for (i in 0 until 16) {
+        // 字节列 - 三等分第二列，每个字节 weight(1f) 均分
+        Row(modifier = Modifier.weight(1f)) {
+            for (i in 0 until 8) {
                 if (i < bytes.size) {
                     val byteIndex = startIndex + i
                     val isSelected = byteIndex == selectedByteIndex
@@ -310,8 +335,9 @@ private fun HexRow(
 
                     Box(
                         modifier = Modifier
-                            .width(14.dp)
-                            .clip(RoundedCornerShape(2.dp))
+                            .weight(1f)
+                            .height(22.dp)
+                            .clip(RoundedCornerShape(3.dp))
                             .background(
                                 when {
                                     isFlash -> Color(0xFFD32F2F)
@@ -320,18 +346,17 @@ private fun HexRow(
                                     else -> Color.Transparent
                                 }
                             )
-                            .clickable { onByteClick(byteIndex) }
-                            .padding(horizontal = 1.dp),
+                            .clickable { onByteClick(byteIndex) },
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = byteValue.toUByte().toString(16).uppercase().padStart(2, '0'),
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
                             color = when {
                                 isSelected -> MaterialTheme.colorScheme.onPrimary
                                 else -> {
-                                    // 非打印字符用深灰色
                                     if (byteValue in 32..126) {
                                         MaterialTheme.colorScheme.onSurface
                                     } else {
@@ -341,48 +366,27 @@ private fun HexRow(
                             }
                         )
                     }
-
-                    if (i == 7) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                    } else if (i < 15) {
-                        Spacer(modifier = Modifier.width(2.dp))
-                    }
                 } else {
-                    Spacer(modifier = Modifier.width(14.dp))
-                    if (i == 7) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                    } else if (i < 15) {
-                        Spacer(modifier = Modifier.width(2.dp))
-                    }
+                    Spacer(modifier = Modifier.weight(1f))
                 }
             }
         }
 
-        // ASCII 列
-        Spacer(modifier = Modifier.width(8.dp))
-        Row(modifier = Modifier.width(100.dp)) {
-            for (i in 0 until 16) {
-                if (i < bytes.size) {
-                    val byteValue = bytes[i]
-                    val char = if (byteValue in 32..126) byteValue.toChar() else '.'
-
-                    Text(
-                        text = char.toString(),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = if (byteValue in 32..126) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        }
-                    )
-                } else {
-                    Text(
-                        text = " ",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
+        // ASCII 列 - 三等分第三列，每个字符 weight(1f) 与字节对齐
+        Row(modifier = Modifier.weight(1f)) {
+            for (i in 0 until 8) {
+                Text(
+                    text = if (i < bytes.size) {
+                        val b = bytes[i]
+                        if (b in 32..126) b.toChar().toString() else "."
+                    } else " ",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                    textAlign = TextAlign.Center,
+                    maxLines = 1
+                )
             }
         }
     }
@@ -396,14 +400,14 @@ private fun SelectedByteInfo(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(16.dp),
+            .padding(4.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Row(
-            modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            modifier = Modifier.padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column {
@@ -414,7 +418,7 @@ private fun SelectedByteInfo(
                 )
                 Text(
                     text = "0x${offset.toString(16).uppercase()}",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.labelLarge,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold
                 )
@@ -428,7 +432,7 @@ private fun SelectedByteInfo(
                 )
                 Text(
                     text = "0x${byteValue.toUByte().toString(16).uppercase().padStart(2, '0')}",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.labelLarge,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold
                 )
@@ -442,7 +446,7 @@ private fun SelectedByteInfo(
                 )
                 Text(
                     text = byteValue.toUByte().toString(),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.labelLarge,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold
                 )
@@ -456,7 +460,7 @@ private fun SelectedByteInfo(
                 )
                 Text(
                     text = if (byteValue in 32..126) byteValue.toChar().toString() else "不可打印",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.labelLarge,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold
                 )

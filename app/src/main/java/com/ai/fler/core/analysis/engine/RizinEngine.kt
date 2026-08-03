@@ -107,6 +107,64 @@ class RizinEngine : BinaryAnalysisEngine {
         openHandles[handle.value] ?: 0L
 
     // ------------------------------------------------------------------
+    // 诊断工具
+    // ------------------------------------------------------------------
+
+    /** 查询 Rizin 配置项的值（e key 命令）。 */
+    override suspend fun getConfig(handle: AnalysisHandle, key: String): String? {
+        val result = cmd(handle, "e $key") ?: return null
+        return result.trim().takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * 诊断地址空间状态，确认 Blutter 的 vaddr 与 Rizin 地址空间是否一致。
+     * 打印日志供 logcat 分析。
+     */
+    override suspend fun checkAddressSpace(handle: AnalysisHandle, testAddr: Long) {
+        // 1) 查询 io.va 配置
+        val va = cmd(handle, "e io.va")?.trim() ?: "null"
+        Log.i(TAG, "===== 地址空间诊断 =====")
+        Log.i(TAG, "io.va = $va")
+
+        // 2) 测试 afo（该地址是否被函数包含）
+        val hexAddr = "0x${testAddr.toString(16)}"
+        val afo = cmd(handle, "afo @ $hexAddr")?.trim() ?: "null"
+        Log.i(TAG, "afo @ $hexAddr = $afo")
+
+        // 3) 测试 vaddrToPaddr
+        val paddr = vaddrToPaddr(handle, testAddr)
+        val paddrHex = "0x${paddr.toString(16)}"
+        val isSame = paddr == testAddr
+        Log.i(TAG, "vaddrToPaddr($hexAddr) = $paddrHex (与原地址相同=$isSame)")
+
+        // 4) 测试 axtj（注入前的 xref 数量）
+        val xrefJson = cmd(handle, "axtj @ $hexAddr") ?: "null"
+        Log.i(TAG, "注入前 axtj @ $hexAddr 返回长度 = ${xrefJson.length}")
+        Log.i(TAG, "===== 诊断结束 =====")
+    }
+
+    /**
+     * 注入后诊断：确认 defineFunction + reanalyzeXrefs 后 xref 是否重建成功。
+     */
+    override suspend fun diagnosticAfterInjection(handle: AnalysisHandle, testAddr: Long) {
+        val hexAddr = "0x${testAddr.toString(16)}"
+        Log.i(TAG, "===== 注入后诊断 =====")
+
+        // 1) 检查 flag 是否已设置
+        val flag = cmd(handle, "f @ $hexAddr")?.trim() ?: "null"
+        Log.i(TAG, "f @ $hexAddr 返回 = $flag")
+
+        // 2) 检查该地址是否已被注册为函数（afij）
+        val afij = cmd(handle, "afij @ $hexAddr")?.trim() ?: "null"
+        Log.i(TAG, "afij @ $hexAddr = ${afij.take(200)}")
+
+        // 3) 关键对比：注入后的 xref 数量
+        val xrefJson = cmd(handle, "axtj @ $hexAddr") ?: "null"
+        Log.i(TAG, "注入后 axtj @ $hexAddr 返回长度 = ${xrefJson.length}")
+        Log.i(TAG, "===== 注入后诊断结束 =====")
+    }
+
+    // ------------------------------------------------------------------
     // ELF 结构
     // ------------------------------------------------------------------
 
@@ -193,31 +251,38 @@ class RizinEngine : BinaryAnalysisEngine {
 
     override suspend fun defineFunction(handle: AnalysisHandle, address: Long, name: String): Boolean {
         val hexAddr = "0x${address.toString(16)}"
-        // 只设置 flag 名，不执行 af。
+        // 只设 flag 名（UI 反汇编显示用），不调 af。
         //
-        // 为什么不能执行 af：
-        //   af 在定义函数时会清除该地址范围内的已有 xref 条目（包括其他函数对本函数的调用）。
-        //   Blutter 分析的 Dart 函数地址通常不被 aaa 识别为函数（Flutter AOT 代码无标准序言），
-        //   所以 af 会为每个 Blutter 函数执行，破坏全部 xref 条目。
-        //   后续 aac/aar 无法可靠恢复这些 xref（调用方函数已被 aaa 分析过，不会重新扫描）。
+        // 为什么不用 af 注册到 Rizin 函数 DB：
+        //   af 会清除该地址范围内的已有 xref 条目，然后需要 aar 重建。
+        //   但 defineFunctions 对 19803 个函数逐一调 af 耗时极长，
+        //   用户可能在 aar 完成前点击函数，看到 xref = 0（时序问题）。
         //
-        // 为什么只设 flag 就够了：
-        //   UI 显示函数名靠 _dartFunctionLabels（从 Dao 查询 + 合并到 uiState.functions），
-        //   不需要 Rizin 的 function DB。f 命令设置 flag 名即可让 Rizin 内部查询时看到名称。
+        // 为什么不调 af 也没问题：
+        //   reanalyzeXrefs 用 aar 扫描整个二进制，不依赖函数边界，
+        //   Dart 函数不在 Rizin 函数 DB 中也能被 aar 找到引用。
+        //   aac 需要函数边界，但我们用 aar 而不是 aac。
         cmd(handle, "f $name @ $hexAddr")
         return true
     }
 
     override suspend fun reanalyzeXrefs(handle: AnalysisHandle): Boolean {
-        // aac 遍历所有函数，分析函数内的调用指令，补充 xref 表。
-        // 注意：defineFunction 已不再调用 af，所以不会破坏 xref。
-        // 本方法主要用于其他场景（如手动 af 后）的 xref 重建。
-        val r = cmd(handle, "aac") ?: return false
+        // 用 aar 作为主命令：扫描整个二进制所有引用，不依赖函数边界。
+        // 为什么不用 aac：
+        //   aac 只扫描 Rizin 函数 DB 中已注册的函数体内的调用指令。
+        //   Blutter 分析的 Dart 函数由 defineFunction 通过 af 注册到 DB 后，
+        //   aac 理论上可以扫描它们，但实际测试中 aac 对某些 SO 文件可能
+        //   输出 "unknown" 或空结果，导致 xref 表不完整。
+        //   aar 更全面，扫描所有可执行代码段中的引用，不依赖函数边界识别。
+        //
+        // 副作用：defineFunction 中 af 会清除该地址范围内的 xref 条目，
+        // 但 aar 会重新扫描整个二进制并重建所有 xref 表，覆盖 af 的副作用。
+        val r = cmd(handle, "aar") ?: return false
         val trimmed = r.trim().lowercase()
-        if (trimmed.startsWith("unknown")) {
-            Log.w(TAG, "aac 不可用，回退到 aar")
-            val r2 = cmd(handle, "aar") ?: return false
-            return !r2.trim().startsWith("error", ignoreCase = true)
+        if (trimmed.startsWith("error", ignoreCase = true)) {
+            Log.w(TAG, "aar 不可用，回退到 aac")
+            val r2 = cmd(handle, "aac") ?: return false
+            return !r2.trim().startsWith("unknown", ignoreCase = true)
         }
         return true
     }

@@ -63,9 +63,14 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeOpen(
         return 0;
     }
 
-    // 打开文件（RZ_PERM_R = 读，RZ_PERM_W = 写）
-    // RZ_PERM_RWX = 7（读+写+执行映射），保证 read/write 都可用
-    RzCoreFile* cf = rz_core_file_open(core, path, 7, 0LL);
+    // 打开文件：先尝试 RW（mode 6），失败则降级到只读（mode 4）
+    // 某些解压后的 SO 文件可能没有写权限，RW 打开会失败
+    RzCoreFile* cf = rz_core_file_open(core, path, 6, 0LL);
+    if (!cf) {
+        __android_log_print(ANDROID_LOG_WARN, TAG,
+            "rz_core_file_open RW failed, trying RO: %s", path);
+        cf = rz_core_file_open(core, path, 4, 0LL);
+    }
     if (!cf) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "rz_core_file_open failed: %s", path);
         rz_core_free(core);

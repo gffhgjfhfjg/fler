@@ -1,7 +1,16 @@
 package com.ai.fler.features.so_editor
 
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import com.ai.fler.ui.animation.AnimDuration
+import com.ai.fler.ui.animation.AnimEasing
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -18,27 +27,32 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -76,149 +90,308 @@ fun StructureTab(
     viewModel: SoEditorViewModel,
     modifier: Modifier = Modifier
 ) {
-    var selectedSubTab by remember { mutableStateOf(StructureSubTab.SECTIONS) }
+    val selectedSubTabOrdinal by viewModel.structureSubTab.collectAsStateWithLifecycle()
+    val selectedSubTab = StructureSubTab.values().getOrElse(selectedSubTabOrdinal) { StructureSubTab.SECTIONS }
     val flashAddress by viewModel.structureFlashAddress.collectAsStateWithLifecycle()
+    val flashTrigger by viewModel.structureFlashTrigger.collectAsStateWithLifecycle()
+
+    // 呼吸脉冲动画：用 Animatable 驱动 0→1→0→1→0（2 次呼吸）
+    val pulseAlpha = remember { Animatable(0f) }
+    LaunchedEffect(flashAddress, flashTrigger) {
+        if (flashAddress == null) return@LaunchedEffect
+        pulseAlpha.snapTo(0f)
+        // 改成 fast=200ms（总时长 800ms）而非 slow=500ms（2000ms），减少每帧重组时间
+        repeat(2) {
+            pulseAlpha.animateTo(1f, tween(AnimDuration.fast, easing = AnimEasing.entry))
+            pulseAlpha.animateTo(0f, tween(AnimDuration.fast, easing = AnimEasing.exit))
+        }
+    }
 
     // 每个子Tab的LazyListState（key=ordinal）
     val listStates: Map<Int, LazyListState> = remember {
         StructureSubTab.values().associate { it.ordinal to LazyListState(0, 0) }
     }
 
-    // 子Tab切换：恢复滚动位置 + 如果有 flashAddress 滚动到该行
+    // 子Tab切换：如有 flashAddr（点函数/符号返回）直接定位目标行，不先恢复旧滚动位置避免抖动
     LaunchedEffect(selectedSubTab) {
         val ordinal = selectedSubTab.ordinal
         val state = listStates[ordinal] ?: return@LaunchedEffect
-        // 1) 恢复保存的滚动位置
-        viewModel.getStructureScroll(ordinal)?.let { (idx, off) ->
-            state.requestScrollToItem(idx, off)
+        val flashAddr = viewModel.structureFlashAddress.value
+
+        if (flashAddr == null) {
+            // 只有用户正常手动切换子 Tab（非返回场景）才恢复滚动位置
+            viewModel.getStructureScroll(ordinal)?.let { (idx, off) ->
+                state.scrollToItem(idx, off)
+            }
         }
-        // 2) 切回时触发闪烁动画（ViewModel里的定时器开始toggle flashAddress）
-        if (ordinal == StructureSubTab.FUNCTIONS.ordinal ||
-            ordinal == StructureSubTab.SYMBOLS.ordinal ||
-            ordinal == StructureSubTab.DYNAMIC_SYMBOLS.ordinal
-        ) {
+
+        if (flashAddr != null) {
+            // 直接 indexOfFirst：不分配临时 List（原本 functions.map { it.vaddr } 对 2w 条函数会产生 ~160KB 临时装箱对象，放大 GC）
+            val idx = when (selectedSubTab) {
+                StructureSubTab.FUNCTIONS -> functions.indexOfFirst { it.vaddr == flashAddr }
+                StructureSubTab.SYMBOLS -> symbols.indexOfFirst { it.address == flashAddr }
+                StructureSubTab.DYNAMIC_SYMBOLS -> dynamicSymbols.indexOfFirst { it.address == flashAddr }
+                StructureSubTab.SECTIONS -> sections.indexOfFirst { it.address == flashAddr }
+                StructureSubTab.STRINGS -> strings.indexOfFirst { it.address == flashAddr }
+            }
+            if (idx >= 0) {
+                // 不用 animateScrollToItem（长距离 300ms 平滑滚动），改为同步 scrollToItem
+                // 视觉上：转场动画结束时直接把目标行定位到列表中部偏上，立即进入闪烁，流畅度显著更好
+                state.scrollToItem(
+                    index = idx.coerceAtLeast(0),
+                    scrollOffset = -40
+                )
+            }
             viewModel.triggerStructureFlash()
         }
     }
 
-    // 监听每个子Tab的滚动：保存到 ViewModel
-    StructureSubTab.values().forEach { sub ->
-        val ordinal = sub.ordinal
-        val state = listStates[ordinal] ?: return@forEach
-        LaunchedEffect(state) {
-            snapshotFlow { state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset }
-                .distinctUntilChanged()
-                .collect { (idx, off) ->
-                    viewModel.saveStructureScroll(ordinal, idx, off)
-                }
-        }
-    }
-
-    // flashAddress 变化时（toggle闪烁），把该行滚动到可视区
-    LaunchedEffect(flashAddress) {
-        val addr = flashAddress ?: return@LaunchedEffect
-        val ordinal = selectedSubTab.ordinal
-        val state = listStates[ordinal] ?: return@LaunchedEffect
-        val list: List<Pair<Long, Any>> = when (selectedSubTab) {
-            StructureSubTab.FUNCTIONS -> functions.map { it.vaddr to it }
-            StructureSubTab.SYMBOLS -> symbols.map { it.address to it }
-            StructureSubTab.DYNAMIC_SYMBOLS -> dynamicSymbols.map { it.address to it }
-            StructureSubTab.SECTIONS -> sections.map { it.address to it }
-            StructureSubTab.STRINGS -> strings.map { it.address to it }
-        }
-        val idx = list.indexOfFirst { it.first == addr }
-        if (idx >= 0) {
-            // 稍等1帧等恢复位置先执行完
-            kotlinx.coroutines.delay(50)
-            state.animateScrollToItem(idx.coerceAtLeast(0))
-        }
+    // 只监听当前子Tab的滚动：保存到 ViewModel（减少 5 个 collector 到 1 个）
+    val currentListState = listStates[selectedSubTab.ordinal]!!
+    LaunchedEffect(currentListState) {
+        snapshotFlow { currentListState.firstVisibleItemIndex to currentListState.firstVisibleItemScrollOffset }
+            .distinctUntilChanged()
+            .collect { (idx, off) ->
+                viewModel.saveStructureScroll(selectedSubTab.ordinal, idx, off)
+            }
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        TabRow(selectedTabIndex = selectedSubTab.ordinal) {
+        // ===== 搜索状态（位于 TabRow 上方声明，供下方布局使用） =====
+        // 节区数据量小，不开放搜索；切到不可搜索Tab时自动收起搜索栏
+        val searchableOrdinals = remember {
+            setOf(
+                StructureSubTab.SYMBOLS.ordinal,
+                StructureSubTab.DYNAMIC_SYMBOLS.ordinal,
+                StructureSubTab.FUNCTIONS.ordinal,
+                StructureSubTab.STRINGS.ordinal
+            )
+        }
+        val isSearchable = selectedSubTab.ordinal in searchableOrdinals
+        var showSearch by remember { mutableStateOf(false) }
+        // 每个子Tab独立的搜索词（切Tab时保留各自的查询）
+        val searchQueries = remember { mutableStateMapOf<Int, String>() }
+        val currentQuery = searchQueries[selectedSubTab.ordinal].orEmpty()
+        // 切到不可搜索Tab时自动收起
+        LaunchedEffect(isSearchable) {
+            if (!isSearchable) showSearch = false
+        }
+
+        // ===== ScrollableTabRow：自适应宽度，数量完整可见，可水平滚动 =====
+        androidx.compose.material3.ScrollableTabRow(
+            selectedTabIndex = selectedSubTab.ordinal,
+            edgePadding = 12.dp
+        ) {
             Tab(
                 selected = selectedSubTab == StructureSubTab.SECTIONS,
-                onClick = { selectedSubTab = StructureSubTab.SECTIONS },
+                onClick = { viewModel.setStructureSubTab(StructureSubTab.SECTIONS.ordinal) },
                 text = { Text("节区 (${sections.size})") }
             )
             Tab(
                 selected = selectedSubTab == StructureSubTab.SYMBOLS,
-                onClick = { selectedSubTab = StructureSubTab.SYMBOLS },
+                onClick = { viewModel.setStructureSubTab(StructureSubTab.SYMBOLS.ordinal) },
                 text = { Text("符号 (${symbols.size})") }
             )
             Tab(
                 selected = selectedSubTab == StructureSubTab.DYNAMIC_SYMBOLS,
-                onClick = { selectedSubTab = StructureSubTab.DYNAMIC_SYMBOLS },
+                onClick = { viewModel.setStructureSubTab(StructureSubTab.DYNAMIC_SYMBOLS.ordinal) },
                 text = { Text("动态符号 (${dynamicSymbols.size})") }
             )
             Tab(
                 selected = selectedSubTab == StructureSubTab.FUNCTIONS,
-                onClick = { selectedSubTab = StructureSubTab.FUNCTIONS },
+                onClick = { viewModel.setStructureSubTab(StructureSubTab.FUNCTIONS.ordinal) },
                 text = { Text("函数 (${functions.size})") }
             )
             Tab(
                 selected = selectedSubTab == StructureSubTab.STRINGS,
                 onClick = {
-                    selectedSubTab = StructureSubTab.STRINGS
+                    viewModel.setStructureSubTab(StructureSubTab.STRINGS.ordinal)
                     onStringsTabSelected()
                 },
                 text = { Text("字符串 (${strings.size})") }
             )
         }
 
-        when (selectedSubTab) {
-            StructureSubTab.SECTIONS -> SectionsList(
-                sections, onSectionClick,
-                listState = listStates[StructureSubTab.SECTIONS.ordinal]!!,
-                flashAddress = flashAddress,
-                modifier = Modifier.fillMaxSize()
+        // ===== 搜索框（仅展开时占行，默认完全不显示，不浪费垂直空间） =====
+        AnimatedVisibility(
+            visible = showSearch && isSearchable,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
+            OutlinedTextField(
+                value = currentQuery,
+                onValueChange = { searchQueries[selectedSubTab.ordinal] = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                placeholder = { Text("搜索 ${selectedSubTab.label()}（名称 / 地址 hex）") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (currentQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQueries[selectedSubTab.ordinal] = "" }) {
+                            Icon(Icons.Filled.Close, contentDescription = "清空")
+                        }
+                    } else {
+                        IconButton(onClick = { showSearch = false }) {
+                            Icon(Icons.Filled.Close, contentDescription = "关闭搜索")
+                        }
+                    }
+                },
+                singleLine = true,
+                colors = TextFieldDefaults.colors(
+                    focusedIndicatorColor = MaterialTheme.colorScheme.primary,
+                    unfocusedIndicatorColor = MaterialTheme.colorScheme.outline
+                )
             )
-            StructureSubTab.SYMBOLS -> SymbolsList(
-                symbols, onSymbolClick,
-                listState = listStates[StructureSubTab.SYMBOLS.ordinal]!!,
-                flashAddress = flashAddress,
-                modifier = Modifier.fillMaxSize()
-            )
-            StructureSubTab.DYNAMIC_SYMBOLS -> SymbolsList(
-                dynamicSymbols, onSymbolClick,
-                listState = listStates[StructureSubTab.DYNAMIC_SYMBOLS.ordinal]!!,
-                flashAddress = flashAddress,
-                modifier = Modifier.fillMaxSize()
-            )
-            StructureSubTab.FUNCTIONS -> FunctionsList(
-                functions, onFunctionClick,
-                listState = listStates[StructureSubTab.FUNCTIONS.ordinal]!!,
-                flashAddress = flashAddress,
-                modifier = Modifier.fillMaxSize()
-            )
-            StructureSubTab.STRINGS -> StringsList(
-                strings,
-                listState = listStates[StructureSubTab.STRINGS.ordinal]!!,
-                modifier = Modifier.fillMaxSize()
-            )
+        }
+
+        // ===== 列表内容 + 悬浮搜索按钮（FAB 叠在列表右下角） =====
+
+        // 4 个过滤结果用 remember(key) + derivedStateOf：
+        // - remember(key = 源List + currentQuery)：任一 key 变化时重跑 init block 重捕获闭包，
+        //   修复「搜索词改不了」和「字符串首次加载为空」两条回归 bug。
+        // - derivedStateOf：pulseAlpha 每帧变化时 keys 不变 → 缓存命中，不重算 2w 条过滤，性能优化保留。
+        val filteredSymbols by remember(symbols, currentQuery) {
+            derivedStateOf { filterSymbols(symbols, currentQuery) }
+        }
+        val filteredDynamicSymbols by remember(dynamicSymbols, currentQuery) {
+            derivedStateOf { filterSymbols(dynamicSymbols, currentQuery) }
+        }
+        val filteredFunctions by remember(functions, currentQuery) {
+            derivedStateOf { filterFunctions(functions, currentQuery) }
+        }
+        val filteredStrings by remember(strings, currentQuery) {
+            derivedStateOf { filterStrings(strings, currentQuery) }
+        }
+
+        Box(modifier = Modifier.fillMaxSize()) {
+            when (selectedSubTab) {
+                StructureSubTab.SECTIONS -> SectionsList(
+                    sections, onSectionClick,
+                    listState = listStates[StructureSubTab.SECTIONS.ordinal]!!,
+                    // 直接传 flashAddress，不再每帧切 null；ListItem 内部 item.addr == flashAddress 自己比较，
+                    // 保证 flashAddress 参数稳定，LazyColumn 不会因为入参每帧变而重算所有可见行。
+                    flashAddress = flashAddress,
+                    flashAlpha = pulseAlpha.value,
+                    modifier = Modifier.fillMaxSize()
+                )
+                StructureSubTab.SYMBOLS -> SymbolsList(
+                    filteredSymbols, onSymbolClick,
+                    listState = listStates[StructureSubTab.SYMBOLS.ordinal]!!,
+                    flashAddress = flashAddress,
+                    flashAlpha = pulseAlpha.value,
+                    isFiltered = currentQuery.isNotBlank(),
+                    modifier = Modifier.fillMaxSize()
+                )
+                StructureSubTab.DYNAMIC_SYMBOLS -> SymbolsList(
+                    filteredDynamicSymbols, onSymbolClick,
+                    listState = listStates[StructureSubTab.DYNAMIC_SYMBOLS.ordinal]!!,
+                    flashAddress = flashAddress,
+                    flashAlpha = pulseAlpha.value,
+                    isFiltered = currentQuery.isNotBlank(),
+                    modifier = Modifier.fillMaxSize()
+                )
+                StructureSubTab.FUNCTIONS -> FunctionsList(
+                    filteredFunctions, onFunctionClick,
+                    listState = listStates[StructureSubTab.FUNCTIONS.ordinal]!!,
+                    flashAddress = flashAddress,
+                    flashAlpha = pulseAlpha.value,
+                    isFiltered = currentQuery.isNotBlank(),
+                    modifier = Modifier.fillMaxSize()
+                )
+                StructureSubTab.STRINGS -> StringsList(
+                    filteredStrings,
+                    listState = listStates[StructureSubTab.STRINGS.ordinal]!!,
+                    isFiltered = currentQuery.isNotBlank(),
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+
+            // 悬浮搜索按钮：仅可搜索Tab + 搜索框收起时显示，展开时由搜索框自带关闭按钮替代
+            if (isSearchable && !showSearch) {
+                androidx.compose.material3.SmallFloatingActionButton(
+                    onClick = { showSearch = true },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp),
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Filled.Search, contentDescription = "搜索")
+                        // 有过滤词时叠加一个小红点提示
+                        if (currentQuery.isNotBlank()) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(top = 2.dp)
+                                    .background(MaterialTheme.colorScheme.error, RoundedCornerShape(50))
+                                    .size(6.dp)
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
+// ==================================================================
+// 搜索过滤：名称 / demangled / 地址 hex 模糊匹配（大小写不敏感）
+// ==================================================================
+
+private fun filterSymbols(list: List<SymbolInfo>, query: String): List<SymbolInfo> {
+    if (query.isBlank()) return list
+    val lower = query.lowercase()
+    return list.filter {
+        it.name.contains(query, true) ||
+            (it.demangledName?.contains(query, true) == true) ||
+            it.address.toString(16).lowercase().contains(lower)
+    }
+}
+
+private fun filterFunctions(list: List<FunctionInfo>, query: String): List<FunctionInfo> {
+    if (query.isBlank()) return list
+    val lower = query.lowercase()
+    return list.filter {
+        it.name.contains(query, true) ||
+            it.signature.contains(query, true) ||
+            it.vaddr.toString(16).lowercase().contains(lower)
+    }
+}
+
+private fun filterStrings(list: List<StringInfo>, query: String): List<StringInfo> {
+    if (query.isBlank()) return list
+    val lower = query.lowercase()
+    return list.filter {
+        it.string.contains(query, true) ||
+            it.address.toString(16).lowercase().contains(lower) ||
+            it.section.contains(query, true)
+    }
+}
+
+/** 子Tab 显示标签（用于搜索框 placeholder）。 */
+private fun StructureSubTab.label(): String = when (this) {
+    StructureSubTab.SECTIONS -> "节区"
+    StructureSubTab.SYMBOLS -> "符号"
+    StructureSubTab.DYNAMIC_SYMBOLS -> "动态符号"
+    StructureSubTab.FUNCTIONS -> "函数"
+    StructureSubTab.STRINGS -> "字符串"
+}
+
 private enum class StructureSubTab { SECTIONS, SYMBOLS, DYNAMIC_SYMBOLS, FUNCTIONS, STRINGS }
 
-/**
- * 闪烁背景色动画：如果 isFlash=true 则用醒目的橙黄色容器色，否则透明。
- * 在 ViewModel 里定时切换 flashAddress（存在→null→存在...） → 驱动这里自动变色。
- */
-@Composable
-private fun flashRowBackgroundColor(isFlash: Boolean): State<Color> {
-    val target: Color = if (isFlash) {
-        // 橙黄高亮光 + 55% 透明度（在行背景上叠一层闪烁）
-        Color(0xFFFFA726).copy(alpha = 0.55f)
-    } else {
-        Color.Transparent
-    }
-    return animateColorAsState(
-        targetValue = target,
-        animationSpec = tween(durationMillis = 120)
-    )
-}
+/** 呼吸脉冲颜色：红色 0xFFD32F2F × alpha（0=透明，1=85%不透明）。 */
+private const val FLASH_RED = 0xFFD32F2F
+
+/** 计算闪烁背景色：alpha 越大越红，0f 时透明。 */
+private fun flashColor(alpha: Float): Color =
+    if (alpha <= 0f) Color.Transparent
+    else Color(FLASH_RED).copy(alpha = (alpha * 0.85f).coerceIn(0f, 1f))
+
+/** 计算呼吸 scale：alpha 0→1 时 scale 1.0→1.02，模拟轻微放大。 */
+private fun flashScale(alpha: Float): Float =
+    1f + alpha * 0.02f
 
 // ==================================================================
 // 节区列表
@@ -230,6 +403,7 @@ private fun SectionsList(
     onSectionClick: (SectionInfo) -> Unit,
     listState: LazyListState,
     flashAddress: Long?,
+    flashAlpha: Float = 0f,
     modifier: Modifier = Modifier
 ) {
     if (sections.isEmpty()) {
@@ -250,25 +424,34 @@ private fun SectionsList(
     ) {
         items(items = sections, key = { it.name }) { section ->
             val isFlash = flashAddress != null && section.address == flashAddress
-            val flashBg by flashRowBackgroundColor(isFlash)
-            Box(Modifier.background(flashBg)) {
-                SectionCard(section = section, onClick = { onSectionClick(section) })
-            }
+            val a = if (isFlash) flashAlpha else 0f
+            SectionCard(
+                section = section,
+                onClick = { onSectionClick(section) },
+                flashBg = flashColor(a),
+                flashScale = flashScale(a)
+            )
         }
     }
 }
 
 @Composable
-private fun SectionCard(section: SectionInfo, onClick: () -> Unit) {
+private fun SectionCard(
+    section: SectionInfo,
+    onClick: () -> Unit,
+    flashBg: Color = Color.Transparent,
+    flashScale: Float = 1f
+) {
     var expanded by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer { scaleX = flashScale; scaleY = flashScale }
             .clickable { expanded = !expanded },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.background(flashBg).padding(12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -425,12 +608,14 @@ private fun SymbolsList(
     onSymbolClick: (SymbolInfo) -> Unit,
     listState: LazyListState,
     flashAddress: Long?,
+    flashAlpha: Float = 0f,
+    isFiltered: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     if (symbols.isEmpty()) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
             Text(
-                text = "暂无符号数据",
+                text = if (isFiltered) "无匹配结果" else "暂无符号数据",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -448,10 +633,11 @@ private fun SymbolsList(
             key = { "${it.name}_${it.address}" }
         ) { symbol ->
             val isFlash = flashAddress != null && symbol.address == flashAddress
-            val flashBg by flashRowBackgroundColor(isFlash)
+            val a = if (isFlash) flashAlpha else 0f
             SymbolRow(
                 symbol = symbol,
-                flashBg = flashBg,
+                flashBg = flashColor(a),
+                flashScale = flashScale(a),
                 onClick = { onSymbolClick(symbol) }
             )
         }
@@ -462,14 +648,16 @@ private fun SymbolsList(
 private fun SymbolRow(
     symbol: SymbolInfo,
     flashBg: Color = Color.Transparent,
+    flashScale: Float = 1f,
     onClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer { scaleX = flashScale; scaleY = flashScale }
             .clickable { onClick() }
-            .background(flashBg)
             .background(MaterialTheme.colorScheme.surface)
+            .background(flashBg)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -533,12 +721,14 @@ private fun FunctionsList(
     onFunctionClick: (FunctionInfo) -> Unit,
     listState: LazyListState,
     flashAddress: Long?,
+    flashAlpha: Float = 0f,
+    isFiltered: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     if (functions.isEmpty()) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
             Text(
-                text = "暂无函数数据（需 Rizin 引擎 + aaa 分析）",
+                text = if (isFiltered) "无匹配结果" else "暂无函数数据（需 Rizin 引擎 + aaa 分析）",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -556,10 +746,11 @@ private fun FunctionsList(
             key = { "${it.name}_${it.vaddr}" }
         ) { func ->
             val isFlash = flashAddress != null && func.vaddr == flashAddress
-            val flashBg by flashRowBackgroundColor(isFlash)
+            val a = if (isFlash) flashAlpha else 0f
             FunctionRow(
                 func = func,
-                flashBg = flashBg,
+                flashBg = flashColor(a),
+                flashScale = flashScale(a),
                 onClick = { onFunctionClick(func) }
             )
         }
@@ -570,14 +761,16 @@ private fun FunctionsList(
 private fun FunctionRow(
     func: FunctionInfo,
     flashBg: Color = Color.Transparent,
+    flashScale: Float = 1f,
     onClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer { scaleX = flashScale; scaleY = flashScale }
             .clickable { onClick() }
-            .background(flashBg)
             .background(MaterialTheme.colorScheme.surface)
+            .background(flashBg)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -635,12 +828,13 @@ private fun FunctionRow(
 private fun StringsList(
     strings: List<StringInfo>,
     listState: LazyListState,
+    isFiltered: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     if (strings.isEmpty()) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
             Text(
-                text = "点击此 Tab 自动扫描字符串…",
+                text = if (isFiltered) "无匹配结果" else "点击此 Tab 自动扫描字符串…",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

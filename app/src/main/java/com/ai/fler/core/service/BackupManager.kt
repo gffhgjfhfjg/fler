@@ -146,6 +146,16 @@ class BackupManager @Inject constructor(
     fun getPatchRecords(): List<PatchRecord> = currentStack().toList()
 
     /**
+     * 清空内存中所有文件的撤销栈（用户「清理项目缓存」后调用）。
+     * 保留 currentFilePath，让后续写入操作仍能自动重建持久化目录。
+     */
+    fun clearAllInMemory() {
+        fileStacks.clear()
+        fileSeqs.clear()
+        fileBackupCreated.clear()
+    }
+
+    /**
      * 计算 CRC32 校验值。
      */
     fun computeCRC32(data: ByteArray): Long {

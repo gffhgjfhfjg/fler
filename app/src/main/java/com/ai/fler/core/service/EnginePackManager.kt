@@ -2,6 +2,8 @@ package com.ai.fler.core.service
 
 import android.content.Context
 import android.util.Log
+import com.ai.fler.core.analysis.AnalysisSession
+import com.ai.fler.core.analysis.SoEditorCache
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -38,6 +40,9 @@ class EnginePackManager @Inject constructor(
     private val extractor: EngineExtractor,
     private val engineLoader: EngineLoader,
     private val sourceConfig: EngineSourceConfig,
+    private val analysisSession: AnalysisSession,
+    private val soEditorCache: SoEditorCache,
+    private val backupManager: BackupManager,
 ) {
     private val engineDir: File by lazy { File(context.filesDir, "engines") }
 
@@ -334,6 +339,60 @@ class EnginePackManager @Inject constructor(
     suspend fun clearEngines() = withContext(Dispatchers.IO) {
         engineDir.deleteRecursively()
         notifyVersionsChanged()
+    }
+
+    /**
+     * 清理项目缓存（磁盘 + 内存态），返回释放字节数。
+     *
+     * 磁盘范围（不包含引擎引擎文件、不包含 Room DB）：
+     *  - cacheDir/：apk_import_* / so_import_* / extracted_* / analysis_*.db{,-wal,-shm}
+     *                patches / blutter_tmp / fler-engines.7z
+     *  - filesDir/：undo / mcp_patches
+     *
+     * 内存范围：
+     *  - SoEditorCache（sections/symbols/functions/Dart 标签/Rizin 注入标记）
+     *  - AnalysisSession（所有 RzCore open handle，pathToHandle/sessions 清空）
+     *  - BackupManager（撤销栈内存态、backupCreated 标记）
+     */
+    suspend fun cleanProjectCaches(): Long = withContext(Dispatchers.IO) {
+        var freed = 0L
+
+        // ---------- 1. cacheDir：原有 8 类 + address_mappings 兜底 ----------
+        val cache = context.cacheDir
+        cache.listFiles()?.forEach { f ->
+            val name = f.name
+            val isAnalysisDb = f.isFile && name.startsWith("analysis_") &&
+                (name.endsWith(".db") || name.endsWith("-wal") || name.endsWith("-shm"))
+            val shouldDelete = name.startsWith("apk_import_") ||
+                name.startsWith("so_import_") ||
+                name.startsWith("extracted_") ||
+                name == "patches" ||
+                name == "blutter_tmp" ||
+                name == "fler-engines.7z" ||
+                name == "address_mappings" ||
+                isAnalysisDb
+            if (shouldDelete) {
+                freed += f.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                f.deleteRecursively()
+            }
+        }
+
+        // ---------- 2. filesDir：undo（BackupManager）/ mcp_patches（McpPatchService） ----------
+        val files = context.filesDir
+        files.listFiles()?.forEach { f ->
+            val name = f.name
+            if (name == "undo" || name == "mcp_patches") {
+                freed += f.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                f.deleteRecursively()
+            }
+        }
+
+        // ---------- 3. 内存层：清空 @Singleton 态 ----------
+        soEditorCache.clearAll()
+        analysisSession.closeAll()
+        backupManager.clearAllInMemory()
+
+        freed
     }
 
     /**

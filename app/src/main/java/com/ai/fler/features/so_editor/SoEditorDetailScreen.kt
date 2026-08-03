@@ -1,17 +1,29 @@
 package com.ai.fler.features.so_editor
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import com.ai.fler.ui.animation.AnimDuration
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -113,6 +125,15 @@ fun SoEditorDetailScreen(
         viewModel.loadHexData(target, hexSize)
     }
 
+    // 拦截系统返回键：非结构 Tab → 先回结构 Tab，在结构 Tab 再返回
+    BackHandler {
+        if (currentTab == EditorTab.STRUCTURE) {
+            onBack()
+        } else {
+            viewModel.setTab(EditorTab.STRUCTURE)
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -167,7 +188,7 @@ fun SoEditorDetailScreen(
                         enabled = uiState.isFileOpen
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Undo,
+                            imageVector = Icons.AutoMirrored.Filled.Undo,
                             contentDescription = "撤销"
                         )
                     }
@@ -238,82 +259,156 @@ fun SoEditorDetailScreen(
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                if (uiState.errorMessage != null) {
-                    Text(
-                        text = "打开失败: ${uiState.errorMessage}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier
-                            .align(Alignment.CenterHorizontally)
-                            .padding(16.dp),
+            when {
+                // ① 文件未打开 + 加载中
+                uiState.isLoading && !uiState.isFileOpen -> {
+                    LoadingContent(modifier = Modifier.align(Alignment.Center))
+                }
+                // ② 错误
+                uiState.errorMessage != null -> {
+                    ErrorContent(
+                        message = uiState.errorMessage!!,
+                        modifier = Modifier.align(Alignment.Center)
                     )
                 }
-
-                TabRow(
-                    selectedTabIndex = currentTab.ordinal,
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                ) {
-                    Tab(
-                        selected = currentTab == EditorTab.STRUCTURE,
-                        onClick = { viewModel.setTab(EditorTab.STRUCTURE) },
-                        text = { Text("结构") },
-                    )
-                    Tab(
-                        selected = currentTab == EditorTab.HEX,
-                        onClick = { viewModel.setTab(EditorTab.HEX) },
-                        text = { Text("Hex") },
-                    )
-                    Tab(
-                        selected = currentTab == EditorTab.DISASSEMBLY,
-                        onClick = { viewModel.setTab(EditorTab.DISASSEMBLY) },
-                        text = { Text("汇编") },
-                    )
+                // ③ 正在分析交叉引用（本计划核心修复点）
+                uiState.isAnalyzing -> {
+                    AnalyzingContent(modifier = Modifier.align(Alignment.Center))
                 }
+                // ④ 正常状态：渲染原有 Tab 内容
+                else -> {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        TabRow(
+                            selectedTabIndex = currentTab.ordinal,
+                            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        ) {
+                            Tab(
+                                selected = currentTab == EditorTab.STRUCTURE,
+                                onClick = { viewModel.setTab(EditorTab.STRUCTURE) },
+                                text = { Text("结构") },
+                            )
+                            Tab(
+                                selected = currentTab == EditorTab.HEX,
+                                onClick = { viewModel.setTab(EditorTab.HEX) },
+                                text = { Text("Hex") },
+                            )
+                            Tab(
+                                selected = currentTab == EditorTab.DISASSEMBLY,
+                                onClick = { viewModel.setTab(EditorTab.DISASSEMBLY) },
+                                text = { Text("汇编") },
+                            )
+                        }
 
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxSize(),
-                ) {
-                    when (currentTab) {
-                        EditorTab.STRUCTURE -> StructureTab(
-                            sections = uiState.sections,
-                            symbols = uiState.symbols,
-                            dynamicSymbols = uiState.dynamicSymbols,
-                            functions = uiState.functions,
-                            strings = uiState.strings,
-                            onSectionClick = { section ->
-                                viewModel.setSelectedOffset(section.offset)
-                                viewModel.setTab(EditorTab.HEX)
-                                viewModel.loadHexData(section.offset)
+                        // Tab 内容：从汇编切回结构 Tab 时用快 fade(200ms)，其他方向保持滑入转场
+                        AnimatedContent(
+                            targetState = currentTab,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxSize(),
+                            transitionSpec = {
+                                if (targetState == EditorTab.STRUCTURE) {
+                                    fadeIn(tween(AnimDuration.fast)) togetherWith fadeOut(tween(AnimDuration.fast))
+                                } else {
+                                    (fadeIn() + slideInVertically(initialOffsetY = { it / 4 })) togetherWith
+                                        (fadeOut() + slideOutVertically(targetOffsetY = { -it / 4 }))
+                                }
                             },
-                            onSymbolClick = { symbol ->
-                                viewModel.setStructureFlashAddress(symbol.address)
-                                viewModel.setSelectedOffset(symbol.address)
-                                viewModel.setTab(EditorTab.DISASSEMBLY)
-                                viewModel.loadDisassembly(symbol.address)
-                            },
-                            onFunctionClick = { func ->
-                                viewModel.setStructureFlashAddress(func.vaddr)
-                                viewModel.setSelectedOffset(func.vaddr)
-                                viewModel.setTab(EditorTab.DISASSEMBLY)
-                                viewModel.loadDisassembly(func.vaddr)
-                            },
-                            onStringsTabSelected = { viewModel.loadStrings() },
-                            viewModel = viewModel
-                        )
-                        EditorTab.HEX -> HexEditorTab(viewModel = viewModel)
-                        EditorTab.DISASSEMBLY -> DisassemblyTab(
-                            viewModel = viewModel,
-                            isMethodMode = isMethodMode,
-                            onInstructionClick = { address ->
-                                viewModel.setSelectedOffset(address)
-                            },
-                        )
+                            label = "tabContent"
+                        ) { tab ->
+                            when (tab) {
+                                EditorTab.STRUCTURE -> StructureTab(
+                                    sections = uiState.sections,
+                                    symbols = uiState.symbols,
+                                    dynamicSymbols = uiState.dynamicSymbols,
+                                    functions = uiState.functions,
+                                    strings = uiState.strings,
+                                    onSectionClick = { section ->
+                                        viewModel.setSelectedOffset(section.address)
+                                        viewModel.setStructureFlashAddress(section.address)
+                                        viewModel.setTab(EditorTab.DISASSEMBLY)
+                                        viewModel.loadDisassembly(section.address, highlightAfterLoad = section.address)
+                                    },
+                                    onSymbolClick = { symbol ->
+                                        viewModel.setStructureFlashAddress(symbol.address)
+                                        viewModel.setSelectedOffset(symbol.address)
+                                        viewModel.setTab(EditorTab.DISASSEMBLY)
+                                        viewModel.loadDisassembly(symbol.address, highlightAfterLoad = symbol.address)
+                                    },
+                                    onFunctionClick = { func ->
+                                        viewModel.setStructureFlashAddress(func.vaddr)
+                                        viewModel.setSelectedOffset(func.vaddr)
+                                        viewModel.setTab(EditorTab.DISASSEMBLY)
+                                        viewModel.loadDisassembly(func.vaddr, highlightAfterLoad = func.vaddr)
+                                    },
+                                    onStringsTabSelected = { viewModel.loadStrings() },
+                                    viewModel = viewModel
+                                )
+                                EditorTab.HEX -> HexEditorTab(viewModel = viewModel)
+                                EditorTab.DISASSEMBLY -> DisassemblyTab(
+                                    viewModel = viewModel,
+                                    isMethodMode = isMethodMode,
+                                    onInstructionClick = { address ->
+                                        viewModel.setSelectedOffset(address)
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun LoadingContent(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        CircularProgressIndicator()
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = "加载中...",
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
+@Composable
+private fun AnalyzingContent(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        CircularProgressIndicator()
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = "正在分析交叉引用...",
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
+@Composable
+private fun ErrorContent(
+    message: String,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "加载失败",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.error
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }

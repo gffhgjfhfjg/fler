@@ -56,6 +56,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -73,6 +74,10 @@ import com.ai.fler.feature.project.AnalysisProgress
 import com.ai.fler.feature.project.AnalysisStage
 import com.ai.fler.feature.project.ProjectListState
 import com.ai.fler.feature.project.ProjectViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -224,7 +229,8 @@ private fun ProjectList(
                 project = project,
                 onClick = { onProjectClick(project.id) },
                 onDelete = { onDeleteClick(project) },
-                onAnalyze = { onAnalyzeClick(project) }
+                onAnalyze = { onAnalyzeClick(project) },
+                modifier = Modifier.animateItem()
             )
         }
     }
@@ -237,13 +243,14 @@ private fun ProjectCard(
     project: Project,
     onClick: () -> Unit,
     onDelete: () -> Unit,
-    onAnalyze: () -> Unit
+    onAnalyze: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
     Card(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         )
@@ -278,6 +285,22 @@ private fun ProjectCard(
                         text = project.name,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    // 辅助信息行：APK 文件名 | 包名 v版本
+                    val apkName = File(project.apkPath).name
+                    val infoParts = mutableListOf(apkName)
+                    if (!project.packageName.isNullOrBlank()) {
+                        infoParts.add(project.packageName)
+                    }
+                    if (!project.apkVersion.isNullOrBlank()) {
+                        infoParts.add("v${project.apkVersion}")
+                    }
+                    Text(
+                        text = infoParts.joinToString(" | "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -469,28 +492,45 @@ private fun NewProjectDialog(
 ) {
     var name by remember { mutableStateOf("") }
     var apkPath by remember { mutableStateOf("") }
-    var showFilePicker by remember { mutableStateOf(false) }
+    var isCopying by remember { mutableStateOf(false) }
+    var copyError by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    // 文件选择器
+    // 文件选择器（回调立即返回，复制动作放入协程，避免主线程 Binder+磁盘 I/O 阻塞）
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        uri?.let {
-            // 将 content:// URI 复制到 app 私有目录，确保后续能用文件路径访问
-            // （GetContent 返回的是临时权限 URI，进程重启后失效，也不能直接当 File 路径）
-            val localFile = copyUriToLocalCache(context, it, getFileNameFromUri(context, it))
-            val path = localFile?.absolutePath ?: it.toString()
-            apkPath = path
-            // 如果名称为空，使用文件名作为项目名
+        uri?.let { u ->
+            // 先在主线程轻量读取显示名 / 计算项目名（纯内存 Cursor query，不涉及 openFileDescriptor）
+            val displayName = getFileNameFromUri(context, u)
             if (name.isBlank()) {
-                name = localFile?.name ?: getFileNameFromUri(context, it)
+                val baseName = displayName.removeSuffix(".apk")
+                val ts = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
+                name = "${baseName}_$ts"
+            }
+            // 放入协程 + Dispatchers.IO 执行复制（主线程立即释放，进入 isCopying loading 态）
+            isCopying = true
+            copyError = null
+            scope.launch(Dispatchers.IO) {
+                val local = copyUriToLocalCache(context, u, displayName)
+                // 写回 UI State 必须切 Main（此处 withContext(Main) 可选；MutableStateFlow/MutableState 默认主线程安全，
+                // 但 Compose 可变状态最好在主线程写，避免 snapshot 系统并发写入冲突）
+                withContext(Dispatchers.Main) {
+                    if (local != null) {
+                        apkPath = local.absolutePath
+                    } else {
+                        copyError = "文件复制失败，请重试或手动输入路径"
+                        apkPath = u.toString() // 至少保留原始 URI 作为输入框提示
+                    }
+                    isCopying = false
+                }
             }
         }
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isCopying) onDismiss() },
         title = { Text("新建项目") },
         text = {
             Column {
@@ -499,16 +539,25 @@ private fun NewProjectDialog(
                     onValueChange = { name = it },
                     label = { Text("项目名称") },
                     singleLine = true,
+                    enabled = !isCopying,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // APK 选择区域
+                // APK 选择区域（正在复制时禁用点击 + 显示 spinner + 文案）
                 Card(
-                    onClick = { showFilePicker = true; filePickerLauncher.launch("application/vnd.android.package-archive") },
+                    onClick = {
+                        if (!isCopying) {
+                            filePickerLauncher.launch("application/vnd.android.package-archive")
+                        }
+                    },
+                    enabled = !isCopying,
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        containerColor = if (isCopying)
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        else
+                            MaterialTheme.colorScheme.surfaceVariant
                     )
                 ) {
                     Row(
@@ -517,40 +566,64 @@ private fun NewProjectDialog(
                             .padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Person,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        if (isCopying) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (apkPath.isBlank()) "选择 APK 文件" else getFileNameFromPath(apkPath),
+                                text = when {
+                                    isCopying -> "正在复制 APK 到本地缓存..."
+                                    apkPath.isBlank() -> "选择 APK 文件"
+                                    else -> getFileNameFromPath(apkPath)
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = if (apkPath.isBlank()) {
-                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
+                                color = when {
+                                    isCopying -> MaterialTheme.colorScheme.primary
+                                    apkPath.isBlank() -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    else -> MaterialTheme.colorScheme.onSurface
                                 }
                             )
-                            if (apkPath.isNotBlank()) {
+                            if (apkPath.isNotBlank() && !isCopying) {
                                 Text(
                                     text = apkPath,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
                     }
                 }
 
+                // 复制失败提示
+                if (copyError != null && !isCopying) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = copyError!!,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+
                 // 备选：直接输入路径
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
                     value = apkPath,
-                    onValueChange = { apkPath = it },
+                    onValueChange = { apkPath = it; copyError = null },
                     label = { Text("或直接输入 APK 路径") },
                     singleLine = true,
+                    enabled = !isCopying,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -562,14 +635,17 @@ private fun NewProjectDialog(
                         onCreate(name, apkPath)
                     }
                 },
-                enabled = name.isNotBlank() && apkPath.isNotBlank()
+                enabled = !isCopying && name.isNotBlank() && apkPath.isNotBlank()
             ) {
-                Text("创建")
+                Text(if (isCopying) "复制中…" else "创建")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消")
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isCopying
+            ) {
+                Text(if (isCopying) "复制中…" else "取消")
             }
         }
     )
@@ -617,7 +693,14 @@ private fun formatDate(timestamp: Long): String {
 }
 
 private fun getFileNameFromUri(context: android.content.Context, uri: Uri): String {
-    val cursor = context.contentResolver.query(uri, null, null, null, null)
+    // 只查 DISPLAY_NAME 一列（避免全列 projection 触发跨进程读取所有字段）
+    val cursor = try {
+        context.contentResolver.query(
+            uri,
+            arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+            null, null, null
+        )
+    } catch (_: Throwable) { null }
     cursor?.use {
         if (it.moveToFirst()) {
             val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
@@ -641,45 +724,68 @@ private fun getFileNameFromPath(path: String): String {
  * - ZipFile / File 需要真实文件路径，无法直接读取 content://
  * - 复制到本地文件后 Project.apkPath 存真实绝对路径，后续流程全链路都能用
  *
+ * **注意**：本函数是 suspend 函数，必须在 Dispatchers.IO 上下文中调用，避免阻塞主线程触发 MIUI APP_SCOUT_WARNING。
+ *
  * @return 本地文件（成功）或 null（失败）
  */
-private fun copyUriToLocalCache(
+private suspend fun copyUriToLocalCache(
     context: android.content.Context,
     uri: Uri,
     displayName: String
-): java.io.File? {
-    return try {
+): java.io.File? = withContext(Dispatchers.IO) {
+    return@withContext try {
         // 去重：cacheDir 下用 URI hash + 显示名，避免多次复制同一个 APK
         val safeName = displayName.replace('/', '_').takeIf { it.isNotBlank() } ?: "unknown.apk"
         val hashId = uri.toString().hashCode().toUInt().toString(16)
         val outFile = java.io.File(context.cacheDir, "apk_import_${hashId}_${safeName}")
 
         // 若已存在且大小相同，跳过复制（导入过同一个 APK）
-        val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-        pfd?.use {
-            val statSize = it.statSize
-            if (outFile.exists() && outFile.length() == statSize) {
-                android.util.Log.i("ProjectScreen", "APK 已存在本地，跳过复制: ${outFile.name} (${statSize} bytes)")
-                return outFile
+        // 用 ContentResolver.query + OpenableColumns.SIZE 读大小，避免 openFileDescriptor(ParcelFileDescriptor)
+        // 触发一次跨进程 Binder openTypedAssetFile（MIUI 云盘/远程文档环境下耗时可达 2-3s，引发 APP_SCOUT_WARNING）
+        val remoteSize = querySizeOrNull(context, uri)
+        if (remoteSize != null) {
+            if (outFile.exists() && outFile.length() == remoteSize) {
+                android.util.Log.i("ProjectScreen", "APK 已存在本地，跳过复制: ${outFile.name} (${remoteSize} bytes)")
+                return@withContext outFile
             }
         }
 
+        var total = 0L
         context.contentResolver.openInputStream(uri)?.use { input ->
             java.io.FileOutputStream(outFile).use { output ->
-                val buffer = ByteArray(64 * 1024)
-                var total = 0L
+                val buffer = ByteArray(128 * 1024)
                 while (true) {
                     val read = input.read(buffer)
                     if (read <= 0) break
                     output.write(buffer, 0, read)
                     total += read
                 }
-                android.util.Log.i("ProjectScreen", "APK 复制完成: ${outFile.absolutePath} (${total} bytes)")
             }
         }
+        android.util.Log.i("ProjectScreen", "APK 复制完成: ${outFile.absolutePath} (${total} bytes)")
         outFile.takeIf { it.exists() && it.length() > 0 }
     } catch (e: Exception) {
         android.util.Log.e("ProjectScreen", "复制 APK 到本地失败: ${e.message}", e)
         null
+    }
+}
+
+/**
+ * 用 ContentResolver.query(OpenableColumns.SIZE) 轻量读取 URI 对应文件大小，
+ * 避免 openFileDescriptor 走 Binder openTypedAssetFile 在云盘/SD 卡上的 2-3s 阻塞。
+ */
+private fun querySizeOrNull(context: android.content.Context, uri: Uri): Long? {
+    val cursor = try {
+        context.contentResolver.query(
+            uri,
+            arrayOf(android.provider.OpenableColumns.SIZE),
+            null, null, null
+        )
+    } catch (_: Throwable) { return null }
+    return cursor?.use {
+        if (it.moveToFirst()) {
+            val idx = it.getColumnIndex(android.provider.OpenableColumns.SIZE)
+            if (idx >= 0 && !it.isNull(idx)) it.getLong(idx) else null
+        } else null
     }
 }

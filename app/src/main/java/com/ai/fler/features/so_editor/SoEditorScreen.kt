@@ -3,11 +3,19 @@ package com.ai.fler.features.so_editor
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import com.ai.fler.ui.animation.AnimDuration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,8 +37,7 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -91,19 +98,25 @@ fun SoEditorScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    var isCopying by remember { mutableStateOf(false) }
 
     // SAF 文件选择器：选择任意文件（.so 文件通常 MIME 为 application/octet-stream）
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        uri?.let {
-            scope.launch {
-                val localFile = copyUriToLocalCache(context, it)
-                if (localFile == null) {
-                    snackbarHostState.showSnackbar("文件读取失败")
-                    return@launch
+        uri?.let { u ->
+            // 复制放到 Dispatchers.IO，避免主线程 Binder/磁盘阻塞（MIUI APP_SCOUT_WARNING）
+            isCopying = true
+            scope.launch(Dispatchers.IO) {
+                val localFile = copyUriToLocalCache(context, u)
+                withContext(Dispatchers.Main) {
+                    isCopying = false
+                    if (localFile == null) {
+                        snackbarHostState.showSnackbar("文件读取失败")
+                        return@withContext
+                    }
+                    viewModel.openFile(localFile.absolutePath)
                 }
-                viewModel.openFile(localFile.absolutePath)
             }
         }
     }
@@ -139,14 +152,32 @@ fun SoEditorScreen(
         }
     }
 
+    // 拦截系统返回键：已打开文件时，非结构 Tab → 先回结构 Tab，结构 Tab 关闭文件
+    BackHandler(enabled = uiState.isFileOpen) {
+        if (currentTab == EditorTab.STRUCTURE) {
+            viewModel.closeFile()
+        } else {
+            viewModel.setTab(EditorTab.STRUCTURE)
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = uiState.fileName.ifBlank { "SO 编辑器" },
-                        style = MaterialTheme.typography.titleMedium
-                    )
+                    Column {
+                        Text(
+                            text = uiState.fileName.ifBlank { "SO 编辑器" },
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        if (uiState.isFileOpen) {
+                            Text(
+                                text = formatFileSize(uiState.fileSize),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     // 打开文件后显示返回按钮：
@@ -168,14 +199,23 @@ fun SoEditorScreen(
                     }
                 },
                 actions = {
-                    // 打开文件按钮（始终可见，支持随时切换文件）
+                    // 打开文件按钮（始终可见，支持随时切换文件；复制中禁用避免叠加触发
                     IconButton(
-                        onClick = { filePickerLauncher.launch("application/octet-stream") }
+                        onClick = { filePickerLauncher.launch("application/octet-stream") },
+                        enabled = !isCopying
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.FileOpen,
-                            contentDescription = "打开 SO 文件"
-                        )
+                        if (isCopying) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(22.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.FileOpen,
+                                contentDescription = "打开 SO 文件"
+                            )
+                        }
                     }
 
                     // 撤销按钮
@@ -193,7 +233,7 @@ fun SoEditorScreen(
                         enabled = uiState.isFileOpen
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Undo,
+                            imageVector = Icons.AutoMirrored.Filled.Undo,
                             contentDescription = "撤销"
                         )
                     }
@@ -278,7 +318,7 @@ fun SoEditorScreen(
                     )
                 }
 
-                !uiState.isFileOpen -> {
+                !uiState.isFileOpen && !isCopying -> {
                     val recentFiles by viewModel.recentFiles.collectAsStateWithLifecycle()
                     NoFileContent(
                         onPickFile = { filePickerLauncher.launch("application/octet-stream") },
@@ -289,6 +329,14 @@ fun SoEditorScreen(
                         onRemoveRecent = { path -> viewModel.removeRecent(path) },
                         modifier = Modifier.align(Alignment.Center)
                     )
+                }
+
+                isCopying -> {
+                    CopyingContent(modifier = Modifier.align(Alignment.Center))
+                }
+
+                uiState.isAnalyzing -> {
+                    AnalyzingContent(modifier = Modifier.align(Alignment.Center))
                 }
 
                 else -> {
@@ -312,54 +360,57 @@ private fun SoEditorContent(
     viewModel: SoEditorViewModel,
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
-        // 文件信息条（紧凑）
-        FileInfoBar(
-            fileName = uiState.fileName,
-            fileSize = uiState.fileSize,
-            sectionCount = uiState.sections.size,
-            symbolCount = uiState.symbols.size + uiState.dynamicSymbols.size
-        )
+        if (uiState.errorMessage != null) {
+            Text(
+                text = "打开失败: ${uiState.errorMessage}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(16.dp),
+            )
+        }
 
-        // Tab 切换
-        TabRow(selectedTabIndex = currentTab.ordinal) {
+        TabRow(
+            selectedTabIndex = currentTab.ordinal,
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ) {
             Tab(
                 selected = currentTab == EditorTab.STRUCTURE,
                 onClick = { onTabSelected(EditorTab.STRUCTURE) },
                 text = { Text("结构") },
-                icon = {
-                    Icon(
-                        imageVector = Icons.Default.Description,
-                        contentDescription = null
-                    )
-                }
             )
             Tab(
                 selected = currentTab == EditorTab.HEX,
                 onClick = { onTabSelected(EditorTab.HEX) },
                 text = { Text("Hex") },
-                icon = {
-                    Icon(
-                        imageVector = Icons.Default.Memory,
-                        contentDescription = null
-                    )
-                }
             )
             Tab(
                 selected = currentTab == EditorTab.DISASSEMBLY,
                 onClick = { onTabSelected(EditorTab.DISASSEMBLY) },
                 text = { Text("汇编") },
-                icon = {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = null
-                    )
-                }
             )
         }
 
-        // Tab 内容
-        Box(modifier = Modifier.weight(1f)) {
-            when (currentTab) {
+        // Tab 内容（方向性转场：下方滑入 + 淡入 / 上方滑出 + 淡出）
+        AnimatedContent(
+            targetState = currentTab,
+            modifier = Modifier.weight(1f),
+            transitionSpec = {
+                // 回结构 Tab：快 fade(200ms)，不做 slow 滑入。
+                // 原全局 slow 滑入导致 500ms 内 Layout 未完成，StructureTab 的滚动+闪烁只能排队等待，
+                // 结构 Tab 呈现出「先停在原位置 500ms 再被拉走」的粘着感；用 fast fade 直接显示，
+                // 然后立即 scrollToItem + 闪烁，整体流畅度显著提升。
+                if (targetState == EditorTab.STRUCTURE) {
+                    fadeIn(tween(AnimDuration.fast)) togetherWith fadeOut(tween(AnimDuration.fast))
+                } else {
+                    (fadeIn() + slideInVertically(initialOffsetY = { it / 4 })) togetherWith
+                        (fadeOut() + slideOutVertically(targetOffsetY = { -it / 4 }))
+                }
+            },
+            label = "tabContent"
+        ) { tab ->
+            when (tab) {
                 EditorTab.STRUCTURE -> {
                     StructureTab(
                         sections = uiState.sections,
@@ -368,19 +419,22 @@ private fun SoEditorContent(
                         functions = uiState.functions,
                         strings = uiState.strings,
                         onSectionClick = { section ->
-                            viewModel.loadHexData(section.offset, section.size)
-                            viewModel.setSelectedOffset(section.offset)
+                            viewModel.setSelectedOffset(section.address)
+                            viewModel.setStructureFlashAddress(section.address)
+                            viewModel.setTab(EditorTab.DISASSEMBLY)
+                            viewModel.loadDisassembly(section.address, highlightAfterLoad = section.address)
                         },
                         onSymbolClick = { symbol ->
-                            // 保存地址 → 切回结构Tab时该行闪烁 + 滚动保持
+                            viewModel.setSelectedOffset(symbol.address)
                             viewModel.setStructureFlashAddress(symbol.address)
                             viewModel.setTab(EditorTab.DISASSEMBLY)
-                            viewModel.loadDisassembly(symbol.address)
+                            viewModel.loadDisassembly(symbol.address, highlightAfterLoad = symbol.address)
                         },
                         onFunctionClick = { func ->
+                            viewModel.setSelectedOffset(func.vaddr)
                             viewModel.setStructureFlashAddress(func.vaddr)
                             viewModel.setTab(EditorTab.DISASSEMBLY)
-                            viewModel.loadDisassembly(func.vaddr)
+                            viewModel.loadDisassembly(func.vaddr, highlightAfterLoad = func.vaddr)
                         },
                         onStringsTabSelected = { viewModel.loadStrings() },
                         viewModel = viewModel
@@ -405,45 +459,6 @@ private fun SoEditorContent(
 }
 
 @Composable
-private fun FileInfoBar(
-    fileName: String,
-    fileSize: Long,
-    sectionCount: Int,
-    symbolCount: Int,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = fileName,
-                style = MaterialTheme.typography.labelMedium
-            )
-            Text(
-                text = formatFileSize(fileSize),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Text(
-            text = "$sectionCount 节",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = "$symbolCount 符号",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
 private fun LoadingContent(modifier: Modifier = Modifier) {
     Column(
         modifier = modifier.padding(32.dp),
@@ -453,6 +468,36 @@ private fun LoadingContent(modifier: Modifier = Modifier) {
         Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = "加载中...",
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
+@Composable
+private fun CopyingContent(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        CircularProgressIndicator()
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = "正在复制 SO 文件到本地...",
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
+@Composable
+private fun AnalyzingContent(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        CircularProgressIndicator()
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = "正在分析交叉引用...",
             style = MaterialTheme.typography.bodyMedium
         )
     }
@@ -613,12 +658,20 @@ private suspend fun copyUriToLocalCache(
         val hashId = uri.toString().hashCode().toUInt().toString(16)
         val outFile = File(context.cacheDir, "so_import_${hashId}_$safeName")
 
-        // 若已存在且大小相同，跳过复制
-        val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-        pfd?.use {
-            val statSize = it.statSize
-            if (outFile.exists() && outFile.length() == statSize) {
+        // 用 ContentResolver.query 读 SIZE（替代 openFileDescriptor），避免 Binder openTypedAssetFile
+        // 在 MIUI 云盘/SD 卡环境下 openFileDescriptor 单步可达 2-3s，引发 APP_SCOUT_WARNING。
+        val remoteSize = queryUriSizeOrNull(context, uri)
+        if (remoteSize != null) {
+            if (outFile.exists() && outFile.length() == remoteSize) {
+                android.util.Log.i("SoEditorScreen", "SO 已存在本地，跳过复制: ${outFile.name} (${remoteSize} bytes)")
                 return@withContext outFile
+            }
+        } else {
+            // 回退：极少数 ContentProvider 不返回 OpenableColumns.SIZE，仍用 openFileDescriptor
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                if (outFile.exists() && outFile.length() == pfd.statSize) {
+                    return@withContext outFile
+                }
             }
         }
 
@@ -634,14 +687,42 @@ private suspend fun copyUriToLocalCache(
 }
 
 private fun getDisplayName(context: Context, uri: Uri): String? {
-    val cursor = context.contentResolver.query(uri, null, null, null, null)
+    // 只查 DISPLAY_NAME 一列（避免全列 projection 跨进程多读大字段，SD/云盘场景下减缓 Binder 开销）
+    val cursor = try {
+        context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null, null, null
+        )
+    } catch (_: Throwable) { return null }
     cursor?.use {
         if (it.moveToFirst()) {
             val idx = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0) {
+            if (idx >= 0 && !it.isNull(idx)) {
                 return it.getString(idx)
             }
         }
     }
     return uri.lastPathSegment
+}
+
+/**
+ * 轻量读 URI SIZE：用 ContentResolver.query(OpenableColumns.SIZE)，
+ * 避免 openFileDescriptor(ParcelFileDescriptor) 触发 Binder openTypedAssetFile
+ * 在 MIUI 云盘/远程文档/SD 卡上 2-3s 阻塞引发 APP_SCOUT_WARNING。
+ */
+private fun queryUriSizeOrNull(context: Context, uri: Uri): Long? {
+    val cursor = try {
+        context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.SIZE),
+            null, null, null
+        )
+    } catch (_: Throwable) { return null }
+    return cursor?.use {
+        if (it.moveToFirst()) {
+            val idx = it.getColumnIndex(OpenableColumns.SIZE)
+            if (idx >= 0 && !it.isNull(idx)) it.getLong(idx) else null
+        } else null
+    }
 }

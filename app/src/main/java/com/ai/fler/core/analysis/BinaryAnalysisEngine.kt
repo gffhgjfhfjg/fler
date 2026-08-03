@@ -103,10 +103,10 @@ interface BinaryAnalysisEngine {
     /**
      * 重新分析交叉引用（补充 xref 表）。
      *
-     * defineFunction 已不再调用 af（改为只设 flag），因此不会破坏 xref 表。
+     * defineFunction 只设 flag 不调 af，因此不会破坏 xref 表。
      * 本方法主要用于其他场景下的 xref 重建。
      *
-     * 默认实现 no-op。RizinEngine 覆盖为 `aac` 命令。
+     * 默认实现 no-op。RizinEngine 覆盖为 `aar` 命令。
      */
     suspend fun reanalyzeXrefs(handle: AnalysisHandle): Boolean = false
 
@@ -177,4 +177,23 @@ interface BinaryAnalysisEngine {
     suspend fun md5(handle: AnalysisHandle): String?
     suspend fun sha256(handle: AnalysisHandle): String?
     suspend fun crc32(handle: AnalysisHandle, offset: Long? = null, size: Long? = null): Long?
+
+    // ------------------------------------------------------------------
+    // 诊断工具
+    // ------------------------------------------------------------------
+
+    /** 查询 Rizin 配置项的值。默认实现返回 null。 */
+    suspend fun getConfig(handle: AnalysisHandle, key: String): String? = null
+
+    /**
+     * 诊断地址空间状态，确认 Blutter 的 vaddr 与 Rizin 地址空间是否一致。
+     * 默认实现 no-op。
+     */
+    suspend fun checkAddressSpace(handle: AnalysisHandle, testAddr: Long) = Unit
+
+    /**
+     * 注入后诊断：确认 defineFunction + reanalyzeXrefs 后 xref 是否重建成功。
+     * 默认实现 no-op。
+     */
+    suspend fun diagnosticAfterInjection(handle: AnalysisHandle, testAddr: Long) = Unit
 }

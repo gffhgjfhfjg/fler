@@ -100,6 +100,16 @@ interface DartMethodDao {
             "ORDER BY dc.class_name, dm.method_name"
     )
     suspend fun getMethodsWithClass(analysisId: Long): List<MethodWithClass>
+
+    /** 按 libapp SO 路径查找所有 Dart 方法（带类名），用于 SO 编辑器注入函数标签。 */
+    @Query(
+        "SELECT dm.*, dc.class_name AS _class_name FROM dart_methods dm " +
+            "INNER JOIN dart_classes dc ON dm.class_id = dc.id " +
+            "INNER JOIN analyses a ON dm.analysis_id = a.id " +
+            "WHERE a.libapp_path = :soPath AND dm.function_offset > 0 " +
+            "ORDER BY dm.function_offset"
+    )
+    suspend fun getMethodsBySoPath(soPath: String): List<MethodWithClass>
 }
 
 /** 方法 + 所属类名投影。 */
