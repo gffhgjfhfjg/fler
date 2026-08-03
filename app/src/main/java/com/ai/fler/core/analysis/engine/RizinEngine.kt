@@ -185,14 +185,19 @@ class RizinEngine : BinaryAnalysisEngine {
     }
 
     override suspend fun getSymbols(handle: AnalysisHandle, includeDynamic: Boolean): List<SymbolInfo> {
-        // isj = 静态符号；isJj = 动态符号（大小写 J 表示动态）
-        // Rizin isj 包含所有符号，isJj 是动态符号
-        val json = if (includeDynamic) {
-            cmd(handle, "isj") ?: return emptyList()
-        } else {
-            cmd(handle, "isj") ?: return emptyList()
+        // isj = 静态符号；isJj = 动态符号（大小写 J 表示动态），两者字段结构一致
+        if (includeDynamic) {
+            // 契约：includeDynamic=true 时需包含动态符号，两条命令分别查询后合并去重
+            val staticJson = cmd(handle, "isj") ?: return emptyList()
+            val dynamicJson = cmd(handle, "isJj") ?: return emptyList()
+            val merged = RizinJsonParser.parseSymbols(staticJson).toMutableList()
+            val seen = merged.map { it.address }.toMutableSet()
+            for (sym in RizinJsonParser.parseSymbols(dynamicJson)) {
+                if (sym.address !in seen) { merged.add(sym); seen.add(sym.address) }
+            }
+            return merged
         }
-        return RizinJsonParser.parseSymbols(json)
+        return RizinJsonParser.parseSymbols(cmd(handle, "isj") ?: return emptyList())
     }
 
     override suspend fun getImports(handle: AnalysisHandle): List<ImportInfo> {
@@ -255,8 +260,8 @@ class RizinEngine : BinaryAnalysisEngine {
         //
         // 为什么不用 af 注册到 Rizin 函数 DB：
         //   af 会清除该地址范围内的已有 xref 条目，然后需要 aar 重建。
-        //   但 defineFunctions 对 19803 个函数逐一调 af 耗时极长，
-        //   用户可能在 aar 完成前点击函数，看到 xref = 0（时序问题）。
+        //   批量注入（见 [defineFunctions]）是对每个函数只设 flag，不碰函数 DB，
+        //   因此不会触发 xref 重建，也无时序问题。
         //
         // 为什么不调 af 也没问题：
         //   reanalyzeXrefs 用 aar 扫描整个二进制，不依赖函数边界，
@@ -264,6 +269,23 @@ class RizinEngine : BinaryAnalysisEngine {
         //   aac 需要函数边界，但我们用 aar 而不是 aac。
         cmd(handle, "f $name @ $hexAddr")
         return true
+    }
+
+    /**
+     * 批量设置 flag：多条 `f name @ addr` 用分号拼成一条命令，一次 JNI 调用完成。
+     * 相比逐条 [defineFunction]，省去 N 次跨 JNI 的字符串往返（万级函数时收益明显）。
+     */
+    override suspend fun defineFunctions(handle: AnalysisHandle, functions: List<Pair<Long, String>>): Int {
+        var defined = 0
+        // 分批执行，避免单条命令过长（每批 500 条，命令约 20KB）
+        for (batch in functions.chunked(500)) {
+            val command = batch.joinToString(";") { (addr, name) ->
+                "f $name @ 0x${addr.toString(16)}"
+            }
+            cmd(handle, command) ?: break
+            defined += batch.size
+        }
+        return defined
     }
 
     override suspend fun reanalyzeXrefs(handle: AnalysisHandle): Boolean {
@@ -361,7 +383,7 @@ class RizinEngine : BinaryAnalysisEngine {
 
     override suspend fun paddrToVaddr(handle: AnalysisHandle, paddr: Long): Long {
         val hexAddr = "0x${paddr.toString(16)}"
-        val result = cmd(handle, "s $hexAddr; pi 1") ?: return paddr
+        if (cmd(handle, "s $hexAddr") == null) return paddr
         // 用 v. 命令获取当前地址的虚拟地址
         val vaddr = cmd(handle, "v.") ?: return paddr
         return vaddr.trim().toLongOrNull(16) ?: paddr
@@ -380,7 +402,6 @@ class RizinEngine : BinaryAnalysisEngine {
     // ------------------------------------------------------------------
 
     override suspend fun md5(handle: AnalysisHandle): String? {
-        val result = cmd(handle, "~ee") ?: return null
         // Rizin 不直接提供 md5 命令，用 ph 命令
         val md5 = cmd(handle, "ph md5") ?: return null
         return md5.trim().takeIf { it.isNotEmpty() }

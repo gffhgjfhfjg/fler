@@ -71,7 +71,10 @@ object RizinBindings {
         nativeReadBytes(handle, offset, size)
 
     /**
-     * 直接写入字节。
+     * 直接写入字节（文件偏移寻址）。
+     *
+     * native 层会把文件偏移翻译成 Rizin 地址空间中的 vaddr 再写入，
+     * 并关闭 io.cache 保证落盘。
      *
      * @param offset 文件偏移
      * @param data   字节数组

@@ -29,6 +29,7 @@ import com.ai.fler.data.entity.Project
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -94,11 +95,14 @@ class ProjectViewModel @Inject constructor(
         loadProjects()
     }
 
+    private var projectsJob: Job? = null
+
     /**
      * 加载所有项目。
      */
     private fun loadProjects() {
-        viewModelScope.launch {
+        projectsJob?.cancel()
+        projectsJob = viewModelScope.launch {
             _projectListState.value = _projectListState.value.copy(isLoading = true)
             try {
                 projectDao.getAll().collect { projects ->
@@ -117,12 +121,12 @@ class ProjectViewModel @Inject constructor(
     }
 
     /**
-     * 刷新项目列表。
+     * 刷新项目列表：重新订阅数据库 Flow，立即触发一次查询。
      */
     fun refreshProjects() {
         viewModelScope.launch {
             _projectListState.value = _projectListState.value.copy(isRefreshing = true)
-            // 重新加载由 Flow 自动处理
+            loadProjects()
             _projectListState.value = _projectListState.value.copy(isRefreshing = false)
         }
     }
@@ -429,26 +433,16 @@ class ProjectViewModel @Inject constructor(
     /**
      * 保存分析结果到数据库。
      *
-     * 先通过 [AnalysisImporter] 把 Blutter 生成的 SQLite 中的
-     * classes/methods/pp_entries/strings 读入 Room，再回写真实统计计数。
+     * 通过 [AnalysisImporter] 把 Blutter 生成的 SQLite 中的
+     * classes/methods/pp_entries/strings 读入 Room；统计计数由 [AnalysisImporter] 内部回写。
      */
     private suspend fun saveAnalysisResults(
         analysisId: Long,
         outcome: RunOutcome
     ) {
-        val importResult = if (outcome.result.success && outcome.dbPath.isNotBlank()) {
+        if (outcome.result.success && outcome.dbPath.isNotBlank()) {
             analysisImporter.import(analysisId, outcome.dbPath)
-        } else {
-            AnalysisImporter.ImportResult()
         }
-
-        // updateCounts 已在 AnalysisImporter 内部回写；这里兜底再同步一次
-        analysisDao.updateCounts(
-            id = analysisId,
-            classesCount = importResult.classesCount,
-            methodsCount = importResult.methodsCount,
-            ppEntriesCount = importResult.ppEntriesCount
-        )
     }
 
     /**

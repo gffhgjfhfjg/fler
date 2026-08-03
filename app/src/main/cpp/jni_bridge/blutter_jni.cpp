@@ -297,9 +297,13 @@ Java_com_ai_fler_core_jni_BlutterEngine_nativeBlutterAnalyze(
     //
     // 注意：siglongjmp 跳过栈展开，blutter 内部的 C++ 对象不会析构，
     // 但进程还活着，能继续运行。内存泄漏可接受（分析失败本就是异常路径）。
-    static sigjmp_buf jmp_buf;
-    static volatile sig_atomic_t crash_addr = 0;
-    static volatile sig_atomic_t crash_signo = 0;
+    //
+    // thread_local：多线程并发分析（如用户同时跑多个 Blutter 分析）时，
+    // 静态 jmp_buf 会被后一个线程的 sigsetjmp 覆盖，前一个线程崩溃时
+    // siglongjmp 会跳到错误的栈帧导致未定义行为。改为每线程一份，互不干扰。
+    static thread_local sigjmp_buf jmp_buf;
+    static thread_local volatile sig_atomic_t crash_addr = 0;
+    static thread_local volatile sig_atomic_t crash_signo = 0;
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));

@@ -1,8 +1,11 @@
 package com.ai.fler.core.analysis
 
+import android.util.Log
 import com.ai.fler.core.service.BackupManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -17,18 +20,22 @@ import javax.inject.Singleton
  * 3. 在会话层集中注入 BackupManager，实现 ByteEdit 级别的 patch 栈，
  *    让 RizinEngine/SelfAnalysisEngine 共享一致的撤销行为。
  *
- * 线程安全：所有 open/close 用 Mutex 串行化；内部 map 非并发（Kotlin Map 非线程安全），
- * 但所有访问都在 Mutex 内执行。
+ * 线程安全：所有 open/close 与引擎操作通过同一把 Mutex 串行化。
+ * 引擎底层（RzCore 命令）非线程安全，同一 RzCore 并发执行命令会破坏 Rizin 内部状态，
+ * 因此转发方法同样持有 Mutex；sessions/pathToHandle 的读写也全部在 Mutex 内完成。
+ * 会话数超过 [MAX_SESSIONS] 时按最近使用时间淘汰最旧会话，避免长期运行泄漏。
  */
 @Singleton
 class AnalysisSession @Inject constructor(
     private val registry: EngineRegistry,
-    private val backupManager: BackupManager
+    private val backupManager: BackupManager,
+    private val soEditorCache: SoEditorCache
 ) {
     private data class SessionEntry(
         val handle: AnalysisHandle,
         val engineId: String,
-        val filePath: String
+        val filePath: String,
+        var lastAccess: Long
     )
 
     private val mutex = Mutex()
@@ -36,9 +43,10 @@ class AnalysisSession @Inject constructor(
     private val pathToHandle = mutableMapOf<String, Long>()       // 绝对路径 -> handle.value
     private var nextHandleSeq = 1L
 
-    // 当前打开的默认会话（UI 层打开某文件时默认绑定）
-    private var currentHandle: AnalysisHandle = AnalysisHandle.INVALID
-    private var currentEngine: BinaryAnalysisEngine? = null
+    // 当前打开的默认会话（UI 层打开某文件时默认绑定）。
+    // @Volatile：外部只读访问（currentHandle()/currentEngine() 已加锁，此处为防御性标注）。
+    @Volatile private var currentHandle: AnalysisHandle = AnalysisHandle.INVALID
+    @Volatile private var currentEngine: BinaryAnalysisEngine? = null
 
     /** 当前已打开会话对应的 handle。未 open 返回 INVALID。 */
     suspend fun currentHandle(): AnalysisHandle = mutex.withLock { currentHandle }
@@ -53,8 +61,8 @@ class AnalysisSession @Inject constructor(
     /**
      * 打开 so 会话。
      *
-     * 策略：按优先级挑选支持能力组合的引擎，若已按同路径 open 过则复用旧 handle
-     * （但会用新 engine 重新 open，保证用户切换引擎时生效）。
+     * 策略：按优先级挑选支持能力组合的引擎；若已按同路径 open 过则直接复用旧会话
+     * （不重新 open / 不重新 aaa 分析，避免重复分析开销）。
      */
     suspend fun open(
         filePath: String,
@@ -83,6 +91,7 @@ class AnalysisSession @Inject constructor(
                     // handle 已失效，清理残留
                     sessions.remove(existingH)
                     pathToHandle.remove(filePath)
+                    soEditorCache.invalidate(filePath)
                 }
             }
         }
@@ -98,11 +107,12 @@ class AnalysisSession @Inject constructor(
         for (engine in engines) {
             when (val r = engine.open(filePath, options)) {
                 is OpenResult.Success -> return mutex.withLock {
-                    sessions[r.handle.value] = SessionEntry(r.handle, engine.engineId, filePath)
+                    sessions[r.handle.value] = SessionEntry(r.handle, engine.engineId, filePath, now())
                     pathToHandle[filePath] = r.handle.value
                     currentHandle = r.handle
                     currentEngine = engine
                     backupManager.setCurrentFile(filePath)
+                    evictIfNeeded()
                     OpenResult.Success(r.handle, filePath, engine.engineId)
                 }
                 is OpenResult.Failure -> {
@@ -112,6 +122,26 @@ class AnalysisSession @Inject constructor(
             }
         }
         return OpenResult.Failure(lastReason ?: "所有引擎均无法打开文件")
+    }
+
+    /**
+     * 会话数超过 [MAX_SESSIONS] 时，关闭并淘汰最近最久未使用的会话。
+     * 必须在持有 mutex 时调用。
+     */
+    private suspend fun evictIfNeeded() {
+        if (sessions.size <= MAX_SESSIONS) return
+        val victim = sessions.minByOrNull { it.value.lastAccess } ?: return
+        val entry = victim.value
+        try { registry.getAnalysis(entry.engineId)?.close(entry.handle) } catch (_: Throwable) { /* noop */ }
+        sessions.remove(victim.key)
+        if (pathToHandle[entry.filePath] == victim.key) pathToHandle.remove(entry.filePath)
+        // RzCore 已关闭：注入标记/元数据缓存失效，下次打开需重新查询与注入
+        soEditorCache.invalidate(entry.filePath)
+        if (currentHandle == entry.handle) {
+            currentHandle = AnalysisHandle.INVALID
+            currentEngine = null
+        }
+        Log.i(TAG, "会话数超限(${MAX_SESSIONS})，淘汰最久未使用: ${entry.filePath}")
     }
 
     /** 显式指定 engineId 打开（MCP 层或用户切换引擎时使用）。 */
@@ -150,10 +180,11 @@ class AnalysisSession @Inject constructor(
     private suspend fun <R> withEngine(
         handle: AnalysisHandle? = null,
         block: suspend (BinaryAnalysisEngine, AnalysisHandle) -> R
-    ): R? {
+    ): R? = mutex.withLock {
         val actual = handle.takeIf { it != null && it.isValid } ?: currentHandle
-        val (e, _) = resolve(actual) ?: return null
-        return block(e, actual)
+        val pair = resolve(actual) ?: return@withLock null
+        pair.second.lastAccess = now()
+        block(pair.first, actual)
     }
 
     // ------------------------------------------------------------------
@@ -185,13 +216,8 @@ class AnalysisSession @Inject constructor(
         withEngine { e, h -> e.defineFunction(h, address, name) } ?: false
 
     /** 批量定义函数。返回成功定义的数量。 */
-    suspend fun defineFunctions(functions: List<Pair<Long, String>>): Int {
-        var count = 0
-        for ((addr, name) in functions) {
-            if (defineFunction(addr, name)) count++
-        }
-        return count
-    }
+    suspend fun defineFunctions(functions: List<Pair<Long, String>>): Int =
+        withEngine { e, h -> e.defineFunctions(h, functions) } ?: 0
 
     /**
      * 重新分析交叉引用（补充 xref 表）。
@@ -223,11 +249,33 @@ class AnalysisSession @Inject constructor(
      * 引擎层写盘 + 本层统一记录 patch，Rizin/Self 都走同一套撤销栈。
      */
     suspend fun writeBytes(offset: Long, data: ByteArray, soNameHint: String = ""): Boolean {
+        var filePathForVerify: String? = null
         val pair = withEngine { e, h ->
+            val path = resolve(h)?.second?.filePath
+            filePathForVerify = path
             val old = e.readBytes(h, offset, data.size.toLong())
             val ok = e.writeBytes(h, offset, data)
-            Triple(ok, old, soNameHint.ifBlank { resolve(h)?.second?.filePath?.substringAfterLast('/') ?: "" })
+            Triple(ok, old, soNameHint.ifBlank { path?.substringAfterLast('/') ?: "" })
         } ?: return false
+        if (pair.first && data.isNotEmpty()) {
+            // 落盘校验：直读磁盘确认字节已真正写入（防止 Rizin 写入只进 io.cache）
+            val path = filePathForVerify
+            if (path != null) {
+                try {
+                    val onDisk = withContext(Dispatchers.IO) {
+                        java.io.RandomAccessFile(path, "r").use { raf ->
+                            raf.seek(offset)
+                            val b = ByteArray(data.size)
+                            raf.readFully(b)
+                            b
+                        }
+                    }
+                    Log.i(TAG, "写盘校验 offset=0x${offset.toString(16)} matched=${onDisk.contentEquals(data)}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "写盘校验失败 offset=0x${offset.toString(16)}", e)
+                }
+            }
+        }
         if (pair.first && pair.second.size == data.size) {
             backupManager.recordPatch(offset, pair.second, data, pair.third)
         }
@@ -275,5 +323,10 @@ class AnalysisSession @Inject constructor(
 
     companion object {
         const val TAG = "AnalysisSession"
+
+        /** 同时保持打开的分析会话上限，超出后淘汰最久未使用的会话。 */
+        private const val MAX_SESSIONS = 3
+
+        private fun now(): Long = System.currentTimeMillis()
     }
 }

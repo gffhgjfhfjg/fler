@@ -101,6 +101,20 @@ interface BinaryAnalysisEngine {
     suspend fun defineFunction(handle: AnalysisHandle, address: Long, name: String): Boolean = false
 
     /**
+     * 批量定义函数（默认实现逐个调用 [defineFunction]；
+     * 支持批量命令的引擎可覆盖为一次 JNI 调用，避免 N 次 IPC/解析开销）。
+     *
+     * @return 成功定义的数量。
+     */
+    suspend fun defineFunctions(handle: AnalysisHandle, functions: List<Pair<Long, String>>): Int {
+        var count = 0
+        for ((addr, name) in functions) {
+            if (defineFunction(handle, addr, name)) count++
+        }
+        return count
+    }
+
+    /**
      * 重新分析交叉引用（补充 xref 表）。
      *
      * defineFunction 只设 flag 不调 af，因此不会破坏 xref 表。

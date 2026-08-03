@@ -39,6 +39,9 @@ class AnalysisImporter @Inject constructor(
         private const val TAG = "AnalysisImporter"
         private const val UNKNOWN_CLASS = "<unknown>"
         private const val UNKNOWN_METHOD = "<unknown>"
+
+        /** 单批插入上限：避免一次性绑定数万条参数，SQLite 变量数有上限（默认 999）。 */
+        private const val BATCH_SIZE = 500
     }
 
     /** 导入结果统计。 */
@@ -84,7 +87,11 @@ class AnalysisImporter @Inject constructor(
                             )
                         }
                         if (entities.isNotEmpty()) {
-                            val ids = dartClassDao.insertAll(entities)
+                            // 分批插入并保持顺序，保证 blutterId -> RoomId 映射正确
+                            val ids = mutableListOf<Long>()
+                            for (batch in entities.chunked(BATCH_SIZE)) {
+                                ids += dartClassDao.insertAll(batch)
+                            }
                             rows.forEachIndexed { i, (blutterId, _, _) ->
                                 if (i < ids.size) blutterClassIdToRoomId[blutterId] = ids[i]
                             }
@@ -129,7 +136,9 @@ class AnalysisImporter @Inject constructor(
                                     srcCode = srcCode,
                                 )
                             }
-                            dartMethodDao.insertAll(entities)
+                            entities.chunked(BATCH_SIZE).forEach { batch ->
+                                dartMethodDao.insertAll(batch)
+                            }
                         }
                         methods = rows.size
                         Log.i(TAG, "导入 methods: $methods 条")
@@ -143,18 +152,19 @@ class AnalysisImporter @Inject constructor(
                     try {
                         val rows = readPpEntries(db)
                         if (rows.isNotEmpty()) {
-                            ppEntryDao.insertAll(
-                                rows.map { (ppOffset, type, value, soAddr) ->
-                                    PpEntry(
-                                        methodId = unknownMethodId,
-                                        analysisId = analysisId,
-                                        vmOffset = ppOffset,
-                                        fileOffset = soAddr,
-                                        description = value ?: type,
-                                        type = type,
-                                    )
-                                }
-                            )
+                            val entities = rows.map { (ppOffset, type, value, soAddr) ->
+                                PpEntry(
+                                    methodId = unknownMethodId,
+                                    analysisId = analysisId,
+                                    vmOffset = ppOffset,
+                                    fileOffset = soAddr,
+                                    description = value ?: type,
+                                    type = type,
+                                )
+                            }
+                            entities.chunked(BATCH_SIZE).forEach { batch ->
+                                ppEntryDao.insertAll(batch)
+                            }
                         }
                         pp += rows.size
                         Log.i(TAG, "导入 pp_entries: ${rows.size} 条")
@@ -168,18 +178,19 @@ class AnalysisImporter @Inject constructor(
                     try {
                         val rows = readStrings(db)
                         if (rows.isNotEmpty()) {
-                            ppEntryDao.insertAll(
-                                rows.map { (ppOffset, value) ->
-                                    PpEntry(
-                                        methodId = unknownMethodId,
-                                        analysisId = analysisId,
-                                        vmOffset = ppOffset,
-                                        fileOffset = 0,
-                                        description = value,
-                                        type = "String",
-                                    )
-                                }
-                            )
+                            val entities = rows.map { (ppOffset, value) ->
+                                PpEntry(
+                                    methodId = unknownMethodId,
+                                    analysisId = analysisId,
+                                    vmOffset = ppOffset,
+                                    fileOffset = 0,
+                                    description = value,
+                                    type = "String",
+                                )
+                            }
+                            entities.chunked(BATCH_SIZE).forEach { batch ->
+                                ppEntryDao.insertAll(batch)
+                            }
                         }
                         pp += rows.size
                         Log.i(TAG, "导入 strings: ${rows.size} 条")

@@ -221,12 +221,14 @@ fun SoEditorScreen(
                     // 撤销按钮
                     IconButton(
                         onClick = {
-                            val record = viewModel.undo()
-                            scope.launch {
-                                if (record != null) {
-                                    snackbarHostState.showSnackbar("已撤销: 0x${record.address.toString(16)}")
-                                } else {
-                                    snackbarHostState.showSnackbar("无可撤销操作")
+                            // undo 内部已切 IO 线程，结果通过主线程回调返回
+                            viewModel.undo { record ->
+                                scope.launch {
+                                    if (record != null) {
+                                        snackbarHostState.showSnackbar("已撤销: 0x${record.address.toString(16)}")
+                                    } else {
+                                        snackbarHostState.showSnackbar("无可撤销操作")
+                                    }
                                 }
                             }
                         },

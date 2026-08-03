@@ -119,9 +119,9 @@ class SelfAnalysisEngine(
         val result = mutableListOf<StringInfo>()
         var i = 0
         while (i < data.size) {
-            if (data[i] in 0x20..0x7E || data[i] in 0x40.toByte()..0x7E.toByte()) {
+            if (data[i] in 0x20..0x7E) {
                 val start = i
-                while (i < data.size && (data[i] in 0x20..0x7E.toByte())) i++
+                while (i < data.size && data[i] in 0x20..0x7E) i++
                 val len = i - start
                 if (len >= options.minLen && len <= options.maxLen) {
                     val s = String(data, start, len)

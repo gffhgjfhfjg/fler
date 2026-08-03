@@ -10,7 +10,7 @@
  *   3. nativeAnalyze  → 执行 aaa 自动分析
  *   4. nativeCmdStr   → 执行任意命令，返回字符串输出
  *   5. nativeReadBytes→ 直接 rz_io_nread_at 读字节（比 pxj 更快，不做 hex 编码）
- *   6. nativeWriteBytes→ 直接 rz_core_write_at 写字节
+ *   6. nativeWriteBytes→ 文件偏移→vaddr 翻译后 rz_core_write_at 写字节
  *
  * 所有复杂的数据解析（JSON → Kotlin 数据模型）在 RizinEngine.kt 中用
  * kotlinx.serialization 完成，JNI 层保持极简。
@@ -180,11 +180,18 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeReadBytes(
 }
 
 /**
- * 直接写入字节。
+ * 直接写入字节（文件偏移寻址）。
  *
  * @param offset 文件偏移
  * @param data   字节数组
  * @return true 成功
+ *
+ * 关键点：Hex 编辑器传入的是「文件偏移」。写入必须用**物理地址直写**
+ * rz_io_pwrite_at —— 它按 paddr（= 文件偏移）直接写 desc，绕过 io.va 的
+ * map 翻译，也绕过 ELF 段写权限检查（io.va=true 时代码段的 map 是 R-X，
+ * rz_core_write_at → rz_io_write 会因无写权限而失败，这是此前写入失败的根因）。
+ * 读取侧 rz_io_nread_at 同样是物理直读，二者地址空间一致。
+ * 另强制关闭 io.cache，保证写入直接落到文件而非内存缓存。
  */
 JNIEXPORT jboolean JNICALL
 Java_com_ai_fler_core_jni_RizinBindings_nativeWriteBytes(
@@ -199,7 +206,24 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeWriteBytes(
     std::vector<uint8_t> buf(static_cast<size_t>(size));
     env->GetByteArrayRegion(jData, 0, size, reinterpret_cast<jbyte*>(buf.data()));
 
-    bool ok = rz_core_write_at(core, static_cast<ut64>(jOffset), buf.data(), static_cast<int>(size));
+    // 写入必须落盘：关闭 io.cache，避免只写内存缓存
+    rz_core_cmd_str(core, "e io.cache=false");
+
+    int n = rz_io_pwrite_at(core->io, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(size));
+    bool ok = (n == static_cast<int>(size));
+
+    // 写后读回校验（物理直读），确认字节已落盘
+    bool readbackMatched = false;
+    if (ok && size > 0) {
+        std::vector<uint8_t> check(static_cast<size_t>(size));
+        int r = rz_io_nread_at(core->io, static_cast<ut64>(jOffset), check.data(), static_cast<size_t>(size));
+        readbackMatched = (r == size) && (std::memcmp(check.data(), buf.data(), size) == 0);
+    }
+
+    __android_log_print(ANDROID_LOG_INFO, TAG,
+        "writeBytes: fileOffset=0x%llx size=%d written=%d readbackMatched=%d",
+        static_cast<unsigned long long>(jOffset),
+        static_cast<int>(size), n, readbackMatched ? 1 : 0);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 

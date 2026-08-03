@@ -29,6 +29,13 @@ interface DartMethodDao {
     @Query("SELECT * FROM dart_methods WHERE analysis_id = :analysisId ORDER BY method_name")
     suspend fun getByAnalysisIdList(analysisId: Long): List<DartMethod>
 
+    /** 每个类的方法数（SQL 下推：GROUP BY 统计，供 list_classes 避免全量载入方法表）。 */
+    @Query(
+        "SELECT class_id AS classId, COUNT(*) AS methodCount FROM dart_methods " +
+            "WHERE analysis_id = :analysisId GROUP BY class_id"
+    )
+    suspend fun countMethodsGroupedByClass(analysisId: Long): List<ClassMethodCount>
+
     /** 按 id 取方法 + 所属类名。 */
     @Query(
         "SELECT dm.*, dc.class_name AS _class_name FROM dart_methods dm " +
@@ -116,4 +123,10 @@ interface DartMethodDao {
 data class MethodWithClass(
     @Embedded val method: DartMethod,
     @androidx.room.ColumnInfo(name = "_class_name") val _className: String
+)
+
+/** 类 -> 方法数投影（GROUP BY 统计结果）。 */
+data class ClassMethodCount(
+    val classId: Long,
+    val methodCount: Int,
 )

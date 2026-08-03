@@ -12,15 +12,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -44,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -222,23 +224,15 @@ private fun HexNavigationBar(
             )
         }
 
+        // 跳转通过键盘 IME「完成/搜索」键触发，布局保持左右对称
         CompactTextField(
             value = inputOffset,
             onValueChange = onInputOffsetChange,
             modifier = Modifier.weight(1f),
             placeholder = "偏移 (hex 或 dec)",
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { onJumpToOffset() })
         )
-
-        IconButton(
-            onClick = onJumpToOffset,
-            modifier = Modifier.size(28.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.Search,
-                contentDescription = "跳转"
-            )
-        }
 
         IconButton(
             onClick = onNextPage,
@@ -313,19 +307,23 @@ private fun HexRow(
             .padding(horizontal = 6.dp, vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 地址列 - 三等分第一列
+        // 地址列 - 固定宽度，8 位十六进制 mono
         Text(
             text = rowOffset.toString(16).uppercase().padStart(8, '0'),
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.width(72.dp),
             maxLines = 1
         )
+        Spacer(modifier = Modifier.width(6.dp))
 
-        // 字节列 - 三等分第二列，每个字节 weight(1f) 均分
+        // 字节列 - 弹性填充，8 字节按 4+4 分组，中间留间隙
         Row(modifier = Modifier.weight(1f)) {
             for (i in 0 until 8) {
+                if (i == 4) {
+                    Spacer(modifier = Modifier.width(10.dp))
+                }
                 if (i < bytes.size) {
                     val byteIndex = startIndex + i
                     val isSelected = byteIndex == selectedByteIndex
@@ -371,9 +369,10 @@ private fun HexRow(
                 }
             }
         }
+        Spacer(modifier = Modifier.width(6.dp))
 
-        // ASCII 列 - 三等分第三列，每个字符 weight(1f) 与字节对齐
-        Row(modifier = Modifier.weight(1f)) {
+        // ASCII 列 - 固定宽度，每个字符与字节一一对齐
+        Row(modifier = Modifier.width(64.dp)) {
             for (i in 0 until 8) {
                 Text(
                     text = if (i < bytes.size) {
@@ -406,11 +405,16 @@ private fun SelectedByteInfo(
         )
     ) {
         Row(
-            modifier = Modifier.padding(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Column {
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Text(
                     text = "偏移",
                     style = MaterialTheme.typography.labelSmall,
@@ -424,7 +428,10 @@ private fun SelectedByteInfo(
                 )
             }
 
-            Column {
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Text(
                     text = "十六进制",
                     style = MaterialTheme.typography.labelSmall,
@@ -438,7 +445,10 @@ private fun SelectedByteInfo(
                 )
             }
 
-            Column {
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Text(
                     text = "十进制",
                     style = MaterialTheme.typography.labelSmall,
@@ -452,7 +462,10 @@ private fun SelectedByteInfo(
                 )
             }
 
-            Column {
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Text(
                     text = "字符",
                     style = MaterialTheme.typography.labelSmall,

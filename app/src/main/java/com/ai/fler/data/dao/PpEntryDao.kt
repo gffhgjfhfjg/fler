@@ -32,6 +32,16 @@ interface PpEntryDao {
     @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND type = 'String' ORDER BY vm_offset")
     suspend fun getStringsByAnalysisIdList(analysisId: Long): List<PpEntry>
 
+    /** 字符串分页查询（SQL 下推：只取当前页，避免全表载入内存）。 */
+    @Query(
+        "SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND type = 'String' " +
+            "ORDER BY vm_offset LIMIT :limit OFFSET :offset"
+    )
+    suspend fun getStringsByAnalysisIdPaged(analysisId: Long, limit: Int, offset: Int): List<PpEntry>
+
+    @Query("SELECT COUNT(*) FROM pp_entries WHERE analysis_id = :analysisId AND type = 'String'")
+    suspend fun countStringsByAnalysisId(analysisId: Long): Int
+
     @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND type = 'String' AND description LIKE '%' || :query || '%' LIMIT :limit")
     suspend fun searchStrings(analysisId: Long, query: String, limit: Int): List<PpEntry>
 

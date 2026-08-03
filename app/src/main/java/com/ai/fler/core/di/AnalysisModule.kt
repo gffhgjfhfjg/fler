@@ -4,6 +4,7 @@ import com.ai.fler.core.analysis.AnalysisSession
 import com.ai.fler.core.analysis.EngineRegistry
 import com.ai.fler.core.analysis.AnalysisEnginePriority
 import com.ai.fler.core.analysis.EmulationEnginePriority
+import com.ai.fler.core.analysis.SoEditorCache
 import com.ai.fler.core.analysis.assembler.KeystoneAssembler
 import com.ai.fler.core.analysis.engine.RizinEngine
 import com.ai.fler.core.analysis.engine.SelfAnalysisEngine
@@ -64,6 +65,7 @@ object AnalysisModule {
     @Singleton
     fun provideAnalysisSession(
         registry: EngineRegistry,
-        backupManager: BackupManager
-    ): AnalysisSession = AnalysisSession(registry, backupManager)
+        backupManager: BackupManager,
+        soEditorCache: SoEditorCache
+    ): AnalysisSession = AnalysisSession(registry, backupManager, soEditorCache)
 }

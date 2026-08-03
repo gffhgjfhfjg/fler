@@ -315,7 +315,8 @@ internal object RizinJsonParser {
 
     private fun parseSymbolType(s: String?): SymbolType = when (s?.lowercase()) {
         "func", "function" -> SymbolType.FUNC
-        "object" -> SymbolType.OBJECT
+        // Rizin isj 输出的符号类型为 OBJ（大写）
+        "obj", "object" -> SymbolType.OBJECT
         "section" -> SymbolType.SECTION
         "file" -> SymbolType.FILE
         "common" -> SymbolType.COMMON

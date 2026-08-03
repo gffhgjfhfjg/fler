@@ -11,9 +11,7 @@ import com.ai.fler.data.dao.LibraryDao
 import com.ai.fler.data.dao.PpEntryDao
 import com.ai.fler.data.dao.ProjectDao
 import com.ai.fler.features.mcp.McpPatchService
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonArrayBuilder
 import kotlinx.serialization.json.JsonObject
@@ -56,8 +54,6 @@ class McpToolHandlers @Inject constructor(
         val handler: suspend (JsonObject) -> JsonElement,
     )
 
-    private val mcpScope = CoroutineScope(SupervisorJob())
-
     val tools: Map<String, McpTool> = buildMap {
         buildList {
             addAll(buildAnalysisTools())
@@ -66,7 +62,7 @@ class McpToolHandlers @Inject constructor(
             addAll(buildPatchTools())
         }.forEach { this[it.name] = it }
         // Engine 能力自动暴露的工具（带 engine_ 前缀）
-        engineMcp.buildTools(mcpScope).forEach { (k, v) -> this[k] = v }
+        engineMcp.buildTools().forEach { (k, v) -> this[k] = v }
     }
 
     // ========== 参数读取辅助 ==========
@@ -217,7 +213,9 @@ class McpToolHandlers @Inject constructor(
         ) { p ->
             val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失或非法")
             val classes = dartClassDao.getByAnalysisIdList(id)
-            val methodCounts = dartMethodDao.getByAnalysisIdList(id).groupingBy { it.classId }.eachCount()
+            // SQL 下推：方法数在 DB 侧 GROUP BY 统计，避免全量载入方法表
+            val methodCounts = dartMethodDao.countMethodsGroupedByClass(id)
+                .associate { it.classId to it.methodCount }
             buildJsonArray {
                 classes.forEach { c ->
                     addJsonObject {
@@ -464,18 +462,17 @@ class McpToolHandlers @Inject constructor(
             val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
             val page = (p.int("page") ?: 1).coerceAtLeast(1)
             val pageSize = (p.int("pageSize") ?: 200).coerceIn(1, 1000)
-            val all = ppEntryDao.getStringsByAnalysisIdList(id)
-            val total = all.size
-            val start = ((page - 1) * pageSize).coerceAtMost(total)
-            val end = (start + pageSize).coerceAtMost(total)
+            // SQL 下推：只取当前页数据，避免全表载入内存（大 SO 的字符串可达数万条）
+            val total = ppEntryDao.countStringsByAnalysisId(id)
+            val offset = ((page - 1) * pageSize).coerceAtMost(total)
+            val rows = ppEntryDao.getStringsByAnalysisIdPaged(id, pageSize, offset)
             buildJsonObject {
                 put("total", total)
                 put("page", page)
                 put("pageSize", pageSize)
-                put("truncated", end < total)
+                put("truncated", offset + rows.size < total)
                 putJsonArray("strings") {
-                    for (i in start until end) {
-                        val e = all[i]
+                    rows.forEach { e ->
                         addJsonObject {
                             put("ppOffset", e.vmOffset)
                             put("description", e.description ?: "")

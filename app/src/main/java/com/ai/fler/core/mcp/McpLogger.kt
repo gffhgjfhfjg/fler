@@ -17,6 +17,8 @@ class McpLogger @Inject constructor() {
     private val _entries = MutableStateFlow<List<McpLogEntry>>(emptyList())
     val entries: StateFlow<List<McpLogEntry>> = _entries.asStateFlow()
 
+    // MCP 请求线程池并发写日志，seq 自增与 list 更新必须原子化，否则会丢更新/seq 重复
+    private val lock = Any()
     private var seqCounter = 0L
 
     fun info(message: String) = log("I", message)
@@ -25,13 +27,15 @@ class McpLogger @Inject constructor() {
     fun error(message: String) = log("E", message)
 
     fun log(level: String, message: String) {
-        val entry = McpLogEntry(
-            seq = seqCounter++,
-            timestamp = System.currentTimeMillis(),
-            level = level,
-            message = message,
-        )
-        _entries.value = (_entries.value + entry).takeLast(MAX_ENTRIES)
+        synchronized(lock) {
+            val entry = McpLogEntry(
+                seq = seqCounter++,
+                timestamp = System.currentTimeMillis(),
+                level = level,
+                message = message,
+            )
+            _entries.value = (_entries.value + entry).takeLast(MAX_ENTRIES)
+        }
     }
 
     /**
@@ -44,20 +48,22 @@ class McpLogger @Inject constructor() {
         remote: String?,
         level: String = "I",
     ) {
-        val entry = McpLogEntry(
-            seq = seqCounter++,
-            timestamp = System.currentTimeMillis(),
-            level = level,
-            message = "请求: $method",
-            method = method,
-            paramsJson = paramsJson,
-            remote = remote,
-        )
-        _entries.value = (_entries.value + entry).takeLast(MAX_ENTRIES)
+        synchronized(lock) {
+            val entry = McpLogEntry(
+                seq = seqCounter++,
+                timestamp = System.currentTimeMillis(),
+                level = level,
+                message = "请求: $method",
+                method = method,
+                paramsJson = paramsJson,
+                remote = remote,
+            )
+            _entries.value = (_entries.value + entry).takeLast(MAX_ENTRIES)
+        }
     }
 
     fun clear() {
-        _entries.value = emptyList()
+        synchronized(lock) { _entries.value = emptyList() }
     }
 
     companion object {

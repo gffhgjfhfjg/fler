@@ -4,15 +4,9 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.security.MessageDigest
 import javax.inject.Inject
@@ -191,18 +185,18 @@ class BackupManager @Inject constructor(
             val file = undoFilePath(filePath)
             if (!file.exists()) return ArrayDeque()
             val content = file.readText()
-            val arr = json.parseToJsonElement(content).jsonArray
+            // DTO 字段与旧版手写 JSON 完全一致，旧文件可直接解析（seq 缺失时用默认值）
+            val dtos = json.decodeFromString<List<PatchRecordDto>>(content)
             val stack = ArrayDeque<PatchRecord>()
-            for (element in arr) {
-                val obj = element.jsonObject
+            for (dto in dtos) {
                 stack.addLast(
                     PatchRecord(
-                        address = obj["address"]!!.jsonPrimitive.content.toLong(),
-                        oldBytes = hexToBytes(obj["oldBytes"]!!.jsonPrimitive.content),
-                        newBytes = hexToBytes(obj["newBytes"]!!.jsonPrimitive.content),
-                        soName = obj["soName"]!!.jsonPrimitive.content,
-                        timestamp = obj["timestamp"]!!.jsonPrimitive.content.toLong(),
-                        seq = obj["seq"]?.jsonPrimitive?.content?.toLong() ?: 0L
+                        address = dto.address.toLong(),
+                        oldBytes = hexToBytes(dto.oldBytes),
+                        newBytes = hexToBytes(dto.newBytes),
+                        soName = dto.soName,
+                        timestamp = dto.timestamp.toLong(),
+                        seq = dto.seq.toLong(),
                     )
                 )
             }
@@ -215,19 +209,17 @@ class BackupManager @Inject constructor(
 
     private fun saveToFile(filePath: String, stack: ArrayDeque<PatchRecord>) {
         try {
-            val arr = buildJsonArray {
-                for (r in stack) {
-                    add(buildJsonObject {
-                        put("address", JsonPrimitive(r.address.toString()))
-                        put("oldBytes", JsonPrimitive(bytesToHex(r.oldBytes)))
-                        put("newBytes", JsonPrimitive(bytesToHex(r.newBytes)))
-                        put("soName", JsonPrimitive(r.soName))
-                        put("timestamp", JsonPrimitive(r.timestamp.toString()))
-                        put("seq", JsonPrimitive(r.seq.toString()))
-                    })
-                }
+            val dtos = stack.map {
+                PatchRecordDto(
+                    address = it.address.toString(),
+                    oldBytes = bytesToHex(it.oldBytes),
+                    newBytes = bytesToHex(it.newBytes),
+                    soName = it.soName,
+                    timestamp = it.timestamp.toString(),
+                    seq = it.seq.toString(),
+                )
             }
-            undoFilePath(filePath).writeText(arr.toString())
+            undoFilePath(filePath).writeText(json.encodeToString(dtos))
         } catch (e: Exception) {
             Log.w(TAG, "保存撤销栈失败: $filePath", e)
         }
@@ -280,3 +272,14 @@ data class PatchRecord(
         return result
     }
 }
+
+/** 撤销栈 JSON 持久化 DTO（字段与旧版手写 JSON 格式一致，保证兼容）。 */
+@Serializable
+data class PatchRecordDto(
+    val address: String,
+    val oldBytes: String,
+    val newBytes: String,
+    val soName: String,
+    val timestamp: String,
+    val seq: String = "0",
+)

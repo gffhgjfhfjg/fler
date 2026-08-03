@@ -222,7 +222,7 @@ class SoEditorViewModel @Inject constructor(
             )
             addToRecent(filePath)
             // 恢复该文件持久化的补丁高亮（上次修改过才有红色）
-            restorePatchedOffsets()
+            refreshPatchedOffsets()
             // 给 UI 层一个帧渲染 "正在分析" 状态，再开始 xref 分析
             delay(50)
             // 加载 Blutter 分析的 Dart 方法标签（如果有该 SO 的分析记录）
@@ -486,35 +486,34 @@ class SoEditorViewModel @Inject constructor(
         val functions = _uiState.value.functions
         if (functions.isEmpty()) return emptyMap()
 
-        // 排序函数列表，用于二分查找最近的函数起始地址
+        // 按 vaddr 排序 + 二分定位，避免对每个地址线性扫描全部函数（函数数以万计时
+        // 原实现最坏 O(N) / 地址，xref 面板一次可能数百地址）。
         val sorted = functions.sortedBy { it.vaddr }
         val result = mutableMapOf<Long, String>()
         for (addr in addresses) {
             // 1) 精确命中 Dart 标签
             if (addr in dartLabels) { result[addr] = dartLabels[addr]!!; continue }
-            // 2) 查找包含 addr 的函数
-            var found: String? = null
-            for (f in sorted) {
-                if (f.vaddr <= addr && (f.size <= 0 || addr < f.vaddr + f.size)) {
-                    // 对于 size=0 的函数，继续检查是否还有更精确的匹配
-                    if (f.size > 0) { found = f.name; break }
-                    // size=0 的暂存，继续找更精确的
-                    if (found == null) found = f.name
-                } else if (f.vaddr > addr) {
-                    break
+            // 2) 二分定位最后一个 vaddr <= addr 的函数，从近到远找包含 addr 的函数。
+            //    函数区间互不重叠时，包含 addr 的只会是 vaddr 最大的那几个之一。
+            val idx = sorted.binarySearchBy(addr) { it.vaddr }
+            val hi = if (idx >= 0) idx else -idx - 2
+            if (hi >= 0) {
+                var fallback: String? = null   // size=0 的最近函数（退而求其次）
+                for (i in hi downTo 0) {
+                    val f = sorted[i]
+                    if (f.size > 0) {
+                        // 最近的 size>0 函数包含 addr：最精确的匹配
+                        if (addr < f.vaddr + f.size) { result[addr] = f.name }
+                        // 该函数在 addr 之前已结束，更早的函数更不可能包含 addr
+                        break
+                    }
+                    // size=0 的函数视为退而求其次的候选，继续向前找 size>0 的精确匹配
+                    if (fallback == null) fallback = f.name
                 }
-            }
-            if (found != null) {
-                result[addr] = found
-            } else {
-                // 3) 最接近的函数（addr 之前的最后一个函数）
-                val idx = sorted.binarySearchBy(addr) { it.vaddr }
-                val nearest = if (idx >= 0) sorted[idx]
-                else {
-                    val insertIdx = -idx - 1
-                    if (insertIdx > 0) sorted[insertIdx - 1] else null
-                }
-                if (nearest != null) result[addr] = nearest.name
+                if (addr in result) continue
+                if (fallback != null) { result[addr] = fallback; continue }
+                // 3) 无包含关系：取 addr 之前的最后一个函数作为近似归属
+                result[addr] = sorted[hi].name
             }
         }
         return result
@@ -663,15 +662,7 @@ class SoEditorViewModel @Inject constructor(
         }
     }
 
-    /** 从 BackupManager 恢复所有补丁偏移（返回后重新进入时红色高亮还在）。 */
-    private fun restorePatchedOffsets() {
-        val records = backupManager.getPatchRecords()
-        _patchedOffsets.value = records
-            .flatMap { r -> (0 until r.newBytes.size).map { r.address + it } }
-            .toSet()
-    }
-
-    /** 应用补丁后增量更新高亮。 */
+    /** 从 BackupManager 重建补丁偏移高亮（应用补丁 / 撤销 / 恢复时调用）。 */
     private fun refreshPatchedOffsets() {
         val records = backupManager.getPatchRecords()
         _patchedOffsets.value = records
@@ -693,20 +684,31 @@ class SoEditorViewModel @Inject constructor(
     // 撤销 / 导出
     // ==================================================================
 
-    fun undo(): com.ai.fler.core.service.PatchRecord? {
-        val record = backupManager.undo() ?: return null
-        refreshPatchedOffsets()
-        if (_currentTab.value == EditorTab.STRUCTURE) setTab(EditorTab.DISASSEMBLY)
-        viewModelScope.launch {
-            session.writeRawBytes(record.address, record.oldBytes)
-            loadHexData(_hexData.value.offset, _hexData.value.data.size.toLong())
-            loadDisassembly(
-                _disassemblyData.value.baseAddress,
-                _disassemblyData.value.loadedSize.takeIf { it > 0 } ?: DISASM_PAGE_SIZE,
-                highlightAfterLoad = record.address
-            )
+    /**
+     * 撤销上一次补丁（IO 异步，避免主线程读写撤销栈文件）。
+     *
+     * @param onResult 主线程回调，参数为被撤销的记录；无可撤销时为 null。
+     */
+    fun undo(onResult: (com.ai.fler.core.service.PatchRecord?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val record = backupManager.undo()
+            withContext(Dispatchers.Main) {
+                if (record != null) {
+                    refreshPatchedOffsets()
+                    if (_currentTab.value == EditorTab.STRUCTURE) setTab(EditorTab.DISASSEMBLY)
+                    viewModelScope.launch {
+                        session.writeRawBytes(record.address, record.oldBytes)
+                        loadHexData(_hexData.value.offset, _hexData.value.data.size.toLong())
+                        loadDisassembly(
+                            _disassemblyData.value.baseAddress,
+                            _disassemblyData.value.loadedSize.takeIf { it > 0 } ?: DISASM_PAGE_SIZE,
+                            highlightAfterLoad = record.address
+                        )
+                    }
+                }
+                onResult(record)
+            }
         }
-        return record
     }
 
     suspend fun exportPatchesToUri(uri: Uri): Boolean {
@@ -734,8 +736,12 @@ class SoEditorViewModel @Inject constructor(
         val list = _recentFiles.value.toMutableList()
         list.removeAll { it.path == path }
         list.add(0, RecentFile(path = path, name = file.name))
-        if (list.size > MAX_RECENT_FILES) list.dropLast(list.size - MAX_RECENT_FILES)
-        _recentFiles.value = list
+        // 注意：dropLast 是纯函数，必须取返回值，否则超过上限后列表无限增长
+        if (list.size > MAX_RECENT_FILES) {
+            _recentFiles.value = list.take(MAX_RECENT_FILES)
+        } else {
+            _recentFiles.value = list
+        }
     }
 
     /** 从「最近文件」列表中移除某一项（UI 删除按钮用）。 */

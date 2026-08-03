@@ -11,6 +11,7 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.MessageDigest
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -81,6 +82,7 @@ class McpHttpServer(
     }
 
     private fun handleConnection(socket: Socket) {
+        var sseMode = false
         try {
             val input = socket.getInputStream()
             val output = socket.getOutputStream()
@@ -93,8 +95,8 @@ class McpHttpServer(
             }
             logger.debug("$remote ${req.method} ${req.path}")
             when {
-                req.method == "GET" && req.path == "/sse" -> handleLegacySse(socket, output)
-                req.method == "GET" && req.path == "/mcp" -> handleSse(socket, output)
+                req.method == "GET" && req.path == "/sse" -> { sseMode = true; handleLegacySse(socket, output) }
+                req.method == "GET" && req.path == "/mcp" -> { sseMode = true; handleSse(socket, output) }
                 req.method == "POST" && req.path == "/message" -> handleMessage(req, remote, output)
                 req.method == "POST" && req.path == "/mcp" -> handleStreamable(req, remote, output)
                 else -> writeResponse(output, 404, "text/plain", "not found")
@@ -102,7 +104,8 @@ class McpHttpServer(
         } catch (_: Exception) {
             // 客户端断开/异常：忽略
         } finally {
-            try { socket.close() } catch (_: Exception) {}
+            // SSE 连接的生命周期由心跳线程管理（见 [startHeartbeat]），不能在这里关闭
+            if (!sseMode) try { socket.close() } catch (_: Exception) {}
         }
     }
 
@@ -113,24 +116,37 @@ class McpHttpServer(
         val session = sessions.create(output)
         sessions.writeEndpoint(session.id, "/message?sessionId=${session.id}")
         logger.info("SSE 会话建立: ${session.id.take(8)}（Claude Desktop legacy）")
-        while (socket.isConnected && !socket.isClosed && running.get()) {
-            try { Thread.sleep(HEARTBEAT_MS) } catch (e: InterruptedException) { break }
-            if (!sessions.writeHeartbeat(session.id)) break
-        }
-        sessions.remove(session.id)
-        logger.info("SSE 会话断开: ${session.id.take(8)}")
+        startHeartbeat(socket, session)
     }
 
     private fun handleSse(socket: Socket, output: OutputStream) {
         writeSseHeaders(output)
         val session = sessions.create(output)
         logger.info("SSE 会话建立: ${session.id.take(8)}（Streamable HTTP）")
-        while (socket.isConnected && !socket.isClosed && running.get()) {
-            try { Thread.sleep(HEARTBEAT_MS) } catch (e: InterruptedException) { break }
-            if (!sessions.writeHeartbeat(session.id)) break
-        }
-        sessions.remove(session.id)
-        logger.info("SSE 会话断开: ${session.id.take(8)}")
+        startHeartbeat(socket, session)
+    }
+
+    /**
+     * 心跳与断线检测放入专用线程，避免长期占住请求线程池的线程
+     * （SSE 连接可能保持数小时，8 线程池被 SSE 占满后普通请求将无线程可用）。
+     */
+    private fun startHeartbeat(socket: Socket, session: McpSessions.Session) {
+        val thread = Thread({
+            try {
+                while (!socket.isClosed && running.get()) {
+                    Thread.sleep(HEARTBEAT_MS)
+                    if (!sessions.writeHeartbeat(session.id)) break
+                }
+            } catch (_: InterruptedException) {
+                // 服务器停止时中断，正常退出
+            } finally {
+                sessions.remove(session.id)
+                logger.info("SSE 会话断开: ${session.id.take(8)}")
+                try { socket.close() } catch (_: Exception) {}
+            }
+        }, "mcp-sse-${session.id.take(8)}")
+        thread.isDaemon = true
+        thread.start()
     }
 
     private fun handleMessage(req: Request, remote: String, output: OutputStream) {
@@ -270,7 +286,11 @@ class McpHttpServer(
         val token = config.token.value
         if (token.isBlank()) return true
         val auth = req.headers["authorization"] ?: return false
-        return auth == "Bearer $token"
+        // 恒定时间比较，避免 Token 校验的时序侧信道
+        return MessageDigest.isEqual(
+            auth.toByteArray(Charsets.UTF_8),
+            "Bearer $token".toByteArray(Charsets.UTF_8)
+        )
     }
 
     private fun reason(status: Int): String = when (status) {

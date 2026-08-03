@@ -23,6 +23,9 @@ import javax.inject.Singleton
 @Singleton
 class SoEditorCache @Inject constructor() {
 
+    /** 缓存访问锁：UI 协程与 MCP 线程可能并发读写。 */
+    private val lock = Any()
+
     /** 单个 SO 的元数据快照（仅含纯数据，不含 RzCore* 指针）。 */
     data class SoMetadata(
         val sections: List<SectionInfo>,
@@ -39,38 +42,57 @@ class SoEditorCache @Inject constructor() {
         val dartFunctions: List<FunctionInfo>,           // 合并到 uiState.functions 的去重列表
     )
 
-    private val soMetadataCache = mutableMapOf<String, SoMetadata>()
+    private val soMetadataCache = object : LinkedHashMap<String, SoMetadata>(16, 0.75f, true) {
+        // 访问序（LRU）：插入/命中时移到末尾，超限移除最久未用
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, SoMetadata>?): Boolean =
+            size > MAX_CACHED_SOS
+    }
     private val injectedSoPaths = mutableSetOf<String>()
-    private val dartLabelsCache = mutableMapOf<String, DartLabels>()
+    private val dartLabelsCache = object : LinkedHashMap<String, DartLabels>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DartLabels>?): Boolean =
+            size > MAX_CACHED_SOS
+    }
 
     // ------------------------------------------------------------------
     // SO 元数据
     // ------------------------------------------------------------------
 
-    fun getMetadata(path: String): SoMetadata? = soMetadataCache[path]
+    fun getMetadata(path: String): SoMetadata? = synchronized(lock) { soMetadataCache[path] }
 
     fun putMetadata(path: String, meta: SoMetadata) {
-        soMetadataCache[path] = meta
+        synchronized(lock) { soMetadataCache[path] = meta }
     }
 
     // ------------------------------------------------------------------
     // Dart 方法标签
     // ------------------------------------------------------------------
 
-    fun getDartLabels(path: String): DartLabels? = dartLabelsCache[path]
+    fun getDartLabels(path: String): DartLabels? = synchronized(lock) { dartLabelsCache[path] }
 
     fun putDartLabels(path: String, labels: DartLabels) {
-        dartLabelsCache[path] = labels
+        synchronized(lock) { dartLabelsCache[path] = labels }
     }
 
     // ------------------------------------------------------------------
     // Rizin 注入状态
     // ------------------------------------------------------------------
 
-    fun isInjected(path: String): Boolean = path in injectedSoPaths
+    fun isInjected(path: String): Boolean = synchronized(lock) { path in injectedSoPaths }
 
     fun markInjected(path: String) {
-        injectedSoPaths.add(path)
+        synchronized(lock) { injectedSoPaths.add(path) }
+    }
+
+    /**
+     * 使某个 SO 的缓存全部失效（会话被 LRU 淘汰后调用：RzCore 已关闭，
+     * 注入标记/元数据不再可信，需在下次打开时重新查询与注入）。
+     */
+    fun invalidate(path: String) {
+        synchronized(lock) {
+            soMetadataCache.remove(path)
+            injectedSoPaths.remove(path)
+            dartLabelsCache.remove(path)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -78,8 +100,15 @@ class SoEditorCache @Inject constructor() {
     // ------------------------------------------------------------------
 
     fun clearAll() {
-        soMetadataCache.clear()
-        injectedSoPaths.clear()
-        dartLabelsCache.clear()
+        synchronized(lock) {
+            soMetadataCache.clear()
+            injectedSoPaths.clear()
+            dartLabelsCache.clear()
+        }
+    }
+
+    companion object {
+        /** 元数据/标签缓存上限（按 SO 数量计），超出按 LRU 淘汰。 */
+        private const val MAX_CACHED_SOS = 8
     }
 }

@@ -3,9 +3,6 @@ package com.ai.fler.core.mcp
 import com.ai.fler.core.analysis.AnalysisCapability
 import com.ai.fler.core.analysis.AnalysisSession
 import com.ai.fler.core.analysis.EngineRegistry
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -56,7 +53,7 @@ class EngineMcpToolRegistry @Inject constructor(
         private const val TOOL_PREFIX = "engine_"
     }
 
-    fun buildTools(scope: CoroutineScope): Map<String, McpToolHandlers.McpTool> {
+    fun buildTools(): Map<String, McpToolHandlers.McpTool> {
         val list = mutableListOf<McpToolHandlers.McpTool>()
 
         // 通用：引擎清单
@@ -136,7 +133,9 @@ class EngineMcpToolRegistry @Inject constructor(
             description = "关闭指定 so 的分析会话",
             inputSchema = objProps()
         ) { _ ->
-            scope.launch(Dispatchers.IO) { session.closeAll() }
+            // 同步等待关闭完成：工具 handler 是 suspend，fire-and-forget 会让
+            // 客户端立刻收到成功但引擎仍在关闭，导致下一个工具调用撞上半关闭状态
+            session.closeAll()
             buildJsonObject { put("ok", true) }
         }
 

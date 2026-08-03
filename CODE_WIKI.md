@@ -2,7 +2,7 @@
 
 > 项目源码：`c:\Users\Len\AndroidStudioProjects\fler`
 > 包名：`com.ai.fler` | 最小 SDK：26 | 目标 SDK：36 | 编译 SDK：36
-> 构建系统：Gradle KTS + KSP | Kotlin 2.3.21 | Hilt 2.60.1 | Room 2.7.1
+> 构建系统：Gradle KTS + KSP | Kotlin 2.0.21 | Hilt 2.60.1 | Room 2.7.1
 
 ---
 
@@ -702,7 +702,7 @@ class EngineMcpToolRegistry @Inject constructor(
 data class McpConfig(
     val enabled: Boolean = false,
     val host: String = "127.0.0.1",
-    val port: Int = 8080,
+    val port: Int = 8765,
     val token: String = "",
     val autoStart: Boolean = false,
 )
@@ -996,7 +996,7 @@ FlerApplication
 | JDK | 21 |
 | NDK | r27 (27.0.12077973) |
 | Gradle | 9.5+ |
-| Kotlin | 2.3.21 |
+| Kotlin | 2.0.21 |
 | Android SDK | 36 |
 
 ### 构建步骤
