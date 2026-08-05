@@ -90,6 +90,13 @@ class ProjectViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 将分析转入后台执行：关闭对话框，分析继续在后台运行。
+     */
+    fun dismissToBackground() {
+        _analysisProgress.value = _analysisProgress.value.copy(dismissedToBackground = true)
+    }
+
     // ========== 初始化 ==========
     init {
         loadProjects()
@@ -195,6 +202,8 @@ class ProjectViewModel @Inject constructor(
      * @param projectId 项目 ID
      */
     fun startAnalysis(projectId: Long) {
+        // 默认后台分析，不弹对话框
+        _analysisProgress.value = _analysisProgress.value.copy(dismissedToBackground = true)
         viewModelScope.launch {
             val project = projectDao.getById(projectId)
             if (project == null) {
@@ -371,7 +380,8 @@ class ProjectViewModel @Inject constructor(
                 try {
                     val libappPath = extractResult.libapp?.path
                     if (libappPath != null) {
-                        val methods = dartMethodDao.getByAnalysisIdList(analysisId)
+                        // 轻量投影（不含 src_code 大字段）：55781 条全量载入会占数百 MB 内存
+                        val methods = dartMethodDao.getByAnalysisIdLight(analysisId)
                         addressTranslator.importMethods(projectId, libappPath, methods)
                     }
                 } catch (e: Exception) {

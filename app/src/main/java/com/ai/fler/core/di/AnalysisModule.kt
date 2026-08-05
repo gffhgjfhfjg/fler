@@ -16,8 +16,10 @@ import com.ai.fler.core.service.EngineLoader
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+import android.content.Context
 
 /**
  * 分析 / 仿真引擎的 DI 注册模块。
@@ -35,12 +37,13 @@ object AnalysisModule {
     @Provides
     @Singleton
     fun provideEngineRegistry(
+        @ApplicationContext appContext: Context,
         keystoneAssembler: KeystoneAssembler
     ): EngineRegistry {
         val reg = EngineRegistry()
 
         // 分析引擎：按优先级
-        reg.registerAnalysis(RizinEngine(), AnalysisEnginePriority.RIZIN)
+        reg.registerAnalysis(RizinEngine(appContext.cacheDir.absolutePath), AnalysisEnginePriority.RIZIN)
         reg.registerAnalysis(
             SelfAnalysisEngine(keystoneAssembler),
             AnalysisEnginePriority.SELF_ANALYSIS

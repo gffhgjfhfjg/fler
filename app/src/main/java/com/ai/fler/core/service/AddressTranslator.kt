@@ -3,8 +3,8 @@ package com.ai.fler.core.service
 import android.util.Log
 import com.ai.fler.core.jni.ElfParserBindings
 import com.ai.fler.data.dao.AddressMappingDao
+import com.ai.fler.data.dao.MethodLight
 import com.ai.fler.data.entity.AddressMapping
-import com.ai.fler.data.entity.DartMethod
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -28,18 +28,18 @@ class AddressTranslator @Inject constructor(
     /**
      * 从分析结果的方法表构建地址映射。
      *
-     * DartMethod.functionOffset 是方法的 ELF 虚拟地址，借助 ELF 节头
+     * MethodLight.functionOffset 是方法的 ELF 虚拟地址，借助 ELF 节头
      * （节虚拟地址 ↔ 文件偏移）换算成文件偏移，写入 address_mappings，
      * 供「SO 中定位」跳转使用。
      *
      * @param projectId 项目 ID
      * @param libappSoPath libapp.so 本地路径
-     * @param methods 该次分析的方法列表
+     * @param methods 该次分析的方法列表（轻量投影，不含 src_code 大字段）
      */
     suspend fun importMethods(
         projectId: Long,
         libappSoPath: String,
-        methods: List<DartMethod>
+        methods: List<MethodLight>
     ) {
         withContext(Dispatchers.IO) {
             try {
@@ -82,7 +82,8 @@ class AddressTranslator @Inject constructor(
 
                 if (mappings.isNotEmpty()) {
                     addressMappingDao.deleteByProjectId(projectId)
-                    addressMappingDao.insertAll(mappings)
+                    // 单事务分批插入：数万条无事务逐条 INSERT 需数分钟，事务内执行仅秒级
+                    addressMappingDao.insertAllInTransaction(mappings)
                     Log.i(TAG, "导入地址映射 ${mappings.size} 条 (projectId=$projectId)")
                 }
             } catch (e: Exception) {

@@ -19,6 +19,7 @@
 #include <android/log.h>
 #include <rizin/rz_core.h>
 #include <rizin/rz_io.h>
+#include <rizin/rz_project.h>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -249,6 +250,59 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeWriteBytes(
         "writeBytes: fileOffset=0x%llx size=%d written=%d readbackMatched=%d",
         static_cast<unsigned long long>(jOffset),
         static_cast<int>(size), n, readbackMatched ? 1 : 0);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * 保存 Rizin Project 到文件。
+ *
+ * 将当前分析状态（函数、符号、xref、flag 等）持久化到 .rzdb 文件，
+ * 下次打开同一 SO 文件时可直接加载，跳过 aaa 全量分析。
+ *
+ * @param path 项目文件绝对路径
+ * @return true 成功
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ai_fler_core_jni_RizinBindings_nativeProjectSave(
+    JNIEnv* env, jobject /*thiz*/, jlong handle, jstring jPath) {
+
+    RzCore* core = CORE(handle);
+    if (!core) return JNI_FALSE;
+
+    const char* path = env->GetStringUTFChars(jPath, nullptr);
+    if (!path) return JNI_FALSE;
+
+    bool ok = rz_project_save_file(core, path, true);
+    env->ReleaseStringUTFChars(jPath, path);
+
+    __android_log_print(ANDROID_LOG_INFO, TAG,
+        "projectSave: path=%s ok=%d", path, ok ? 1 : 0);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * 加载 Rizin Project 文件。
+ *
+ * 从 .rzdb 文件恢复分析状态，跳过 aaa 全量分析。
+ *
+ * @param path 项目文件绝对路径
+ * @return true 成功
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_ai_fler_core_jni_RizinBindings_nativeProjectLoad(
+    JNIEnv* env, jobject /*thiz*/, jlong handle, jstring jPath) {
+
+    RzCore* core = CORE(handle);
+    if (!core) return JNI_FALSE;
+
+    const char* path = env->GetStringUTFChars(jPath, nullptr);
+    if (!path) return JNI_FALSE;
+
+    bool ok = rz_project_load_file(core, path, false, nullptr);
+    env->ReleaseStringUTFChars(jPath, path);
+
+    __android_log_print(ANDROID_LOG_INFO, TAG,
+        "projectLoad: path=%s ok=%d", path, ok ? 1 : 0);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 

@@ -1,12 +1,5 @@
 package com.ai.fler.features.project
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,7 +31,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -52,6 +44,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -105,6 +98,27 @@ fun ProjectDetailScreen(
         }
     }
 
+    // 分析完成后自动重置进度状态，并弹出 Snackbar 通知
+    // 先调 dismissAnalysisDialog 再 delay：避免用户在 delay 期间离开页面，
+    // 协程取消导致 dismissAnalysisDialog 永远不执行，progress.stage 卡在 Completed 重复弹窗。
+    // 用 snapshotFlow 而非 LaunchedEffect(progress.stage)：dismissAnalysisDialog 会改变 stage
+    // 触发 LaunchedEffect key 变化 → 旧协程被取消（showSnackbar 可能被中断）→ 新协程启动不满足条件，
+    // 导致弹窗时序错乱。snapshotFlow 在同一协程内收集变化，不受 key 变化影响。
+    LaunchedEffect(Unit) {
+        snapshotFlow { progress.stage }
+            .collect { stage ->
+                if (stage == AnalysisStage.Completed) {
+                    projectViewModel.dismissAnalysisDialog()
+                    snackbarHostState.showSnackbar("分析完成")
+                    kotlinx.coroutines.delay(2000)
+                } else if (stage == AnalysisStage.Failed) {
+                    projectViewModel.dismissAnalysisDialog()
+                    snackbarHostState.showSnackbar("分析失败: ${progress.error ?: "未知错误"}")
+                    kotlinx.coroutines.delay(3000)
+                }
+            }
+        }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -157,7 +171,31 @@ fun ProjectDetailScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("运行分析")
+                            if (progress.stage in listOf(
+                                    AnalysisStage.Extracting, AnalysisStage.DetectingVersion,
+                                    AnalysisStage.LoadingEngine, AnalysisStage.Analyzing,
+                                    AnalysisStage.SavingResults
+                                )
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("分析中...")
+                            } else {
+                                Text("运行分析")
+                            }
+                        }
+                        // 内嵌分析进度条
+                        if (progress.stage in listOf(
+                                AnalysisStage.Extracting, AnalysisStage.DetectingVersion,
+                                AnalysisStage.LoadingEngine, AnalysisStage.Analyzing,
+                                AnalysisStage.SavingResults
+                            )
+                        ) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            com.ai.fler.features.project.InlineAnalysisProgress(progress = progress)
                         }
                     }
                 }
@@ -217,13 +255,7 @@ fun ProjectDetailScreen(
                 }
             }
 
-            // 分析进度对话框
-            if (progress.stage != AnalysisStage.Idle && progress.stage != AnalysisStage.Completed) {
-                AnalysisProgressDialog(
-                    progress = progress,
-                    onDismiss = { projectViewModel.dismissAnalysisDialog() }
-                )
-            }
+            // 分析进度已内嵌到按钮下方，不再需要对话框和浮动指示器
         }
     }
 }
@@ -482,85 +514,6 @@ private fun StatusText(resultCode: Int) {
         text = text,
         style = MaterialTheme.typography.labelSmall,
         color = color
-    )
-}
-
-@Composable
-private fun AnalysisProgressDialog(
-    progress: com.ai.fler.feature.project.AnalysisProgress,
-    onDismiss: () -> Unit
-) {
-    androidx.compose.material3.AlertDialog(
-        onDismissRequest = {
-            if (progress.stage == AnalysisStage.Failed) onDismiss()
-        },
-        title = {
-            // 阶段切换：标题淡入淡出 + 轻微位移；保存结果阶段标题旁加旋转 spinner
-            AnimatedContent(
-                targetState = progress.stage,
-                transitionSpec = {
-                    (fadeIn() + slideInVertically(initialOffsetY = { it / 4 })) togetherWith
-                        (fadeOut() + slideOutVertically(targetOffsetY = { -it / 4 }))
-                },
-                label = "stage-title"
-            ) { stage ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = when (stage) {
-                            AnalysisStage.Extracting -> "正在提取文件"
-                            AnalysisStage.DetectingVersion -> "正在检测版本"
-                            AnalysisStage.LoadingEngine -> "正在加载引擎"
-                            AnalysisStage.Analyzing -> "正在分析"
-                            AnalysisStage.SavingResults -> "正在保存结果"
-                            AnalysisStage.Failed -> "分析失败"
-                            else -> "处理中"
-                        },
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    if (stage == AnalysisStage.SavingResults) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp
-                        )
-                    }
-                }
-            }
-        },
-        text = {
-            Column {
-                // 进度条平滑过渡（阶段间不再跳变）
-                val animatedProgress by animateFloatAsState(targetValue = progress.progress)
-                LinearProgressIndicator(
-                    progress = { animatedProgress },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                AnimatedContent(
-                    targetState = progress.message,
-                    transitionSpec = { fadeIn() togetherWith fadeOut() },
-                    label = "stage-msg"
-                ) { msg ->
-                    Text(
-                        text = msg,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                if (progress.error != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = progress.error,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            if (progress.stage == AnalysisStage.Failed) {
-                TextButton(onClick = onDismiss) { Text("关闭") }
-            }
-        }
     )
 }
 

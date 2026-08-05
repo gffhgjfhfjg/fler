@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -29,13 +30,16 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -74,7 +78,9 @@ fun PpBrowserScreen(
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val ppEntries by viewModel.ppEntries.collectAsStateWithLifecycle()
+    val entries by viewModel.accumulatedEntries.collectAsStateWithLifecycle()
+    val hasMore by viewModel.hasMore.collectAsStateWithLifecycle()
+    val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val filterType by viewModel.filterType.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
@@ -121,7 +127,10 @@ fun PpBrowserScreen(
                 }
                 else -> {
                     PpBrowserContent(
-                        entries = ppEntries,
+                        entries = entries,
+                        hasMore = hasMore,
+                        isLoadingMore = isLoadingMore,
+                        onLoadMore = { viewModel.loadMore() },
                         filterType = filterType,
                         onFilterChange = { viewModel.setFilter(it) },
                         searchQuery = query,
@@ -137,6 +146,9 @@ fun PpBrowserScreen(
 @Composable
 private fun PpBrowserContent(
     entries: List<PpEntry>,
+    hasMore: Boolean,
+    isLoadingMore: Boolean,
+    onLoadMore: () -> Unit,
     filterType: FilterType,
     onFilterChange: (FilterType) -> Unit,
     searchQuery: String,
@@ -191,18 +203,39 @@ private fun PpBrowserContent(
             Text("叶子 ${filtered.count { it.isLeaf }}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF4CAF50))
         }
 
-        if (filtered.isEmpty()) {
+        if (filtered.isEmpty() && !isLoadingMore) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("无匹配 PP 条目", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
+            val listState = rememberLazyListState()
+            // 滚动触底检测：剩余 5 项时触发加载下一页
+            val shouldLoadMore by remember {
+                derivedStateOf {
+                    val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: Int.MAX_VALUE
+                    lastVisible >= entries.size - 5 && hasMore && !isLoadingMore
+                }
+            }
+            LaunchedEffect(shouldLoadMore) {
+                if (shouldLoadMore) onLoadMore()
+            }
+
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 items(filtered, key = { it.id }) { entry ->
                     PpEntryRow(entry, onLocateInSo)
+                }
+                // 底部加载指示器
+                if (isLoadingMore) {
+                    item(key = "loading_more") {
+                        Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth(0.5f))
+                        }
+                    }
                 }
             }
         }

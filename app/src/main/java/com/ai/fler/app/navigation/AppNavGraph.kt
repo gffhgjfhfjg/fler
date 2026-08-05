@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -45,7 +44,6 @@ import com.ai.fler.features.project.ProjectScreen
 import com.ai.fler.features.settings.AboutScreen
 import com.ai.fler.features.settings.McpSettingsScreen
 import com.ai.fler.features.settings.SettingsScreen
-import com.ai.fler.features.so_editor.SoEditorDetailScreen
 import com.ai.fler.features.so_editor.SoEditorScreen
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
@@ -56,7 +54,6 @@ import kotlinx.coroutines.launch
 /** Tab -> 图标。 */
 private val tabIcons: Map<Screen, ImageVector> = mapOf(
     Screen.Projects to Icons.Outlined.Folder,
-    Screen.SoEditor to Icons.Outlined.Memory,
     Screen.McpLog to Icons.Outlined.Article,
     Screen.Settings to Icons.Outlined.Settings,
 )
@@ -64,7 +61,6 @@ private val tabIcons: Map<Screen, ImageVector> = mapOf(
 /** Tab -> 字符串资源 id。 */
 private val tabLabels: Map<Screen, Int> = mapOf(
     Screen.Projects to R.string.tab_projects,
-    Screen.SoEditor to R.string.tab_so,
     Screen.McpLog to R.string.tab_mcp_log,
     Screen.Settings to R.string.tab_settings,
 )
@@ -72,7 +68,7 @@ private val tabLabels: Map<Screen, Int> = mapOf(
 /**
  * 应用根导航图。
  *
- * 4 个顶层 Tab + 子页面路由（项目详情 / PP 浏览 / ASM 方法列表 / ASM 内容 / SO 编辑器）。
+ * 3 个顶层 Tab + 子页面路由（项目详情 / PP 浏览 / ASM 方法列表 / ASM 内容 / SO 编辑器）。
  * 子页面隐藏底部导航栏（不在 NavHost 之外渲染，直接覆盖全屏）。
  */
 @Composable
@@ -115,43 +111,53 @@ fun AppNavGraph() {
             val methodLength = method.functionSize ?: 0L
             if (fileOffset != null && fileOffset > 0) {
                 navController.navigate(
-                    Screen.SoEditorDetail.createRoute(libapp, fileOffset, methodLength)
+                    Screen.SoEditor.createRoute(libapp, fileOffset, methodLength, immersive = true)
                 )
             } else {
                 // 极端兜底：仍拿不到文件偏移，用虚拟地址降级（可能越界但保留入口）
                 navController.navigate(
-                    Screen.SoEditorDetail.createRoute(libapp, method.functionOffset!!, methodLength)
+                    Screen.SoEditor.createRoute(libapp, method.functionOffset!!, methodLength, immersive = true)
                 )
             }
         }
     }
 
+    // 底部导航栏：仅顶层 Tab 显示；SO 编辑器是二级页（从项目/PP/ASM 进入），始终隐藏底栏
+    val isTopLevelTab = currentDestination?.hierarchy?.any {
+        it.route == Screen.Projects.route ||
+            it.route == Screen.McpLog.route ||
+            it.route == Screen.Settings.route
+    } == true
+    val showBottomBar = isTopLevelTab
+
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            NavigationBar {
-                TopLevelTabs.forEach { tab ->
-                    val isSelected = currentDestination?.hierarchy?.any { it.route == tab.route } == true
-                    NavigationBarItem(
-                        selected = isSelected,
-                        onClick = {
-                            navController.navigate(tab.route) {
-                                // 切换 Tab 的标准模式：弹出至起点、避免栈累积、恢复状态
-                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
-                        },
-                        icon = {
-                            val icon = tabIcons[tab]
-                            if (icon != null) {
-                                Icon(imageVector = icon, contentDescription = null)
-                            }
-                        },
-                        // 默认只显示图标；选中该页时才显示文字（M3 内置 label 淡入动画）
-                        alwaysShowLabel = false,
-                        label = { Text(stringResource(tabLabels[tab]!!)) },
-                    )
+            if (showBottomBar) {
+                NavigationBar {
+                    TopLevelTabs.forEach { tab ->
+                        val isSelected = currentDestination?.hierarchy?.any { it.route == tab.route } == true
+                        NavigationBarItem(
+                            selected = isSelected,
+                            onClick = {
+                                navController.navigate(tab.route) {
+                                    // 切换 Tab 的标准模式：弹出至起点、避免栈累积、恢复状态
+                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = {
+                                val icon = tabIcons[tab]
+                                if (icon != null) {
+                                    Icon(imageVector = icon, contentDescription = null)
+                                }
+                            },
+                            // 默认只显示图标；选中该页时才显示文字（M3 内置 label 淡入动画）
+                            alwaysShowLabel = false,
+                            label = { Text(stringResource(tabLabels[tab]!!)) },
+                        )
+                    }
                 }
             }
         }
@@ -169,7 +175,39 @@ fun AppNavGraph() {
                     }
                 )
             }
-            composable(Screen.SoEditor.route) { SoEditorScreen() }
+            composable(
+                route = Screen.SoEditor.route,
+                arguments = listOf(
+                    navArgument("filePath") { type = NavType.StringType; defaultValue = "" },
+                    navArgument("offset") { type = NavType.LongType; defaultValue = 0L },
+                    navArgument("length") { type = NavType.LongType; defaultValue = 0L },
+                    navArgument("immersive") { type = NavType.BoolType; defaultValue = false }
+                )
+            ) { entry ->
+                val encodedPath = entry.arguments?.getString("filePath") ?: ""
+                val filePath = if (encodedPath.isNotEmpty()) {
+                    try {
+                        String(
+                            android.util.Base64.decode(
+                                encodedPath,
+                                android.util.Base64.URL_SAFE
+                            ),
+                            Charsets.UTF_8
+                        )
+                    } catch (_: Exception) {
+                        encodedPath
+                    }
+                } else {
+                    ""
+                }
+                SoEditorScreen(
+                    filePath = filePath,
+                    initialOffset = entry.arguments?.getLong("offset") ?: 0L,
+                    methodLength = entry.arguments?.getLong("length") ?: 0L,
+                    immersive = entry.arguments?.getBoolean("immersive") ?: false,
+                    onBack = { navController.popBackStack() },
+                )
+            }
             composable(Screen.Settings.route) {
                 SettingsScreen(
                     onOpenMcpSettings = { navController.navigate(Screen.McpSettings.route) },
@@ -211,7 +249,7 @@ fun AppNavGraph() {
                         navController.navigate(Screen.AsmList.createRoute(analysisId))
                     },
                     onOpenSo = { filePath, offset ->
-                        navController.navigate(Screen.SoEditorDetail.createRoute(filePath, offset))
+                        navController.navigate(Screen.SoEditor.createRoute(filePath, offset, immersive = true))
                     }
                 )
             }
@@ -231,7 +269,7 @@ fun AppNavGraph() {
                             if (path != null) {
                                 val offset = if (fileOffset > 0) fileOffset else vmOffset
                                 navController.navigate(
-                                    Screen.SoEditorDetail.createRoute(path, offset)
+                                    Screen.SoEditor.createRoute(path, offset, immersive = true)
                                 )
                             }
                         }
@@ -284,46 +322,8 @@ fun AppNavGraph() {
                 )
             }
 
-            // ========== SO 编辑器详情 ==========
-            composable(
-                route = Screen.SoEditorDetail.route,
-                arguments = listOf(
-                    navArgument("filePath") { type = NavType.StringType },
-                    navArgument("offset") {
-                        type = NavType.LongType
-                        defaultValue = 0L
-                    },
-                    navArgument("length") {
-                        type = NavType.LongType
-                        defaultValue = 0L
-                    }
-                )
-            ) { backStackEntry ->
-                val encodedPath = backStackEntry.arguments?.getString("filePath") ?: ""
-                val offset = backStackEntry.arguments?.getLong("offset") ?: 0L
-                val methodLength = backStackEntry.arguments?.getLong("length") ?: 0L
-                val filePath = if (encodedPath.isNotEmpty()) {
-                    try {
-                        String(
-                            android.util.Base64.decode(
-                                encodedPath,
-                                android.util.Base64.URL_SAFE
-                            ),
-                            Charsets.UTF_8
-                        )
-                    } catch (_: Exception) {
-                        encodedPath
-                    }
-                } else {
-                    ""
-                }
-                SoEditorDetailScreen(
-                    filePath = filePath,
-                    initialOffset = offset,
-                    methodLength = methodLength,
-                    onBack = { navController.popBackStack() }
-                )
-            }
+            // ========== SO 编辑器详情（已并入 SoEditor Tab：上下文进入时携带
+            // filePath/offset/length/immersive 参数，页面自动打开定位）==========
         }
     }
 }

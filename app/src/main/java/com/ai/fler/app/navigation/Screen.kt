@@ -6,15 +6,41 @@ package com.ai.fler.app.navigation
  * 顶层 3 个 Tab 为 Bottom Navigation 的 destination；
  * 后续 P3-P5 的详情页通过同名 route 的子路径挂在 NavGraph 上。
  *
- * 注意：「产物」Tab 已移除——其内容（分析记录列表 + PP/ASM 入口）与
- * ProjectDetailScreen 高度重复，因此产物浏览统一从项目详情页进入。
+ * 注意：
+ * 1.「产物」Tab 已移除——其内容（分析记录列表 + PP/ASM 入口）与
+ *    ProjectDetailScreen 高度重复，因此产物浏览统一从项目详情页进入。
+ * 2.「SO 编辑器」Tab 已移除——SO 编辑统一从项目详情页的 SO 列表进入（immersive=true），
+ *    导航栏不再提供无参数的独立入口。
  */
 sealed class Screen(val route: String) {
     /** 项目管理 Tab（P3）。 */
     data object Projects : Screen("projects")
 
-    /** SO 编辑器 Tab（P5）。 */
-    data object SoEditor : Screen("so_editor")
+    /** SO 编辑器（二级页，从项目详情/PP/ASM 上下文进入，immersive=true 时隐藏底部导航栏）。 */
+    data object SoEditor : Screen("so_editor?filePath={filePath}&offset={offset}&length={length}&immersive={immersive}") {
+        /**
+         * 路径用 URL-safe base64 编码（不含 / + %），避免 Navigation 对路径参数
+         * 自动解码导致路由匹配失败/参数损坏。
+         *
+         * @param offset 定位偏移（文件偏移坐标）
+         * @param length 方法字节长度；>0 时 SO 编辑器只展示该方法范围（来自 ASM 跳转）
+         * @param immersive true=上下文进入（项目/PP/ASM），隐藏底部导航栏并显示返回键
+         */
+        fun createRoute(
+            filePath: String = "",
+            offset: Long = 0L,
+            length: Long = 0L,
+            immersive: Boolean = false,
+        ): String {
+            // 纯 Tab 入口：不带 query，全部走路由默认值
+            if (filePath.isBlank()) return "so_editor"
+            val encoded = android.util.Base64.encodeToString(
+                filePath.toByteArray(Charsets.UTF_8),
+                android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP
+            )
+            return "so_editor?filePath=$encoded&offset=$offset&length=$length&immersive=$immersive"
+        }
+    }
 
     /** 设置 Tab。 */
     data object Settings : Screen("settings")
@@ -27,23 +53,6 @@ sealed class Screen(val route: String) {
 
     /** 关于页（开源项目与第三方库说明）。 */
     data object About : Screen("about")
-
-    /** SO 编辑器详情页（带文件路径、可选偏移和方法长度）。 */
-    data object SoEditorDetail : Screen("so_editor/{filePath}?offset={offset}&length={length}") {
-        /**
-         * 路径用 URL-safe base64 编码（不含 / + %），避免 Navigation 路径参数
-         * 对 %2F 的自动解码导致路由匹配失败/参数损坏。
-         *
-         * @param length 方法字节长度；>0 时 SO 编辑器只展示该方法范围（来自 ASM 跳转）
-         */
-        fun createRoute(filePath: String, offset: Long = 0L, length: Long = 0L): String {
-            val encoded = android.util.Base64.encodeToString(
-                filePath.toByteArray(Charsets.UTF_8),
-                android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP
-            )
-            return "so_editor/$encoded?offset=$offset&length=$length"
-        }
-    }
 
     /** 项目详情页（项目信息 + 分析记录 + SO 文件）。 */
     data object ProjectDetail : Screen("project_detail/{projectId}") {
@@ -69,7 +78,6 @@ sealed class Screen(val route: String) {
 /** 顶层 Tab 列表（顺序决定显示顺序）。 */
 val TopLevelTabs: List<Screen> = listOf(
     Screen.Projects,
-    Screen.SoEditor,
     Screen.McpLog,
     Screen.Settings,
 )

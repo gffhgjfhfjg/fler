@@ -90,6 +90,31 @@ object RizinBindings {
     fun paddrToVaddr(handle: Long, paddr: Long): Long =
         nativePaddrToVaddr(handle, paddr)
 
+    /**
+     * 保存 Rizin Project 到文件。
+     *
+     * 将当前分析状态（函数、符号、xref、flag 等）持久化到 .rzdb 文件，
+     * 下次打开同一 SO 文件时可直接加载，跳过 aaa 全量分析。
+     *
+     * @param handle RzCore* 指针
+     * @param path 项目文件绝对路径
+     * @return true 成功
+     */
+    fun projectSave(handle: Long, path: String): Boolean =
+        nativeProjectSave(handle, path)
+
+    /**
+     * 加载 Rizin Project 文件。
+     *
+     * 从 .rzdb 文件恢复分析状态，跳过 aaa 全量分析。
+     *
+     * @param handle RzCore* 指针
+     * @param path 项目文件绝对路径
+     * @return true 成功
+     */
+    fun projectLoad(handle: Long, path: String): Boolean =
+        nativeProjectLoad(handle, path)
+
     // ===== JNI native 方法 =====
 
     @JvmStatic private external fun nativeOpen(path: String): Long
@@ -99,4 +124,6 @@ object RizinBindings {
     @JvmStatic private external fun nativeReadBytes(handle: Long, offset: Long, size: Int): ByteArray?
     @JvmStatic private external fun nativeWriteBytes(handle: Long, offset: Long, data: ByteArray): Boolean
     @JvmStatic private external fun nativePaddrToVaddr(handle: Long, paddr: Long): Long
+    @JvmStatic private external fun nativeProjectSave(handle: Long, path: String): Boolean
+    @JvmStatic private external fun nativeProjectLoad(handle: Long, path: String): Boolean
 }

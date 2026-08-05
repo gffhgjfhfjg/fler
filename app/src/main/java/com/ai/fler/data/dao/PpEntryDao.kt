@@ -39,6 +39,20 @@ interface PpEntryDao {
     )
     suspend fun getStringsByAnalysisIdPaged(analysisId: Long, limit: Int, offset: Int): List<PpEntry>
 
+    /** Keyset 分页：全部 PP 条目（按 vm_offset 排序）。 */
+    @Query(
+        "SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND vm_offset > :lastVmOffset " +
+            "ORDER BY vm_offset LIMIT :pageSize"
+    )
+    suspend fun getPpPage(analysisId: Long, lastVmOffset: Long = -1, pageSize: Int = 200): List<PpEntry>
+
+    /** Keyset 分页：String 类型 PP 条目。 */
+    @Query(
+        "SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND type = 'String' AND vm_offset > :lastVmOffset " +
+            "ORDER BY vm_offset LIMIT :pageSize"
+    )
+    suspend fun getPpStringPage(analysisId: Long, lastVmOffset: Long = -1, pageSize: Int = 200): List<PpEntry>
+
     @Query("SELECT COUNT(*) FROM pp_entries WHERE analysis_id = :analysisId AND type = 'String'")
     suspend fun countStringsByAnalysisId(analysisId: Long): Int
 
@@ -50,6 +64,9 @@ interface PpEntryDao {
 
     @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId ORDER BY caller_count DESC LIMIT :limit")
     fun getTopCallersByAnalysisId(analysisId: Long, limit: Int = 50): Flow<List<PpEntry>>
+
+    @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId ORDER BY caller_count DESC LIMIT :limit")
+    suspend fun getTopCallersByAnalysisIdList(analysisId: Long, limit: Int = 50): List<PpEntry>
 
     @Query("SELECT COUNT(*) FROM pp_entries WHERE analysis_id = :analysisId")
     suspend fun countByAnalysisId(analysisId: Long): Int

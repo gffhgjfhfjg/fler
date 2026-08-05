@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -26,6 +27,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -34,6 +36,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,7 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.ai.fler.data.dao.MethodWithClass
+import com.ai.fler.data.dao.MethodLight
 import com.ai.fler.feature.output.AsmListViewModel
 import com.ai.fler.ui.components.ShimmerBox
 import kotlinx.coroutines.launch
@@ -73,9 +77,9 @@ fun AsmListScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
-    val methods = remember(uiState.methods, searchQuery) {
-        viewModel.getFilteredMethods()
-    }
+    val methods by viewModel.accumulatedMethods.collectAsStateWithLifecycle()
+    val hasMore by viewModel.hasMore.collectAsStateWithLifecycle()
+    val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -165,7 +169,7 @@ fun AsmListScreen(
                             singleLine = true
                         )
 
-                        if (methods.isEmpty()) {
+                        if (methods.isEmpty() && !isLoadingMore) {
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text(
                                     text = "暂无方法数据",
@@ -174,19 +178,32 @@ fun AsmListScreen(
                                 )
                             }
                         } else {
+                            val listState = rememberLazyListState()
+                            // 滚动触底检测：剩余 5 项时触发加载下一页
+                            val shouldLoadMore by remember {
+                                derivedStateOf {
+                                    val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: Int.MAX_VALUE
+                                    lastVisible >= methods.size - 5 && hasMore && !isLoadingMore
+                                }
+                            }
+                            LaunchedEffect(shouldLoadMore) {
+                                if (shouldLoadMore) viewModel.loadMore()
+                            }
+
                             LazyColumn(
+                                state = listState,
                                 modifier = Modifier.fillMaxSize(),
                                 contentPadding = PaddingValues(16.dp)
                             ) {
                                 items(
                                     items = methods,
-                                    key = { it.method.id }
+                                    key = { it.id }
                                 ) { item ->
                                     MethodRow(
                                         method = item,
-                                        onClick = { onMethodClick(analysisId, item.method.id) },
+                                        onClick = { onMethodClick(analysisId, item.id) },
                                         onCopyAddress = {
-                                            val addr = item.method.functionOffset
+                                            val addr = item.functionOffset
                                             if (addr != null && addr > 0) {
                                                 val hex = "0x${addr.toString(16).uppercase()}"
                                                 clipboard.setText(AnnotatedString(hex))
@@ -196,6 +213,14 @@ fun AsmListScreen(
                                             }
                                         }
                                     )
+                                }
+                                // 底部加载指示器
+                                if (isLoadingMore) {
+                                    item(key = "loading_more") {
+                                        Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth(0.5f))
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -209,11 +234,11 @@ fun AsmListScreen(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MethodRow(
-    method: MethodWithClass,
+    method: MethodLight,
     onClick: () -> Unit,
     onCopyAddress: () -> Unit,
 ) {
-    val hasAddress = method.method.functionOffset != null && method.method.functionOffset!! > 0
+    val hasAddress = method.functionOffset != null && method.functionOffset!! > 0
     var showMenu by remember { mutableStateOf(false) }
 
     Box {
@@ -238,7 +263,7 @@ private fun MethodRow(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = method.method.methodName,
+                    text = method.methodName,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
@@ -248,13 +273,13 @@ private fun MethodRow(
             Column(horizontalAlignment = Alignment.End) {
                 if (hasAddress) {
                     Text(
-                        text = "0x${method.method.functionOffset!!.toString(16).uppercase()}",
+                        text = "0x${method.functionOffset!!.toString(16).uppercase()}",
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                val size = method.method.functionSize
+                val size = method.functionSize
                 if (size != null && size > 0) {
                     Text(
                         text = "len 0x${size.toString(16).uppercase()}",

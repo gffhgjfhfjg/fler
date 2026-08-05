@@ -31,7 +31,10 @@ import java.io.File
  * 3. 各种查询方法 → `rz_core_cmd_str` + JSON 解析
  * 4. [close] → `rz_core_free`
  */
-class RizinEngine : BinaryAnalysisEngine {
+class RizinEngine(
+    /** 缓存目录（用于持久化 Rizin Project 文件），为 null 时跳过项目持久化。 */
+    private val cacheDir: String? = null
+) : BinaryAnalysisEngine {
 
     override val engineId: String = "rizin"
     override val displayName: String = "Rizin v0.9.x"
@@ -56,6 +59,9 @@ class RizinEngine : BinaryAnalysisEngine {
     private val openHandles = mutableMapOf<Long, Long>()
     private var nextHandle = 1L
 
+    /** handle.value → 对应的项目文件路径（用于 close 时清理）。 */
+    private val projectPaths = mutableMapOf<Long, String>()
+
     // ------------------------------------------------------------------
     // 生命周期
     // ------------------------------------------------------------------
@@ -72,9 +78,33 @@ class RizinEngine : BinaryAnalysisEngine {
         val h = nextHandle++
         openHandles[h] = corePtr
 
-        // 自动分析（默认 STANDARD 级别）
-        if (options.autoAnalyze) {
+        // 尝试从 Rizin Project 恢复（跳过 aaa 全量分析）
+        var projectLoaded = false
+        val projectPath = cacheDir?.let { computeProjectPath(filePath, it) }
+        if (projectPath != null) {
+            val loaded = withContext(Dispatchers.IO) { RizinBindings.projectLoad(corePtr, projectPath) }
+            if (loaded) {
+                projectPaths[h] = projectPath
+                projectLoaded = true
+                Log.i(TAG, "Rizin Project 加载成功: $projectPath")
+            } else {
+                Log.i(TAG, "Rizin Project 不存在或加载失败，将执行 aaa 分析: $projectPath")
+            }
+        }
+
+        // 项目加载失败或无项目文件 → 执行 aaa 全量分析
+        if (!projectLoaded && options.autoAnalyze) {
             withContext(Dispatchers.IO) { RizinBindings.analyze(corePtr) }
+            // 分析完成后保存项目文件（供下次进程启动后复用）
+            if (projectPath != null) {
+                val saved = withContext(Dispatchers.IO) { RizinBindings.projectSave(corePtr, projectPath) }
+                if (saved) {
+                    projectPaths[h] = projectPath
+                    Log.i(TAG, "Rizin Project 保存成功: $projectPath")
+                } else {
+                    Log.w(TAG, "Rizin Project 保存失败: $projectPath")
+                }
+            }
         }
 
         return OpenResult.Success(AnalysisHandle(h), filePath, engineId)
@@ -82,6 +112,7 @@ class RizinEngine : BinaryAnalysisEngine {
 
     override suspend fun close(handle: AnalysisHandle) {
         val corePtr = openHandles.remove(handle.value) ?: return
+        projectPaths.remove(handle.value)
         withContext(Dispatchers.IO) { RizinBindings.close(corePtr) }
     }
 
@@ -281,16 +312,50 @@ class RizinEngine : BinaryAnalysisEngine {
      * 相比逐条 [defineFunction]，省去 N 次跨 JNI 的字符串往返（万级函数时收益明显）。
      */
     override suspend fun defineFunctions(handle: AnalysisHandle, functions: List<Pair<Long, String>>): Int {
+        // 名字清洗 + 同址去重：
+        // - Rizin flag 名只接受安全字符，而 Blutter 类名含 ':'（dart:core）、'$'（内部类）、
+        //   '<'/'>'（泛型化名）等，直接拼接会让整条复合命令解析失败（cmdStr 返回 null）
+        //   → 整批放弃 → 注入 0 个。
+        // - 同一地址重复定义 flag 会互相覆盖，先去重避免无谓命令。
+        val sanitized = functions.mapNotNull { (addr, name) ->
+            if (addr <= 0) null else addr to sanitizeFlagName(name)
+        }.distinctBy { it.first }
+
         var defined = 0
-        // 分批执行，避免单条命令过长（每批 500 条，命令约 20KB）
-        for (batch in functions.chunked(500)) {
+        // 每批 200 条（约 8KB）：复合命令过长同样会导致 rz_core_cmd_str 失败
+        for (batch in sanitized.chunked(200)) {
             val command = batch.joinToString(";") { (addr, name) ->
                 "f $name @ 0x${addr.toString(16)}"
             }
-            cmd(handle, command) ?: break
-            defined += batch.size
+            if (cmd(handle, command) != null) {
+                defined += batch.size
+            } else {
+                // 复合命令失败：降级为逐条注入，坏名字只影响自身，不拖垮整批
+                for ((addr, name) in batch) {
+                    if (cmd(handle, "f $name @ 0x${addr.toString(16)}") != null) {
+                        defined++
+                    } else {
+                        Log.w(TAG, "defineFunctions 单条注入失败: $name @ 0x${addr.toString(16)}")
+                    }
+                }
+            }
         }
         return defined
+    }
+
+    /** Rizin flag 名清洗：只保留字母/数字/下划线/点，其余字符替换为下划线（保持可读性）。 */
+    private fun sanitizeFlagName(name: String): String {
+        val sb = StringBuilder(name.length)
+        var changed = false
+        for (c in name) {
+            if (c.isLetterOrDigit() || c == '_' || c == '.') {
+                sb.append(c)
+            } else {
+                sb.append('_')
+                changed = true
+            }
+        }
+        return if (changed) sb.toString() else name
     }
 
     override suspend fun reanalyzeXrefs(handle: AnalysisHandle): Boolean {
@@ -434,5 +499,21 @@ class RizinEngine : BinaryAnalysisEngine {
 
     companion object {
         private const val TAG = "RizinEngine"
+
+        /**
+         * 计算 Rizin Project 文件路径。
+         *
+         * 格式：{cacheDir}/rizin_projects/{SO文件名}_{fileSize}_{fileMtime}.rzdb
+         * 文件变更（size 或 mtime 变化）时自动生成新路径，旧项目自然失效。
+         */
+        private fun computeProjectPath(soPath: String, cacheDir: String): String {
+            val file = File(soPath)
+            val name = file.name
+            val size = file.length()
+            val mtime = file.lastModified()
+            val projectDir = File(cacheDir, "rizin_projects")
+            projectDir.mkdirs()
+            return File(projectDir, "${name}_${size}_${mtime}.rzdb").absolutePath
+        }
     }
 }

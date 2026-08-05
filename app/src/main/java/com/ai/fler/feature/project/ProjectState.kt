@@ -20,7 +20,9 @@ data class AnalysisProgress(
     val stage: AnalysisStage = AnalysisStage.Idle,
     val progress: Float = 0f,
     val message: String = "",
-    val error: String? = null
+    val error: String? = null,
+    /** 用户是否已手动关闭对话框，转为后台执行 */
+    val dismissedToBackground: Boolean = false
 )
 
 /**

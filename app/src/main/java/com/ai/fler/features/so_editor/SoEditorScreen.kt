@@ -76,19 +76,28 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * SO 编辑器主界面（顶层 Tab）。
+ * SO 编辑器主界面（顶层 Tab，支持双模式）。
  *
- * 包含 3 个 Tab：
+ * 包含 4 个 Tab：
  * 1. 结构 - ELF 节头表和符号表
  * 2. Hex - 字节级十六进制查看和编辑
  * 3. 汇编 - ARM64 指令反汇编查看 + 汇编指令编辑（点击指令行弹窗编辑）
+ * 4. 仿真 - Unicorn 仿真调试
  *
- * 支持通过 SAF 选择任意 .so 文件打开（不限于 Flutter 的 SO）。
+ * 双模式：
+ * - Tab 模式（[filePath] 为空）：通过 SAF 选择任意 .so 文件打开（不限于 Flutter 的 SO）
+ * - 沉浸模式（[filePath] 非空且 [immersive]=true，从项目/PP/ASM 上下文进入）：
+ *   自动打开文件并定位到 [initialOffset]；隐藏底部导航栏（由导航层控制）并显示返回键；
+ *   [methodLength] > 0 时进入「方法编辑模式」，汇编 Tab 只展示该方法范围
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SoEditorScreen(
     filePath: String = "",
+    initialOffset: Long = 0L,
+    methodLength: Long = 0L,
+    immersive: Boolean = false,
+    onBack: () -> Unit = {},
     viewModel: SoEditorViewModel = hiltViewModel(),
     modifier: Modifier = Modifier
 ) {
@@ -99,6 +108,9 @@ fun SoEditorScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var isCopying by remember { mutableStateOf(false) }
+
+    // 方法编辑模式：methodLength>0 时只展示该方法范围（来自 ASM 跳转）
+    val isMethodMode = methodLength > 0L
 
     // SAF 文件选择器：选择任意文件（.so 文件通常 MIME 为 application/octet-stream）
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -145,19 +157,58 @@ fun SoEditorScreen(
         }
     }
 
-    // 如果有传入路径且未打开，打开文件
-    LaunchedEffect(filePath) {
-        if (filePath.isNotBlank() && !uiState.isFileOpen && !uiState.isLoading) {
-            viewModel.openFile(filePath)
+    // 上下文进入（filePath 非空）：自动打开文件并定位到 initialOffset。
+    // 方法模式下汇编只加载方法范围内的字节；已打开同一文件（Tab 间切换回来）只重新定位不重复加载。
+    LaunchedEffect(filePath, initialOffset, methodLength) {
+        if (filePath.isBlank()) return@LaunchedEffect
+        if (uiState.isFileOpen && uiState.filePath == filePath) {
+            if (isMethodMode) {
+                viewModel.setTab(EditorTab.DISASSEMBLY)
+            }
+            val target = if (initialOffset > 0) initialOffset else 0L
+            viewModel.setSelectedOffset(target)
+            if (isMethodMode) {
+                viewModel.loadDisassembly(target, methodLength)
+            } else {
+                viewModel.loadDisassembly(target)
+            }
+            val hexSize = if (isMethodMode) methodLength.coerceAtLeast(256L) else 256L
+            viewModel.loadHexData(target, hexSize)
+            return@LaunchedEffect
         }
+        // 方法模式下默认切到汇编 Tab，避免从方法列表点进来看到空白结构页
+        if (isMethodMode) {
+            viewModel.setTab(EditorTab.DISASSEMBLY)
+        }
+        viewModel.openFile(filePath)
+        val target = if (initialOffset > 0) initialOffset else 0L
+        viewModel.setSelectedOffset(target)
+        if (isMethodMode) {
+            viewModel.loadDisassembly(target, methodLength)
+        } else {
+            viewModel.loadDisassembly(target)
+        }
+        // Hex 视图对齐到定位偏移
+        val hexSize = if (isMethodMode) methodLength.coerceAtLeast(256L) else 256L
+        viewModel.loadHexData(target, hexSize)
     }
 
-    // 拦截系统返回键：已打开文件时，非结构 Tab → 先回结构 Tab，结构 Tab 关闭文件
-    BackHandler(enabled = uiState.isFileOpen) {
-        if (currentTab == EditorTab.STRUCTURE) {
-            viewModel.closeFile()
-        } else {
-            viewModel.setTab(EditorTab.STRUCTURE)
+    // 拦截系统返回键：
+    // - 沉浸模式（上下文进入）：非结构 Tab → 先回结构 Tab，结构 Tab → 返回来源页
+    // - Tab 模式：已打开文件时非结构 Tab → 先回结构 Tab，结构 Tab → 关闭文件回列表
+    BackHandler(enabled = immersive || uiState.isFileOpen) {
+        if (immersive) {
+            if (currentTab == EditorTab.STRUCTURE) {
+                onBack()
+            } else {
+                viewModel.setTab(EditorTab.STRUCTURE)
+            }
+        } else if (uiState.isFileOpen) {
+            if (currentTab == EditorTab.STRUCTURE) {
+                viewModel.closeFile()
+            } else {
+                viewModel.setTab(EditorTab.STRUCTURE)
+            }
         }
     }
 
@@ -170,8 +221,20 @@ fun SoEditorScreen(
                             text = uiState.fileName.ifBlank { "SO 编辑器" },
                             style = MaterialTheme.typography.titleMedium,
                         )
-                        if (uiState.isFileOpen) {
-                            Text(
+                        when {
+                            // 方法编辑模式：显示方法地址范围
+                            isMethodMode -> Text(
+                                text = "方法: 0x${initialOffset.toString(16).uppercase()} + 0x${methodLength.toString(16).uppercase()}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            // 沉浸模式：显示定位偏移
+                            immersive && initialOffset > 0 -> Text(
+                                text = "偏移: 0x${initialOffset.toString(16).uppercase()}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            uiState.isFileOpen -> Text(
                                 text = formatFileSize(uiState.fileSize),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -180,10 +243,21 @@ fun SoEditorScreen(
                     }
                 },
                 navigationIcon = {
-                    // 打开文件后显示返回按钮：
-                    // - 在非结构 Tab 下：返回到结构 Tab
-                    // - 在结构 Tab 下：关闭文件，回到最近文件列表
-                    if (uiState.isFileOpen) {
+                    // 沉浸模式（上下文进入）：返回来源页；Tab 模式：打开文件后返回关闭文件回列表
+                    if (immersive) {
+                        IconButton(onClick = {
+                            if (currentTab == EditorTab.STRUCTURE) {
+                                onBack()
+                            } else {
+                                viewModel.setTab(EditorTab.STRUCTURE)
+                            }
+                        }) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "返回"
+                            )
+                        }
+                    } else if (uiState.isFileOpen) {
                         IconButton(onClick = {
                             if (currentTab == EditorTab.STRUCTURE) {
                                 viewModel.closeFile()
@@ -199,22 +273,25 @@ fun SoEditorScreen(
                     }
                 },
                 actions = {
-                    // 打开文件按钮（始终可见，支持随时切换文件；复制中禁用避免叠加触发
-                    IconButton(
-                        onClick = { filePickerLauncher.launch("application/octet-stream") },
-                        enabled = !isCopying
-                    ) {
-                        if (isCopying) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(22.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.FileOpen,
-                                contentDescription = "打开 SO 文件"
-                            )
+                    // 打开文件按钮（始终可见，支持随时切换文件；复制中禁用避免叠加触发）
+                    // 沉浸模式隐藏：上下文进入是定位查看，避免切换文件后语义错乱
+                    if (!immersive) {
+                        IconButton(
+                            onClick = { filePickerLauncher.launch("application/octet-stream") },
+                            enabled = !isCopying
+                        ) {
+                            if (isCopying) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(22.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.FileOpen,
+                                    contentDescription = "打开 SO 文件"
+                                )
+                            }
                         }
                     }
 

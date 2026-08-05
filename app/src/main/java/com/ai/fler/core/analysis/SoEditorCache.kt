@@ -48,6 +48,8 @@ class SoEditorCache @Inject constructor() {
             size > MAX_CACHED_SOS
     }
     private val injectedSoPaths = mutableSetOf<String>()
+    /** xref 就绪的 SO 路径集合：同一会话中 aar 只跑一次。 */
+    private val xrefReadySoPaths = mutableSetOf<String>()
     private val dartLabelsCache = object : LinkedHashMap<String, DartLabels>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DartLabels>?): Boolean =
             size > MAX_CACHED_SOS
@@ -73,6 +75,12 @@ class SoEditorCache @Inject constructor() {
         synchronized(lock) { dartLabelsCache[path] = labels }
     }
 
+    /** 仅清除某个 SO 的 Dart 标签缓存（元数据/注入状态保留）。
+     * 用于清理旧版 bug 产生的污染标签（非 libapp.so 路径误存 libapp.so 的标签）。 */
+    fun invalidateDartLabels(path: String) {
+        synchronized(lock) { dartLabelsCache.remove(path) }
+    }
+
     // ------------------------------------------------------------------
     // Rizin 注入状态
     // ------------------------------------------------------------------
@@ -83,6 +91,18 @@ class SoEditorCache @Inject constructor() {
         synchronized(lock) { injectedSoPaths.add(path) }
     }
 
+    // ------------------------------------------------------------------
+    // xref 状态
+    // ------------------------------------------------------------------
+
+    /** 指定路径的 xref 是否已就绪。 */
+    fun isXrefReady(path: String): Boolean = synchronized(lock) { path in xrefReadySoPaths }
+
+    /** 标记指定路径的 xref 已就绪。 */
+    fun markXrefReady(path: String) {
+        synchronized(lock) { xrefReadySoPaths.add(path) }
+    }
+
     /**
      * 使某个 SO 的缓存全部失效（会话被 LRU 淘汰后调用：RzCore 已关闭，
      * 注入标记/元数据不再可信，需在下次打开时重新查询与注入）。
@@ -91,6 +111,7 @@ class SoEditorCache @Inject constructor() {
         synchronized(lock) {
             soMetadataCache.remove(path)
             injectedSoPaths.remove(path)
+            xrefReadySoPaths.remove(path)
             dartLabelsCache.remove(path)
         }
     }
@@ -103,6 +124,7 @@ class SoEditorCache @Inject constructor() {
         synchronized(lock) {
             soMetadataCache.clear()
             injectedSoPaths.clear()
+            xrefReadySoPaths.clear()
             dartLabelsCache.clear()
         }
     }

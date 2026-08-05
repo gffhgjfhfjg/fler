@@ -29,6 +29,15 @@ interface DartMethodDao {
     @Query("SELECT * FROM dart_methods WHERE analysis_id = :analysisId ORDER BY method_name")
     suspend fun getByAnalysisIdList(analysisId: Long): List<DartMethod>
 
+    /** 轻量投影（不含 src_code 大字段）：供 AddressTranslator 构建地址映射。
+     * 55781 条方法全量载入 src_code 会占用数百 MB 内存，此处只取必要列。 */
+    @Query(
+        "SELECT dm.id, dm.class_id, dm.method_name, dm.selector, dm.function_offset, dm.function_size, dc.class_name AS _class_name FROM dart_methods dm " +
+            "INNER JOIN dart_classes dc ON dm.class_id = dc.id " +
+            "WHERE dm.analysis_id = :analysisId"
+    )
+    suspend fun getByAnalysisIdLight(analysisId: Long): List<MethodLight>
+
     /** 每个类的方法数（SQL 下推：GROUP BY 统计，供 list_classes 避免全量载入方法表）。 */
     @Query(
         "SELECT class_id AS classId, COUNT(*) AS methodCount FROM dart_methods " +
@@ -108,12 +117,43 @@ interface DartMethodDao {
     )
     suspend fun getMethodsWithClass(analysisId: Long): List<MethodWithClass>
 
-    /** 按 libapp SO 路径查找所有 Dart 方法（带类名），用于 SO 编辑器注入函数标签。 */
+    /** Keyset 分页：方法列表（轻量投影，不含 src_code）。 */
+    @Query(
+        "SELECT dm.id, dm.class_id, dm.method_name, dm.selector, dm.function_offset, dm.function_size, dc.class_name AS _class_name FROM dart_methods dm " +
+            "INNER JOIN dart_classes dc ON dm.class_id = dc.id " +
+            "WHERE dm.analysis_id = :analysisId " +
+            "AND (:lastClassName = '' OR (dc.class_name > :lastClassName OR (dc.class_name = :lastClassName AND dm.method_name > :lastMethodName))) " +
+            "ORDER BY dc.class_name, dm.method_name " +
+            "LIMIT :pageSize"
+    )
+    suspend fun getMethodPage(
+        analysisId: Long,
+        lastClassName: String = "",
+        lastMethodName: String = "",
+        pageSize: Int = 200
+    ): List<MethodLight>
+
+    /** 按 SO 路径查找所有 Dart 方法（带类名），用于 SO 编辑器注入函数标签。
+     * 限定 library_name='libapp.so'：dart_classes/dart_methods 是 Blutter 从 libapp.so
+     * 提取的（Blutter 只分析 libapp.so），而 libraries 表里 libapp.so 与 libflutter.so
+     * 等共用同一 analysis_id——不限定库名时按 libflutter.so 的 path 查询也会命中
+     * libapp.so 的全部方法，导致给 libflutter.so 注入错位标签并污染标签缓存。 */
+    @Query(
+        "SELECT dm.id, dm.class_id, dm.method_name, dm.selector, dm.function_offset, dm.function_size, dc.class_name AS _class_name FROM dart_methods dm " +
+            "INNER JOIN dart_classes dc ON dm.class_id = dc.id " +
+            "WHERE dm.analysis_id IN (SELECT l.analysis_id FROM libraries l WHERE l.path = :soPath AND l.library_name = 'libapp.so') " +
+            "AND dm.function_offset > 0 " +
+            "ORDER BY dm.function_offset"
+    )
+    suspend fun getMethodsBySoPathLight(soPath: String): List<MethodLight>
+
+    /** 按 SO 路径查找所有 Dart 方法（完整信息），用于 SO 编辑器注入函数标签。
+     * 限定 library_name='libapp.so'（原因同 [getMethodsBySoPathLight]）。 */
     @Query(
         "SELECT dm.*, dc.class_name AS _class_name FROM dart_methods dm " +
             "INNER JOIN dart_classes dc ON dm.class_id = dc.id " +
-            "INNER JOIN analyses a ON dm.analysis_id = a.id " +
-            "WHERE a.libapp_path = :soPath AND dm.function_offset > 0 " +
+            "WHERE dm.analysis_id IN (SELECT l.analysis_id FROM libraries l WHERE l.path = :soPath AND l.library_name = 'libapp.so') " +
+            "AND dm.function_offset > 0 " +
             "ORDER BY dm.function_offset"
     )
     suspend fun getMethodsBySoPath(soPath: String): List<MethodWithClass>
@@ -123,6 +163,17 @@ interface DartMethodDao {
 data class MethodWithClass(
     @Embedded val method: DartMethod,
     @androidx.room.ColumnInfo(name = "_class_name") val _className: String
+)
+
+/** 轻量方法投影（不含 src_code/signature 等大文本字段）。 */
+data class MethodLight(
+    val id: Long = 0,
+    @androidx.room.ColumnInfo(name = "class_id") val classId: Long = 0,
+    @androidx.room.ColumnInfo(name = "method_name") val methodName: String = "",
+    val selector: String = "",
+    @androidx.room.ColumnInfo(name = "function_offset") val functionOffset: Long? = null,
+    @androidx.room.ColumnInfo(name = "function_size") val functionSize: Long? = null,
+    @androidx.room.ColumnInfo(name = "_class_name") val _className: String = "",
 )
 
 /** 类 -> 方法数投影（GROUP BY 统计结果）。 */
