@@ -47,8 +47,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import com.ai.fler.ui.components.FastSnackbarHost
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -301,7 +301,7 @@ fun SoEditorScreen(
                 }
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
+        snackbarHost = { FastSnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Box(
             modifier = modifier
@@ -361,6 +361,7 @@ private fun SoEditorContent(
     onTabSelected: (EditorTab) -> Unit,
     viewModel: SoEditorViewModel,
 ) {
+    val scope = rememberCoroutineScope()
     Column(modifier = Modifier.fillMaxSize()) {
         if (uiState.errorMessage != null) {
             Text(
@@ -426,22 +427,31 @@ private fun SoEditorContent(
                         functions = uiState.functions,
                         strings = uiState.strings,
                         onSectionClick = { section ->
-                            viewModel.setSelectedOffset(section.address)
+                            // 反汇编/十六进制均为文件偏移坐标，跳转必须用 paddr（vaddr 会越界读空）
+                            viewModel.setSelectedOffset(section.paddr)
                             viewModel.setStructureFlashAddress(section.address)
                             viewModel.setTab(EditorTab.DISASSEMBLY)
-                            viewModel.loadDisassembly(section.address, highlightAfterLoad = section.address)
+                            viewModel.loadDisassembly(section.paddr, highlightAfterLoad = section.paddr)
                         },
                         onSymbolClick = { symbol ->
-                            viewModel.setSelectedOffset(symbol.address)
+                            viewModel.setSelectedOffset(symbol.paddr)
                             viewModel.setStructureFlashAddress(symbol.address)
                             viewModel.setTab(EditorTab.DISASSEMBLY)
-                            viewModel.loadDisassembly(symbol.address, highlightAfterLoad = symbol.address)
+                            viewModel.loadDisassembly(symbol.paddr, highlightAfterLoad = symbol.paddr)
                         },
                         onFunctionClick = { func ->
-                            viewModel.setSelectedOffset(func.vaddr)
+                            // FunctionInfo.offset 保证与反汇编文件偏移对齐；vaddr 仅用于结构页定位闪烁
+                            viewModel.setSelectedOffset(func.offset)
                             viewModel.setStructureFlashAddress(func.vaddr)
                             viewModel.setTab(EditorTab.DISASSEMBLY)
-                            viewModel.loadDisassembly(func.vaddr, highlightAfterLoad = func.vaddr)
+                            viewModel.loadDisassembly(func.offset, highlightAfterLoad = func.offset)
+                        },
+                        onSymbolDebug = { symbol ->
+                            // 仿真按 vaddr 地址空间工作，预填符号虚拟地址
+                            viewModel.debugInEmulation("0x${symbol.address.toString(16)}")
+                        },
+                        onFunctionDebug = { func ->
+                            viewModel.debugInEmulation("0x${func.vaddr.toString(16)}")
                         },
                         onStringsTabSelected = { viewModel.loadStrings() },
                         viewModel = viewModel
@@ -457,6 +467,19 @@ private fun SoEditorContent(
                         viewModel = viewModel,
                         onInstructionClick = { address ->
                             viewModel.setSelectedOffset(address)
+                        },
+                        onBreakpointDebug = { paddr ->
+                            // 汇编页地址是文件偏移，仿真工作于 vaddr，先转换再跳转下断点
+                            scope.launch {
+                                val vaddr = viewModel.paddrToVaddr(paddr)
+                                viewModel.debugInEmulation("0x${vaddr.toString(16)}", addBreakpoint = true)
+                            }
+                        },
+                        onCallAtEmulation = { paddr ->
+                            scope.launch {
+                                val vaddr = viewModel.paddrToVaddr(paddr)
+                                viewModel.debugInEmulation("0x${vaddr.toString(16)}")
+                            }
                         }
                     )
                 }
@@ -464,7 +487,8 @@ private fun SoEditorContent(
                 EditorTab.EMULATION -> {
                     EmulationTab(
                         viewModel = hiltViewModel(),
-                        filePath = uiState.filePath
+                        filePath = uiState.filePath,
+                        soEditorViewModel = viewModel
                     )
                 }
             }

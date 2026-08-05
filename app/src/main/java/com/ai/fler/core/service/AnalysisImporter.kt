@@ -2,6 +2,7 @@ package com.ai.fler.core.service
 
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
+import com.ai.fler.core.log.AppLogger
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
@@ -34,6 +35,7 @@ class AnalysisImporter @Inject constructor(
     private val dartClassDao: DartClassDao,
     private val dartMethodDao: DartMethodDao,
     private val ppEntryDao: PpEntryDao,
+    private val appLogger: AppLogger,
 ) {
     companion object {
         private const val TAG = "AnalysisImporter"
@@ -205,6 +207,7 @@ class AnalysisImporter @Inject constructor(
         }
 
         val result = ImportResult(classesCount = classes, methodsCount = methods, ppEntriesCount = pp)
+        appLogger.info(TAG, "导入完成: ${result.classesCount} 类, ${result.methodsCount} 方法, ${result.ppEntriesCount} PP")
         // 回写统计计数，产物页据此展示真实数据
         try {
             analysisDao.updateCounts(analysisId, classes, methods, pp)

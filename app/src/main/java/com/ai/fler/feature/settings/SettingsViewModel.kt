@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ai.fler.core.mcp.McpConfig
+import com.ai.fler.core.mcp.McpToolHandlers
 import com.ai.fler.core.service.EnginePackManager
 import com.ai.fler.core.service.EngineSourceConfig
 import com.ai.fler.core.service.EngineUpdate
@@ -35,6 +36,7 @@ class SettingsViewModel @Inject constructor(
     private val sourceConfig: EngineSourceConfig,
     private val mcpConfig: McpConfig,
     private val mcpServerManager: McpServerManager,
+    private val toolHandlers: McpToolHandlers,
 ) : ViewModel() {
 
     private val _updateState = MutableStateFlow(UpdateCheckState())
@@ -53,6 +55,10 @@ class SettingsViewModel @Inject constructor(
     /** MCP 服务器状态（配置 + 运行状态聚合）。 */
     private val _mcpState = MutableStateFlow(McpUiState())
     val mcpState: StateFlow<McpUiState> = _mcpState.asStateFlow()
+
+    /** MCP 工具列表（名称 + 解释）。 */
+    val mcpTools: List<McpToolHandlers.McpTool>
+        get() = toolHandlers.tools.values.sortedBy { it.name }
 
     init {
         loadInstalledVersions()

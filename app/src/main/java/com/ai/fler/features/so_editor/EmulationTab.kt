@@ -17,11 +17,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,8 +42,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -56,14 +57,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ai.fler.core.analysis.FunctionInfo
 import com.ai.fler.core.analysis.StopReason
 
 /**
@@ -81,7 +85,8 @@ import com.ai.fler.core.analysis.StopReason
 fun EmulationTab(
     viewModel: EmulationViewModel,
     filePath: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    soEditorViewModel: SoEditorViewModel? = null
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val functionOptions by viewModel.functionOptions.collectAsStateWithLifecycle()
@@ -90,6 +95,18 @@ fun EmulationTab(
     LaunchedEffect(filePath) {
         if (filePath.isNotEmpty() && !state.isSessionOpen && !state.isOpening) {
             viewModel.openSession(filePath)
+        }
+    }
+
+    // 消费跨 Tab 调试请求（结构页/汇编页长按菜单：预填函数/地址 + 可选断点）
+    soEditorViewModel?.let { soVm ->
+        LaunchedEffect(Unit) {
+            soVm.pendingEmuRequest.collect { req ->
+                if (req != null) {
+                    viewModel.applyDebugRequest(req.first, req.second)
+                    soVm.consumeEmuRequest()
+                }
+            }
         }
     }
 
@@ -149,7 +166,7 @@ fun EmulationTab(
                 ) {
                     Spacer(Modifier.height(8.dp))
                     FunctionCallSection(viewModel = viewModel, state = state, functionOptions = functionOptions)
-                    ControlSection(viewModel = viewModel, state = state)
+                    ControlSection(viewModel = viewModel, state = state, functionOptions = functionOptions)
                     ResultSection(viewModel = viewModel, state = state)
                     LogSection(viewModel = viewModel, state = state)
                     Spacer(Modifier.height(4.dp))
@@ -331,27 +348,6 @@ private fun FunctionCallSection(
                         viewModel.callSelectedFunction()
                     })
                 )
-                DropdownMenu(expanded = showDropdown && filtered.isNotEmpty(), onDismissRequest = { showDropdown = false }) {
-                    filtered.forEach { func ->
-                        DropdownMenuItem(
-                            text = {
-                                Column {
-                                    Text(func.name, style = MaterialTheme.typography.bodyMedium)
-                                    Text(
-                                        "0x${java.lang.Long.toHexString(func.vaddr)}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
-                            },
-                            onClick = {
-                                viewModel.selectFunction(func.name)
-                                showDropdown = false
-                            }
-                        )
-                    }
-                }
             }
             CompactActionButton(
                 text = "调用",
@@ -361,6 +357,46 @@ private fun FunctionCallSection(
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer
             )
+        }
+
+        // 函数名建议：内联列表。不用 DropdownMenu 弹窗——popup 窗口内容随输入
+        // 实时重建会夺焦点，导致输入法面板收起；内联列表不影响输入框焦点。
+        if (showDropdown && filtered.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 180.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            ) {
+                LazyColumn {
+                    itemsIndexed(filtered, key = { index, _ -> index }) { _, func ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    viewModel.selectFunction(func.name)
+                                    showDropdown = false
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                func.name,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1
+                            )
+                            Text(
+                                "0x${java.lang.Long.toHexString(func.vaddr)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // 参数输入：4×2 网格（x0-x7），免横向滚动
@@ -401,7 +437,11 @@ private fun FunctionCallSection(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ControlSection(viewModel: EmulationViewModel, state: EmulationUiState) {
+private fun ControlSection(
+    viewModel: EmulationViewModel,
+    state: EmulationUiState,
+    functionOptions: List<FunctionInfo>
+) {
     var bpInput by remember { mutableStateOf("") }
 
     EmuSection(title = "执行控制", icon = Icons.Default.SkipNext) {
@@ -446,7 +486,7 @@ private fun ControlSection(viewModel: EmulationViewModel, state: EmulationUiStat
                 value = bpInput,
                 onValueChange = { bpInput = it },
                 modifier = Modifier.weight(1f),
-                placeholder = "断点地址（hex/dec）",
+                placeholder = "断点地址 vaddr（hex/dec）",
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = {
                     if (bpInput.isNotBlank()) {
@@ -478,10 +518,11 @@ private fun ControlSection(viewModel: EmulationViewModel, state: EmulationUiStat
             }
         }
 
-        // 断点列表
+        // 断点列表：chip 显示 vaddr + 所在函数名（便于识别断点位置）
         if (state.breakpoints.isNotEmpty()) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 state.breakpoints.forEach { addr ->
+                    val fnName = functionNameAt(addr, functionOptions)
                     Row(
                         modifier = Modifier
                             .background(
@@ -497,6 +538,16 @@ private fun ControlSection(viewModel: EmulationViewModel, state: EmulationUiStat
                             fontFamily = FontFamily.Monospace,
                             color = MaterialTheme.colorScheme.onSecondaryContainer
                         )
+                        if (fnName != null) {
+                            Text(
+                                " · $fnName",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 120.dp)
+                            )
+                        }
                         IconButton(
                             onClick = { viewModel.removeBreakpoint(addr) },
                             modifier = Modifier.size(22.dp)
@@ -515,6 +566,24 @@ private fun ControlSection(viewModel: EmulationViewModel, state: EmulationUiStat
     }
 }
 
+/**
+ * 断点地址 → 所在函数名（vaddr ∈ [f.vaddr, f.vaddr+size)）。
+ * size 未知时退化为“不小于该函数入口且小于下一函数入口”。
+ */
+private fun functionNameAt(vaddr: Long, options: List<FunctionInfo>): String? {
+    if (options.isEmpty()) return null
+    val sorted = options.sortedBy { it.vaddr }
+    sorted.firstOrNull { it.size > 0 && vaddr >= it.vaddr && vaddr < it.vaddr + it.size }
+        ?.let { return it.name }
+    val idx = sorted.indexOfLast { it.vaddr <= vaddr }
+    if (idx >= 0) {
+        val f = sorted[idx]
+        val next = sorted.getOrNull(idx + 1)
+        if (next == null || vaddr < next.vaddr) return f.name
+    }
+    return null
+}
+
 // ══════════════════════════════════════════════════════════
 // 3. 结果区：返回值 + 寄存器
 // ══════════════════════════════════════════════════════════
@@ -525,31 +594,50 @@ private fun ResultSection(viewModel: EmulationViewModel, state: EmulationUiState
     var editRegName by remember { mutableStateOf<String?>(null) }
     var editRegValue by remember { mutableStateOf("") }
 
-    // 返回值卡片
+    // 返回值卡片：仅正常返回显示返回值；断点/中断/超时等停住时
+    // x0 是中间值，标注“未返回”避免误读为最终结果
     state.lastCallResult?.let { r ->
+        val finished = r.stopReason == StopReason.FUNCTION_RETURN || r.stopReason == StopReason.NONE
         EmuSection(title = "调用结果", icon = Icons.Default.PlayArrow) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(8.dp))
+                    .background(
+                        if (finished) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.secondaryContainer,
+                        RoundedCornerShape(8.dp)
+                    )
                     .padding(12.dp)
             ) {
                 Text(
-                    "${r.functionName} 返回",
+                    if (finished) "${r.functionName} 返回"
+                    else "${r.functionName} 未返回（${stopReasonLabel(r.stopReason)}）",
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                    color = if (finished) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onSecondaryContainer
                 )
+                if (finished) {
+                    Text(
+                        r.returnValueUnsigned,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                } else {
+                    Text(
+                        "x0=${r.returnValueUnsigned}（中间值，函数未完成）",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
                 Text(
-                    r.returnValueUnsigned,
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-                Text(
-                    "有符号 ${r.returnValue} ｜ ${stopReasonLabel(r.stopReason)} ｜ ${r.instructionCount} 条指令",
+                    "${r.functionName} @ 0x${java.lang.Long.toHexString(r.functionAddress)} ｜ " +
+                        "${stopReasonLabel(r.stopReason)} ｜ ${r.instructionCount} 条指令",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                    color = if (finished) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onSecondaryContainer
                 )
             }
         }

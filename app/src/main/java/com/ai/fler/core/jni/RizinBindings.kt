@@ -83,6 +83,13 @@ object RizinBindings {
     fun writeBytes(handle: Long, offset: Long, data: ByteArray): Boolean =
         nativeWriteBytes(handle, offset, data)
 
+    /**
+     * 文件偏移（物理地址）→ 虚拟地址（按段 map 换算，与 vp 对称）。
+     * 映射外回退原值。
+     */
+    fun paddrToVaddr(handle: Long, paddr: Long): Long =
+        nativePaddrToVaddr(handle, paddr)
+
     // ===== JNI native 方法 =====
 
     @JvmStatic private external fun nativeOpen(path: String): Long
@@ -91,4 +98,5 @@ object RizinBindings {
     @JvmStatic private external fun nativeCmdStr(handle: Long, cmd: String): String?
     @JvmStatic private external fun nativeReadBytes(handle: Long, offset: Long, size: Int): ByteArray?
     @JvmStatic private external fun nativeWriteBytes(handle: Long, offset: Long, data: ByteArray): Boolean
+    @JvmStatic private external fun nativePaddrToVaddr(handle: Long, paddr: Long): Long
 }

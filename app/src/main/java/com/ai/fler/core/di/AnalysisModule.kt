@@ -10,6 +10,7 @@ import com.ai.fler.core.analysis.engine.RizinEngine
 import com.ai.fler.core.analysis.engine.SelfAnalysisEngine
 import com.ai.fler.core.analysis.engine.UnicornEngine
 import com.ai.fler.core.analysis.engine.UnidbgEnginePlaceholder
+import com.ai.fler.core.log.AppLogger
 import com.ai.fler.core.service.BackupManager
 import com.ai.fler.core.service.EngineLoader
 import dagger.Module
@@ -66,6 +67,7 @@ object AnalysisModule {
     fun provideAnalysisSession(
         registry: EngineRegistry,
         backupManager: BackupManager,
-        soEditorCache: SoEditorCache
-    ): AnalysisSession = AnalysisSession(registry, backupManager, soEditorCache)
+        soEditorCache: SoEditorCache,
+        appLogger: AppLogger,
+    ): AnalysisSession = AnalysisSession(registry, backupManager, soEditorCache, appLogger)
 }

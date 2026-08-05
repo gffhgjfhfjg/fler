@@ -11,6 +11,7 @@ import com.ai.fler.core.analysis.FunctionInfo
 import com.ai.fler.core.analysis.SectionInfo
 import com.ai.fler.core.analysis.SoEditorCache
 import com.ai.fler.core.analysis.StringInfo
+import com.ai.fler.core.log.AppLogger
 import com.ai.fler.core.analysis.SymbolInfo
 import com.ai.fler.core.analysis.Xref
 import com.ai.fler.core.analysis.assembler.KeystoneAssembler
@@ -19,6 +20,8 @@ import com.ai.fler.core.service.PatchExporter
 import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.MethodWithClass
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.encodeToString
 import android.net.Uri
 import android.util.Log
 import java.io.File
@@ -34,12 +38,14 @@ import javax.inject.Inject
 @HiltViewModel
 class SoEditorViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
+    @ApplicationContext private val appContext: Context,
     private val session: AnalysisSession,
     private val backupManager: BackupManager,
     private val keystoneAssembler: KeystoneAssembler,
     private val patchExporter: PatchExporter,
     private val dartMethodDao: DartMethodDao,
-    private val soEditorCache: SoEditorCache
+    private val soEditorCache: SoEditorCache,
+    private val appLogger: AppLogger,
 ) : ViewModel() {
 
     companion object {
@@ -47,6 +53,8 @@ class SoEditorViewModel @Inject constructor(
         const val HEX_PAGE_SIZE = 2048L
         const val DISASM_PAGE_SIZE = 4096L
         const val MAX_RECENT_FILES = 10
+        private const val PREFS_NAME = "so_editor"
+        private const val KEY_RECENT_FILES = "recent_files"
     }
 
     private val _uiState = MutableStateFlow(SoEditorUiState())
@@ -106,20 +114,75 @@ class SoEditorViewModel @Inject constructor(
     private val _recentFiles = MutableStateFlow<List<RecentFile>>(emptyList())
     val recentFiles: StateFlow<List<RecentFile>> = _recentFiles.asStateFlow()
 
+    private val prefs by lazy {
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
+    // 历史持久化：SharedPreferences + JSON，退出应用后保留。
+    // 必须声明在 init 之前：init 里 loadRecentFiles 会用到它，
+    // 若放在类后面，init 执行时字段还是 null → NPE 静默吞掉，历史恢复失效
+    private val recentJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
     init {
-        // 启动时过滤一次最近文件列表：缓存被清理后文件可能不存在，避免用户点击打开空文件路径
+        // 从持久化恢复历史，再过滤一次：缓存被清理后文件可能不存在，避免用户点击打开空文件路径
+        _recentFiles.value = loadRecentFiles()
         viewModelScope.launch(Dispatchers.IO) {
             val snapshot = _recentFiles.value
             if (snapshot.isNotEmpty()) {
                 val existing = snapshot.filter { java.io.File(it.path).exists() }
                 if (existing.size != snapshot.size) {
                     _recentFiles.value = existing
+                    saveRecentFiles(existing)
                 }
             }
         }
     }
 
     fun setTab(tab: EditorTab) { _currentTab.value = tab }
+
+    /**
+     * 待仿真 Tab 消费的调试请求：(函数名或地址, 是否同时下断点)。
+     * 跨 ViewModel 桥接（SoEditorViewModel 与 EmulationViewModel 可能不同 owner），
+     * 由 EmulationTab 观察并消费，避免直传 EmulationViewModel 实例在独立路由下失效。
+     */
+    private val _pendingEmuRequest = MutableStateFlow<Pair<String, Boolean>?>(null)
+    val pendingEmuRequest: StateFlow<Pair<String, Boolean>?> = _pendingEmuRequest.asStateFlow()
+
+    /** 跳转仿真 Tab 并预填函数/地址（可选同时下断点）。结构页/汇编页长按菜单入口。 */
+    fun debugInEmulation(target: String, addBreakpoint: Boolean = false) {
+        _pendingEmuRequest.value = target to addBreakpoint
+        setTab(EditorTab.EMULATION)
+    }
+
+    fun consumeEmuRequest() { _pendingEmuRequest.value = null }
+
+    /** 文件偏移 → 虚拟地址（汇编行跳仿真用；自研引擎恒等返回，失败回退原值）。 */
+    suspend fun paddrToVaddr(paddr: Long): Long = session.paddrToVaddr(paddr)
+
+    /**
+     * 用节区表构建 vaddr→paddr 映射（纯内存二分，无 JNI 开销）。
+     * Rizin isj/aflj 输出的地址均为虚拟地址，而反汇编/十六进制视图工作在
+     * 文件偏移坐标，打开文件时需一次性规范化符号与函数的文件偏移。
+     * 非加载型节区（如 .symtab/.bss）vsize 为 0，跳过避免虚假映射。
+     */
+    private fun buildVaddrToPaddrMapper(sections: List<SectionInfo>): (Long) -> Long {
+        data class Span(val vaddr: Long, val vsize: Long, val delta: Long)
+        val spans = sections
+            .filter { it.size > 0 && it.paddr > 0 }
+            .map { Span(it.address, it.size, it.paddr - it.address) }
+            .sortedBy { it.vaddr }
+            .distinctBy { it.vaddr }
+        if (spans.isEmpty()) return { it }
+        return { vaddr ->
+            val idx = spans.binarySearchBy(vaddr) { it.vaddr }
+            val hi = if (idx >= 0) idx else -idx - 2
+            if (hi >= 0 && vaddr < spans[hi].vaddr + spans[hi].vsize) {
+                vaddr + spans[hi].delta
+            } else {
+                vaddr
+            }
+        }
+    }
 
     fun setStructureSubTab(ordinal: Int) { _structureSubTab.value = ordinal }
 
@@ -195,9 +258,19 @@ class SoEditorViewModel @Inject constructor(
                 sections = session.getSections()
                 val symbolsAll = session.getSymbols(true)
                 fileInfo = session.getFileInfo()
+                // 坐标规范化：Rizin 的 isj 无 paddr 字段（回退后仍是 vaddr），aflj 的 offset
+                // 实为虚拟地址。PIE 库 vaddr≠paddr（如 emu_demo 差 0x4000），直接当文件偏移
+                // 跳转会超出 EOF。用节区映射批量转成文件偏移（内存级 LRU 缓存存的就是规范后值）
+                val toPaddr = buildVaddrToPaddrMapper(sections)
                 functions = try { session.listFunctions() } catch (_: Throwable) { emptyList() }
+                    .map { it.copy(offset = toPaddr(it.vaddr)) }
+                // 去重：同一导出符号会同时出现在 symtab 与 dynsym（同名同址），
+                // 不去重会导致「动态符号」列表出现重复行
                 dynamicSymbols = symbolsAll.filter { it.bind != com.ai.fler.core.analysis.SymbolBind.LOCAL }
+                    .map { it.copy(paddr = toPaddr(it.address)) }
+                    .distinctBy { it.name to it.address }
                 staticSymbols = symbolsAll.filter { it.bind == com.ai.fler.core.analysis.SymbolBind.LOCAL }
+                    .map { it.copy(paddr = toPaddr(it.address)) }
                 fileSize = fileInfo?.fileSize?.takeIf { it > 0 } ?: withContext(Dispatchers.IO) {
                     File(filePath).length()
                 }
@@ -205,6 +278,13 @@ class SoEditorViewModel @Inject constructor(
                     filePath,
                     SoEditorCache.SoMetadata(sections, staticSymbols, dynamicSymbols, functions, fileInfo, fileSize)
                 )
+                // 诊断日志：验证 vaddr→paddr 规范化是否生效（确认后删除）
+                Log.i(TAG, "诊断 sections(text): " + sections.filter { it.name.contains("text") }
+                    .joinToString { "${it.name} vaddr=0x${it.address.toString(16)} paddr=0x${it.paddr.toString(16)} size=0x${it.size.toString(16)}" })
+                Log.i(TAG, "诊断 functions前5: " + functions.take(5)
+                    .joinToString { "${it.name} vaddr=0x${it.vaddr.toString(16)} offset=0x${it.offset.toString(16)}" })
+                Log.i(TAG, "诊断 dynsym前5: " + dynamicSymbols.take(5)
+                    .joinToString { "${it.name} vaddr=0x${it.address.toString(16)} paddr=0x${it.paddr.toString(16)}" })
             }
 
             _uiState.value = SoEditorUiState(
@@ -230,8 +310,10 @@ class SoEditorViewModel @Inject constructor(
             loadDartFunctionLabels(filePath)
             _uiState.value = _uiState.value.copy(isAnalyzing = false)
             Log.i(TAG, "打开文件成功: $filePath, ${sections.size} 节, ${staticSymbols.size + dynamicSymbols.size} 符号, engine=${result.engineId}")
+            appLogger.info(TAG, "打开文件成功: $filePath, ${sections.size} 节, ${staticSymbols.size + dynamicSymbols.size} 符号")
         } catch (e: Exception) {
             Log.e(TAG, "打开文件失败", e)
+            appLogger.error(TAG, "打开文件失败: ${e.message}")
             _uiState.value = _uiState.value.copy(
                 isLoading = false,
                 errorMessage = e.message
@@ -336,12 +418,32 @@ class SoEditorViewModel @Inject constructor(
 
     fun loadDisassembly(offset: Long, size: Long = DISASM_PAGE_SIZE, highlightAfterLoad: Long? = null) {
         viewModelScope.launch {
-            _disassemblyData.value = _disassemblyData.value.copy(isLoading = true)
-            try {
+            // 坐标保护统一入口：传入值超出文件范围时按 vaddr 换算。
+            // 覆盖所有跳转路径（符号/函数点击、节区跳转、xref 点击、输入框），
+            // 避免某符号 vaddr 未落在任何节区时 paddr 映射失败直接拿 vaddr 读盘
+            val target = resolveJumpAddress(offset)
+            val highlight = highlightAfterLoad?.let { resolveJumpAddress(it) }
+            val list = loadDisassemblyInternal(target, size, highlight, contextBefore = highlight != null)
+            // 兜底：跳转前 512B 上下文落进非代码区时，rz 读取可能被段 map 截断，
+            // 解码结果到不了目标地址。此时去掉前文上下文从目标处重试，保证目标可见
+            if (highlight != null && list.none { it.address == highlight }) {
+                loadDisassemblyInternal(target, size, highlight, contextBefore = false)
+            }
+        }
+    }
+
+    private suspend fun loadDisassemblyInternal(
+        offset: Long,
+        size: Long,
+        highlightAfterLoad: Long?,
+        contextBefore: Boolean
+    ): List<DisasmInstruction> {
+        _disassemblyData.value = _disassemblyData.value.copy(isLoading = true)
+        return try {
                 // 交叉引用跳转时，往前加载 512 字节上下文（ARM64 = 128 条指令），
                 // 让用户能看到 call 目标前后的代码，而不是只从目标地址开始
-                val contextBefore = if (highlightAfterLoad != null) 512L else 0L
-                val loadOffset = (offset - contextBefore).coerceAtLeast(0L)
+                val contextBefore2 = if (contextBefore) 512L else 0L
+                val loadOffset = (offset - contextBefore2).coerceAtLeast(0L)
                 // 对齐到 4 字节边界（ARM64 指令宽度）
                 val alignedOffset = loadOffset - (loadOffset % 4)
                 val loadSize = size + (offset - alignedOffset)
@@ -360,6 +462,9 @@ class SoEditorViewModel @Inject constructor(
                         } catch (_: Throwable) { errorMsg = "反汇编失败"; emptyList() }
                     }
                 } else emptyList()
+                // 诊断日志：定位跳转后无数据的断点（确认后删除）
+                Log.i(TAG, "诊断 loadDisassembly: 请求offset=0x${offset.toString(16)} 对齐=0x${alignedOffset.toString(16)} " +
+                    "size=$loadSize 上下文=$contextBefore isFileOpen=${_uiState.value.isFileOpen} 指令数=${list.size} err=$errorMsg")
                 _disassemblyData.value = DisassemblyDataState(
                     baseAddress = alignedOffset,
                     loadedSize = loadSize,
@@ -373,6 +478,7 @@ class SoEditorViewModel @Inject constructor(
                 if (highlightAfterLoad != null) {
                     setHighlightAddress(highlightAfterLoad)
                 }
+                list
             } catch (e: Exception) {
                 _disassemblyData.value = DisassemblyDataState(
                     baseAddress = offset,
@@ -380,8 +486,25 @@ class SoEditorViewModel @Inject constructor(
                     isLoading = false,
                     errorMessage = e.message
                 )
+                emptyList()
+            }
+    }
+
+    /**
+     * 智能地址跳转：汇编页输入框坐标是文件偏移，但用户常粘贴虚拟地址
+     * （如长按菜单复制的函数 vaddr）。超出文件大小时自动按 vaddr→paddr 换算。
+     */
+    suspend fun resolveJumpAddress(input: Long): Long {
+        if (input <= 0) return input
+        val fsize = _uiState.value.fileSize
+        if (fsize > 0 && input >= fsize) {
+            val mapped = session.vaddrToPaddr(input)
+            if (mapped != input && mapped < fsize) {
+                Log.i(TAG, "跳转地址越界，按 vaddr 换算: 0x${input.toString(16)} → 0x${mapped.toString(16)}")
+                return mapped
             }
         }
+        return input
     }
 
     /** 向前追加加载的标志位（避免触发 isLoading 导致 UI 切换、DisassemblyListView 被销毁重建）。 */
@@ -445,6 +568,12 @@ class SoEditorViewModel @Inject constructor(
         _disassemblyData.value = _disassemblyData.value.copy(highlightAddress = address)
         _flashOffset.value = address
         // 递增触发器，UI 层用 LaunchedEffect + Animatable 驱动 0→1→0→1→0 脉冲
+        _flashTrigger.value = _flashTrigger.value + 1
+    }
+
+    /** 设置 hex 页闪烁目标（文件偏移），递增触发器驱动 UI 层脉冲动画。 */
+    fun setFlashOffset(address: Long?) {
+        _flashOffset.value = address
         _flashTrigger.value = _flashTrigger.value + 1
     }
 
@@ -566,7 +695,8 @@ class SoEditorViewModel @Inject constructor(
 
     /** 根据当前反汇编页的指令列表，更新函数边界标注。 */
     private fun updateFunctionOverlay(instructions: List<DisasmInstruction>) {
-        val funcSet = _uiState.value.functions.associateBy { it.vaddr }
+        // 指令地址是文件偏移（paddr）坐标，必须用 FunctionInfo.offset 匹配（vaddr 会全部错位）
+        val funcSet = _uiState.value.functions.associateBy { it.offset }
         val dartLabels = _dartFunctionLabels.value
         val overlay = mutableMapOf<Long, String>()
         for (inst in instructions) {
@@ -737,16 +867,33 @@ class SoEditorViewModel @Inject constructor(
         list.removeAll { it.path == path }
         list.add(0, RecentFile(path = path, name = file.name))
         // 注意：dropLast 是纯函数，必须取返回值，否则超过上限后列表无限增长
-        if (list.size > MAX_RECENT_FILES) {
-            _recentFiles.value = list.take(MAX_RECENT_FILES)
-        } else {
-            _recentFiles.value = list
-        }
+        val trimmed = if (list.size > MAX_RECENT_FILES) list.take(MAX_RECENT_FILES) else list
+        _recentFiles.value = trimmed
+        saveRecentFiles(trimmed)
     }
 
     /** 从「最近文件」列表中移除某一项（UI 删除按钮用）。 */
     fun removeRecent(path: String) {
-        _recentFiles.value = _recentFiles.value.filter { it.path != path }
+        val updated = _recentFiles.value.filter { it.path != path }
+        _recentFiles.value = updated
+        saveRecentFiles(updated)
+    }
+
+    // 历史持久化读写（recentJson 声明在 init 之前，见文件前部）
+    private fun loadRecentFiles(): List<RecentFile> = try {
+        val raw = prefs.getString(KEY_RECENT_FILES, null) ?: return emptyList()
+        recentJson.decodeFromString<List<RecentFile>>(raw)
+    } catch (e: Throwable) {
+        Log.w(TAG, "恢复最近文件失败", e)
+        emptyList()
+    }
+
+    private fun saveRecentFiles(list: List<RecentFile>) {
+        try {
+            prefs.edit().putString(KEY_RECENT_FILES, recentJson.encodeToString(list)).apply()
+        } catch (e: Throwable) {
+            Log.w(TAG, "保存最近文件失败", e)
+        }
     }
 }
 
@@ -786,6 +933,7 @@ data class HexDataState(
     }
 }
 
+@kotlinx.serialization.Serializable
 data class RecentFile(val path: String, val name: String)
 
 data class DisassemblyDataState(

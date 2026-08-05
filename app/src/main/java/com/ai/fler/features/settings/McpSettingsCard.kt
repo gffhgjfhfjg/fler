@@ -44,6 +44,7 @@ fun McpSettingsCard(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onOpenLog: () -> Unit,
+    onOpenTools: () -> Unit = {},
 ) {
     var tokenInput by remember(state.token) { mutableStateOf(state.token) }
     var portInput by remember(state.port) { mutableStateOf(state.port.toString()) }
@@ -201,6 +202,9 @@ fun McpSettingsCard(
                 OutlinedButton(
                     onClick = onOpenLog
                 ) { Text("查看日志") }
+                OutlinedButton(
+                    onClick = onOpenTools
+                ) { Text("工具列表") }
             }
         }
     }

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -37,6 +38,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -62,6 +64,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ai.fler.core.analysis.DisasmInstruction
+import com.ai.fler.core.analysis.SectionInfo
 import kotlinx.coroutines.launch
 
 /**
@@ -86,7 +89,11 @@ fun DisassemblyTab(
     viewModel: SoEditorViewModel,
     modifier: Modifier = Modifier,
     isMethodMode: Boolean = false,
-    onInstructionClick: (Long) -> Unit = {}
+    onInstructionClick: (Long) -> Unit = {},
+    /** 长按菜单「断点调试」：在仿真中于该地址下断点并跳转仿真 Tab。入参为文件偏移。 */
+    onBreakpointDebug: (Long) -> Unit = {},
+    /** 长按菜单「函数调用」：跳转仿真 Tab 并预填该地址。入参为文件偏移。 */
+    onCallAtEmulation: (Long) -> Unit = {}
 ) {
     val disassemblyData by viewModel.disassemblyData.collectAsStateWithLifecycle()
     val selectedOffset by viewModel.selectedOffset.collectAsStateWithLifecycle()
@@ -117,6 +124,11 @@ fun DisassemblyTab(
     var showAsmHelp by remember { mutableStateOf(false) }
     // 交叉引用面板
     var showXrefSheet by remember { mutableStateOf(false) }
+    // 长按操作菜单目标指令（null 表示菜单未打开）
+    var menuInstruction by remember { mutableStateOf<DisasmInstruction?>(null) }
+    // 节区跳转：悬浮按钮 → 节区列表对话框
+    var showSectionJump by remember { mutableStateOf(false) }
+    val editorUiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     // 初始加载：仅当 selectedOffset == 0（用户未指定目标地址）时自动加载偏移 0 起始的指令；
     // 若用户已通过 onFunctionClick/onSymbolClick 设置了目标地址，则跳过自动加载，
@@ -138,17 +150,24 @@ fun DisassemblyTab(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            Column(modifier = Modifier.fillMaxSize()) {
         // 导航栏（方法模式下隐藏地址跳转与翻页）
         DisassemblyNavigationBar(
             inputAddress = inputAddress,
             onInputAddressChange = { inputAddress = it },
             onJumpToAddress = {
-                val address = inputAddress.toLongOrNull(16) ?: inputAddress.toLongOrNull() ?: 0L
-                // 传入 highlightAfterLoad = address 确保：
-                // 1. 加载 512 字节上下文（前文指令），定位更准确
-                // 2. 加载后自动滚动到目标地址行
-                // 3. 触发脉冲高亮动画，让用户清楚看到目标位置
-                viewModel.loadDisassembly(address, highlightAfterLoad = address)
+                val raw = inputAddress.toLongOrNull(16) ?: inputAddress.toLongOrNull() ?: 0L
+                // resolveJumpAddress：粘贴的虚拟地址（如长按菜单复制的函数地址）超出
+                // 文件大小时自动按 vaddr→paddr 换算，避免越界读不到数据
+                scope.launch {
+                    val address = viewModel.resolveJumpAddress(raw)
+                    // 传入 highlightAfterLoad = address 确保：
+                    // 1. 加载 512 字节上下文（前文指令），定位更准确
+                    // 2. 加载后自动滚动到目标地址行
+                    // 3. 触发脉冲高亮动画，让用户清楚看到目标位置
+                    viewModel.loadDisassembly(address, highlightAfterLoad = address)
+                }
             },
             onPrevPage = {
                 viewModel.loadDisassembly(disassemblyData.baseAddress - 4096)
@@ -202,16 +221,44 @@ fun DisassemblyTab(
                         editingInstruction = instruction
                     },
                     onInstructionLongClick = { instruction ->
-                        // 长按 = 交叉引用面板
+                        // 长按 = 操作菜单（断点调试 / 交叉引用 / 函数调用）
                         onInstructionClick(instruction.address)
-                        viewModel.loadXrefs(instruction.address)
-                        showXrefSheet = true
+                        menuInstruction = instruction
                     },
                     onLoadMoreBefore = { viewModel.loadMoreBefore() },
                     modifier = Modifier.fillMaxSize()
                 )
             }
         }
+            }
+
+            // 节区跳转悬浮按钮（方法模式隐藏，避免破坏方法范围视图）
+            if (!isMethodMode) {
+                SmallFloatingActionButton(
+                    onClick = { showSectionJump = true },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp),
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                ) {
+                    Icon(Icons.Default.List, contentDescription = "节区跳转")
+                }
+            }
+        }
+    }
+
+    // 节区跳转对话框：节区名 + 首地址，点击加载对应文件偏移
+    if (showSectionJump) {
+        SectionJumpDialog(
+            sections = editorUiState.sections,
+            onDismiss = { showSectionJump = false },
+            onJump = { section ->
+                showSectionJump = false
+                // 反汇编视图工作在文件偏移坐标，跳转用 paddr
+                viewModel.loadDisassembly(section.paddr, highlightAfterLoad = section.paddr)
+            }
+        )
     }
 
     // 汇编指令编辑对话框
@@ -256,6 +303,27 @@ fun DisassemblyTab(
         AsmHelpDialog(onDismiss = { showAsmHelp = false })
     }
 
+    // 长按操作菜单：断点调试 / 交叉引用 / 函数调用
+    menuInstruction?.let { inst ->
+        InstructionActionDialog(
+            address = inst.address,
+            onDismiss = { menuInstruction = null },
+            onBreakpointDebug = {
+                menuInstruction = null
+                onBreakpointDebug(inst.address)
+            },
+            onXref = {
+                menuInstruction = null
+                viewModel.loadXrefs(inst.address)
+                showXrefSheet = true
+            },
+            onCallFunction = {
+                menuInstruction = null
+                onCallAtEmulation(inst.address)
+            }
+        )
+    }
+
     // 交叉引用面板
     if (showXrefSheet) {
         XrefBottomSheet(
@@ -265,6 +333,78 @@ fun DisassemblyTab(
                 showXrefSheet = false
                 viewModel.loadDisassembly(addr, highlightAfterLoad = addr)
             }
+        )
+    }
+}
+
+/**
+ * 长按操作菜单：断点调试 / 交叉引用 / 函数调用。
+ */
+@Composable
+private fun InstructionActionDialog(
+    address: Long,
+    onDismiss: () -> Unit,
+    onBreakpointDebug: () -> Unit,
+    onXref: () -> Unit,
+    onCallFunction: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "0x${address.toString(16).uppercase()}",
+                fontFamily = FontFamily.Monospace
+            )
+        },
+        text = {
+            Column {
+                InstructionActionRow(
+                    title = "断点调试",
+                    subtitle = "跳转仿真并在该地址下断点",
+                    onClick = onBreakpointDebug
+                )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                InstructionActionRow(
+                    title = "交叉引用",
+                    subtitle = "查看该地址的引用关系",
+                    onClick = onXref
+                )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                InstructionActionRow(
+                    title = "函数调用",
+                    subtitle = "跳转仿真并预填该地址",
+                    onClick = onCallFunction
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+@Composable
+private fun InstructionActionRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(vertical = 10.dp)
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium
+        )
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
@@ -656,10 +796,64 @@ private fun FunctionLabel(name: String) {
     }
 }
 
-/** 交叉引用面板。 */
+/** 节区跳转对话框：列出节区名与首地址（文件偏移 + vaddr），点击跳转。 */
+@Composable
+private fun SectionJumpDialog(
+    sections: List<SectionInfo>,
+    onDismiss: () -> Unit,
+    onJump: (SectionInfo) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("跳转到节区") },
+        text = {
+            if (sections.isEmpty()) {
+                Text(
+                    "暂无节区数据",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                LazyColumn(modifier = Modifier.height(360.dp)) {
+                    items(sections) { section ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onJump(section) }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = section.name.ifBlank { "<unnamed>" },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "文件偏移 0x${section.paddr.toString(16).uppercase()}" +
+                                        "  ·  vaddr 0x${section.address.toString(16).uppercase()}" +
+                                        "  ·  ${section.size}B",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
+}
+
+/** 交叉引用面板（internal：StructureTab 长按交叉引用复用）。 */
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun XrefBottomSheet(
+internal fun XrefBottomSheet(
     xrefData: XrefDataState,
     onDismiss: () -> Unit,
     onXrefClick: (Long) -> Unit

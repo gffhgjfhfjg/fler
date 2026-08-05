@@ -14,7 +14,8 @@ data class SymbolInfo(
     val type: SymbolType = SymbolType.NOTYPE,
     val bind: SymbolBind = SymbolBind.LOCAL,
     val shndx: Int = 0,                  // 兼容旧 ElfSymbol.shndx
-    val sectionName: String = ""         // Rizin 专有：所在节区名
+    val sectionName: String = "",        // Rizin 专有：所在节区名
+    val paddr: Long = address            // 文件偏移（跳转反汇编/十六进制用；默认回退 vaddr）
 ) {
     companion object {
         @JvmStatic

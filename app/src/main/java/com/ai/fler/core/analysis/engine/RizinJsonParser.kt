@@ -90,7 +90,10 @@ internal object RizinJsonParser {
                     type = parseSymbolType(o.str("type")),
                     bind = parseSymbolBind(o.str("bind")),
                     shndx = o.int("shndx") ?: 0,
-                    sectionName = o.str("section") ?: ""
+                    sectionName = o.str("section") ?: "",
+                    // isj 携带 paddr；缺失或 0（如 UND 导入符号）时回退 vaddr
+                    paddr = o.long("paddr")?.takeIf { it != 0L }
+                        ?: (o.long("vaddr") ?: o.long("addr") ?: 0L)
                 )
             }
         } catch (_: Throwable) { emptyList() }

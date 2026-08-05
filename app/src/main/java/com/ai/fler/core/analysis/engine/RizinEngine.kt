@@ -387,11 +387,16 @@ class RizinEngine : BinaryAnalysisEngine {
     // ------------------------------------------------------------------
 
     override suspend fun paddrToVaddr(handle: AnalysisHandle, paddr: Long): Long {
-        val hexAddr = "0x${paddr.toString(16)}"
-        if (cmd(handle, "s $hexAddr") == null) return paddr
-        // 用 v. 命令获取当前地址的虚拟地址
-        val vaddr = cmd(handle, "v.") ?: return paddr
-        return vaddr.trim().toLongOrNull(16) ?: paddr
+        val core = corePtr(handle)
+        if (core == 0L) return paddr
+        // 原生 rz_io_p2v 按段 map 换算：io.va=true 时「s <paddr>; v.」命令
+        // 会把入参当虚拟地址解释，v. 原样返回 seek，恒等失效（PIE 库差
+        // 0x4000 时永远失败）；p2v 与 vp 对称，与 vaddrToPaddr 语义一致。
+        val v = withContext(Dispatchers.IO) { RizinBindings.paddrToVaddr(core, paddr) }
+        if (v != paddr) return v
+        // 映射外回退：命令路径（io.va=false 会话的 v. 语义正确）
+        if (cmd(handle, "s 0x${paddr.toString(16)}") == null) return paddr
+        return cmd(handle, "v.")?.trim()?.toLongOrNull(16) ?: paddr
     }
 
     override suspend fun vaddrToPaddr(handle: AnalysisHandle, vaddr: Long): Long {

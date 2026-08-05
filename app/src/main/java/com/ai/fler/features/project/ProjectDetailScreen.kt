@@ -343,27 +343,37 @@ private fun AnalysisCard(
 
             if (analysis.resultCode == Analysis.RESULT_SUCCESS) {
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    TextButton(onClick = onPpBrowse, modifier = Modifier.weight(1f)) {
-                        Icon(
-                            imageVector = Icons.Default.Description,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("PP 浏览")
-                    }
-                    TextButton(onClick = onAsmBrowse, modifier = Modifier.weight(1f)) {
-                        Icon(
-                            imageVector = Icons.Default.Category,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("ASM 浏览")
+                if (analysis.libappPath.isNullOrEmpty()) {
+                    // 非 Flutter 分析（无 libapp.so）：没有 Blutter 产物，
+                    // 提示用户从下方 SO 文件列表进入 SO 编辑器
+                    Text(
+                        text = "非 Flutter 项目：native 库见下方 SO 文件列表",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(onClick = onPpBrowse, modifier = Modifier.weight(1f)) {
+                            Icon(
+                                imageVector = Icons.Default.Description,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("PP 浏览")
+                        }
+                        TextButton(onClick = onAsmBrowse, modifier = Modifier.weight(1f)) {
+                            Icon(
+                                imageVector = Icons.Default.Category,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("ASM 浏览")
+                        }
                     }
                 }
             }

@@ -1,6 +1,7 @@
 package com.ai.fler.core.service
 
 import android.util.Log
+import com.ai.fler.core.log.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -20,6 +21,7 @@ import javax.inject.Singleton
 class DualSourceDownloader @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val sourceConfig: EngineSourceConfig,
+    private val appLogger: AppLogger,
 ) {
     companion object {
         private const val TAG = "FlerEngine"
@@ -53,11 +55,14 @@ class DualSourceDownloader @Inject constructor(
         for (url in candidates) {
             try {
                 Log.i(TAG, "尝试下载源: $url")
+                appLogger.info(TAG, "尝试下载源: $url")
                 downloadFromSource(url, target, onProgress)
                 Log.i(TAG, "下载源成功: $url")
+                appLogger.info(TAG, "下载源成功: $url")
                 return@withContext target
             } catch (e: Exception) {
                 Log.e(TAG, "下载源失败: $url, 原因: ${e.message}", e)
+                appLogger.error(TAG, "下载源失败: $url, 原因: ${e.message}")
                 lastException = e
                 // 清理可能的部分下载
                 target.delete()

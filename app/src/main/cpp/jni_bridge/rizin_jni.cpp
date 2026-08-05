@@ -161,6 +161,11 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeCmdStr(
  * @param offset 文件偏移
  * @param size  读取长度
  * @return 字节数组，失败返回 null
+ *
+ * 必须用 rz_io_pread_at 物理直读，不能 rz_io_nread_at：
+ * io.va=true 时 nread_at 按段 map 裁剪，只覆盖第一段（ELF 头区），
+ * 第二段起的 .text 等段无 map 会直接返回 0 字节——PIE 库反汇编
+ * 跳转全部落空（症状：搜索/跳转目标地址永远“无数据”）。
  */
 JNIEXPORT jbyteArray JNICALL
 Java_com_ai_fler_core_jni_RizinBindings_nativeReadBytes(
@@ -170,13 +175,33 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeReadBytes(
     if (!core || !core->io || jSize <= 0) return nullptr;
 
     std::vector<uint8_t> buf(static_cast<size_t>(jSize));
-    int n = rz_io_nread_at(core->io, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(jSize));
+    int n = rz_io_pread_at(core->io, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(jSize));
     if (n <= 0) return nullptr;
 
     jbyteArray result = env->NewByteArray(static_cast<jsize>(n));
     env->SetByteArrayRegion(result, 0, static_cast<jsize>(n),
                              reinterpret_cast<const jbyte*>(buf.data()));
     return result;
+}
+
+/**
+ * 文件偏移（物理地址）→ 虚拟地址。
+ *
+ * 不能用「s <paddr>; v.」命令实现：io.va=true 时 s 命令把入参当虚拟
+ * 地址解释，v. 原样返回 seek，换算恒等失效（PIE 库差 0x4000 时永远
+ * 失败，症状：长按汇编行「断点调试/函数调用」跳转仿真后地址仍是 paddr）。
+ * rz_io_p2v 按段 map 做物理→虚拟换算，与 vp（vaddr→paddr）对称。
+ * 映射外返回 UT64_MAX，调用方回退原值。
+ */
+JNIEXPORT jlong JNICALL
+Java_com_ai_fler_core_jni_RizinBindings_nativePaddrToVaddr(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong handle, jlong paddr) {
+
+    RzCore* core = CORE(handle);
+    if (!core || !core->io) return paddr;
+    ut64 v = rz_io_p2v(core->io, static_cast<ut64>(paddr));
+    if (v == UT64_MAX) return paddr;
+    return static_cast<jlong>(v);
 }
 
 /**
@@ -190,7 +215,7 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeReadBytes(
  * rz_io_pwrite_at —— 它按 paddr（= 文件偏移）直接写 desc，绕过 io.va 的
  * map 翻译，也绕过 ELF 段写权限检查（io.va=true 时代码段的 map 是 R-X，
  * rz_core_write_at → rz_io_write 会因无写权限而失败，这是此前写入失败的根因）。
- * 读取侧 rz_io_nread_at 同样是物理直读，二者地址空间一致。
+ * 读取侧 rz_io_pread_at 同样是物理直读（nread_at 会受段 map 裁剪），二者地址空间一致。
  * 另强制关闭 io.cache，保证写入直接落到文件而非内存缓存。
  */
 JNIEXPORT jboolean JNICALL
@@ -216,7 +241,7 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeWriteBytes(
     bool readbackMatched = false;
     if (ok && size > 0) {
         std::vector<uint8_t> check(static_cast<size_t>(size));
-        int r = rz_io_nread_at(core->io, static_cast<ut64>(jOffset), check.data(), static_cast<size_t>(size));
+        int r = rz_io_pread_at(core->io, static_cast<ut64>(jOffset), check.data(), static_cast<size_t>(size));
         readbackMatched = (r == size) && (std::memcmp(check.data(), buf.data(), size) == 0);
     }
 

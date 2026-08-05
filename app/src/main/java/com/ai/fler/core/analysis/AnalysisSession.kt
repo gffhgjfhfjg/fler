@@ -1,6 +1,7 @@
 package com.ai.fler.core.analysis
 
 import android.util.Log
+import com.ai.fler.core.log.AppLogger
 import com.ai.fler.core.service.BackupManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -29,7 +30,8 @@ import javax.inject.Singleton
 class AnalysisSession @Inject constructor(
     private val registry: EngineRegistry,
     private val backupManager: BackupManager,
-    private val soEditorCache: SoEditorCache
+    private val soEditorCache: SoEditorCache,
+    private val appLogger: AppLogger,
 ) {
     private data class SessionEntry(
         val handle: AnalysisHandle,
@@ -121,6 +123,7 @@ class AnalysisSession @Inject constructor(
                 }
             }
         }
+        appLogger.info("AnalysisSession", "会话打开成功: $filePath, engine=${(engines.firstOrNull { true })?.engineId ?: "N/A"}")
         return OpenResult.Failure(lastReason ?: "所有引擎均无法打开文件")
     }
 
@@ -156,6 +159,7 @@ class AnalysisSession @Inject constructor(
     }
 
     suspend fun closeAll() {
+        appLogger.info("AnalysisSession", "关闭所有会话")
         mutex.withLock {
             for ((hv, entry) in sessions) {
                 try { registry.getAnalysis(entry.engineId)?.close(AnalysisHandle(hv)) } catch (_: Throwable) { /* noop */ }

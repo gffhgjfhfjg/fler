@@ -7,6 +7,7 @@ import com.ai.fler.core.mcp.McpLogger
 import com.ai.fler.core.mcp.McpProtocol
 import com.ai.fler.core.mcp.McpSessions
 import com.ai.fler.core.mcp.McpToolHandlers
+import com.ai.fler.core.log.AppLogger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +35,7 @@ class McpServerManager @Inject constructor(
     private val config: McpConfig,
     private val toolHandlers: McpToolHandlers,
     private val logger: McpLogger,
+    private val appLogger: AppLogger,
     @ApplicationContext private val context: Context,
 ) {
     private val sessions = McpSessions()
@@ -85,15 +87,18 @@ class McpServerManager @Inject constructor(
                 sseLanUrl = if (lanIp != null) "http://$lanIp:$port/sse" else "",
             )
             logger.info("MCP 服务器已启动: 127.0.0.1:$port（${config.bindMode.value}）")
+            appLogger.info("McpServer", "MCP 服务器已启动: 127.0.0.1:$port（${config.bindMode.value}）")
             return true
         }
         _status.value = McpStatus(errorMessage = "端口 ${base}..${base + MAX_PORT_ATTEMPTS - 1} 均被占用")
         logger.error("MCP 服务器启动失败: 端口 ${base}..${base + MAX_PORT_ATTEMPTS - 1} 均被占用")
+        appLogger.error("McpServer", "MCP 服务器启动失败: 端口 ${base}..${base + MAX_PORT_ATTEMPTS - 1} 均被占用")
         return false
     }
 
     fun stop() {
         logger.info("MCP 服务器已停止")
+        appLogger.info("McpServer", "MCP 服务器已停止")
         httpServer.stop()
         _status.value = McpStatus()
     }

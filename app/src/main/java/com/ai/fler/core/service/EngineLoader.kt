@@ -4,6 +4,7 @@ import android.content.Context
 import android.system.Os
 import android.util.Log
 import com.ai.fler.core.jni.BlutterEngine
+import com.ai.fler.core.log.AppLogger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.io.RandomAccessFile
@@ -25,6 +26,7 @@ import javax.inject.Singleton
 @Singleton
 class EngineLoader @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val appLogger: AppLogger,
 ) {
     private val engineDir by lazy { File(context.filesDir, "engines") }
     private val loadedLibs = mutableSetOf<String>()
@@ -95,10 +97,12 @@ class EngineLoader @Inject constructor(
         synchronized(loadLock) {
             if (engineFileName !in loadedLibs) {
                 Log.i(TAG, "System.load: ${engineFile.absolutePath}")
+                appLogger.info(TAG, "加载引擎: $engineFileName")
                 System.load(engineFile.absolutePath)
                 loadedLibs.add(engineFileName)
             } else {
                 Log.i(TAG, "引擎已加载（跳过）: $engineFileName")
+                appLogger.info(TAG, "引擎已加载（跳过）: $engineFileName")
             }
         }
 

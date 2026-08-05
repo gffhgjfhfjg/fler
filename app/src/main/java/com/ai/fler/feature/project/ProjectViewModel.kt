@@ -231,6 +231,41 @@ class ProjectViewModel @Inject constructor(
             }
 
             // ====================================================================
+            // 非 Flutter 兜底：无 libapp.so 时跳过 Blutter 阶段（2/3/4），
+            // 直接把提取到的 native 库登记入库并完成分析
+            // （产物浏览复用项目详情页的「SO 文件」列表 → SO 编辑器）
+            // ====================================================================
+            if (!extractResult.isFlutter) {
+                val libCount = extractResult.extraLibs.size +
+                    (if (extractResult.libflutter != null) 1 else 0)
+                Log.i(TAG, "非 Flutter APK，跳过 Blutter 阶段，仅提取 $libCount 个 native 库")
+                try {
+                    updateProgress(
+                        projectId, AnalysisStage.SavingResults, 0.8f,
+                        "非 Flutter 应用：保存 native 库信息..."
+                    )
+                    val nativeResult = AnalyzeResult(
+                        success = true,
+                        classesCount = 0,
+                        methodsCount = 0,
+                        ppEntriesCount = 0,
+                        errorMessage = null
+                    )
+                    completeAnalysis(analysisId, extractResult, nativeResult)
+                } catch (e: Exception) {
+                    Log.e(TAG, "非 Flutter 分析保存失败", e)
+                    failAnalysis(analysisId, "保存分析结果失败: ${e.message}")
+                    return@launch
+                }
+                updateProgress(
+                    projectId, AnalysisStage.Completed, 1.0f,
+                    "非 Flutter 应用：已提取 $libCount 个 native 库"
+                )
+                projectDao.update(project.copy(status = Project.STATUS_COMPLETED))
+                return@launch
+            }
+
+            // ====================================================================
             // 阶段 2: 检测 Dart 版本
             // ====================================================================
             val dartVersion: String
@@ -465,11 +500,14 @@ class ProjectViewModel @Inject constructor(
             libflutterPath = extractResult.libflutter?.path
         )
 
-        // 保存库信息
+        // 保存库信息（Flutter：libapp/libflutter；非 Flutter：回退提取的全部 native 库）
         extractResult.libapp?.let { lib ->
             libraryDao.insert(lib.copy(analysisId = analysisId))
         }
         extractResult.libflutter?.let { lib ->
+            libraryDao.insert(lib.copy(analysisId = analysisId))
+        }
+        extractResult.extraLibs.forEach { lib ->
             libraryDao.insert(lib.copy(analysisId = analysisId))
         }
     }

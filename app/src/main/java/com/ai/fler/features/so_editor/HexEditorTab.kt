@@ -1,5 +1,7 @@
 package com.ai.fler.features.so_editor
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -50,6 +52,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ai.fler.ui.animation.AnimDuration
+import com.ai.fler.ui.animation.AnimEasing
 import kotlinx.coroutines.launch
 
 /**
@@ -68,6 +72,18 @@ fun HexEditorTab(
     val selectedOffset by viewModel.selectedOffset.collectAsStateWithLifecycle()
     val patchedOffsets by viewModel.patchedOffsets.collectAsStateWithLifecycle()
     val flashOffset by viewModel.flashOffset.collectAsStateWithLifecycle()
+    val flashTrigger by viewModel.flashTrigger.collectAsStateWithLifecycle()
+
+    // 呼吸脉冲动画：与汇编页一致的 2 次 0→1→0，跳转目标短暂高亮后恢复
+    val pulseAlpha = remember { Animatable(0f) }
+    LaunchedEffect(flashOffset, flashTrigger) {
+        if (flashOffset == null) return@LaunchedEffect
+        pulseAlpha.snapTo(0f)
+        repeat(2) {
+            pulseAlpha.animateTo(1f, tween(AnimDuration.fast, easing = AnimEasing.entry))
+            pulseAlpha.animateTo(0f, tween(AnimDuration.fast, easing = AnimEasing.exit))
+        }
+    }
 
     var inputOffset by remember { mutableStateOf("") }
     var selectedByteIndex by remember { mutableStateOf(-1) }
@@ -88,8 +104,13 @@ fun HexEditorTab(
             inputOffset = inputOffset,
             onInputOffsetChange = { inputOffset = it },
             onJumpToOffset = {
-                val offset = inputOffset.toLongOrNull(16) ?: inputOffset.toLongOrNull() ?: 0L
-                viewModel.loadHexData(offset)
+                val raw = inputOffset.toLongOrNull(16) ?: inputOffset.toLongOrNull() ?: 0L
+                // 粘贴虚拟地址（如长按菜单复制的函数地址）时自动换算成文件偏移
+                scope.launch {
+                    val offset = viewModel.resolveJumpAddress(raw)
+                    viewModel.loadHexData(offset)
+                    viewModel.setFlashOffset(offset)
+                }
             },
             onPrevPage = {
                 viewModel.loadHexData((hexData.offset - 256).coerceAtLeast(0))
@@ -130,6 +151,8 @@ fun HexEditorTab(
                     selectedByteIndex = selectedByteIndex,
                     patchedOffsets = patchedOffsets,
                     flashOffset = flashOffset,
+                    flashTrigger = flashTrigger,
+                    flashAlpha = pulseAlpha.value,
                     onByteClick = { index ->
                         selectedByteIndex = index
                         newByteValue = ""
@@ -253,6 +276,8 @@ private fun HexDataView(
     selectedByteIndex: Int,
     patchedOffsets: Set<Long>,
     flashOffset: Long?,
+    flashTrigger: Int,
+    flashAlpha: Float,
     onByteClick: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -260,8 +285,8 @@ private fun HexDataView(
     val rows = (data.size + bytesPerRow - 1) / bytesPerRow
     val listState = rememberLazyListState()
 
-    // 闪烁地址所在行滚动到可视区
-    LaunchedEffect(flashOffset) {
+    // 闪烁地址所在行滚动到可视区（flashTrigger 保证跳同一地址也重新定位）
+    LaunchedEffect(flashOffset, flashTrigger) {
         val fo = flashOffset ?: return@LaunchedEffect
         val idx = (fo - baseOffset).toInt()
         if (idx in 0 until data.size) {
@@ -285,6 +310,7 @@ private fun HexDataView(
                 selectedByteIndex = selectedByteIndex,
                 patchedOffsets = patchedOffsets,
                 flashOffset = flashOffset,
+                flashAlpha = flashAlpha,
                 onByteClick = onByteClick
             )
         }
@@ -299,6 +325,7 @@ private fun HexRow(
     selectedByteIndex: Int,
     patchedOffsets: Set<Long>,
     flashOffset: Long?,
+    flashAlpha: Float,
     onByteClick: (Int) -> Unit
 ) {
     Row(
@@ -338,7 +365,7 @@ private fun HexRow(
                             .clip(RoundedCornerShape(3.dp))
                             .background(
                                 when {
-                                    isFlash -> Color(0xFFD32F2F)
+                                    isFlash -> Color(0xFFD32F2F).copy(alpha = flashAlpha)
                                     isSelected -> MaterialTheme.colorScheme.primary
                                     isPatched -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
                                     else -> Color.Transparent

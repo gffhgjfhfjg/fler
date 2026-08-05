@@ -60,6 +60,8 @@ struct EmuContext {
     std::mutex opMutex;      // 串行化 uc_* 操作（除 uc_emu_stop 外均非线程安全）
     std::atomic<bool> stopRequested{false};
     std::atomic<int> stopReason{STOP_NONE};
+    // 本次 run 是否检查断点：单步（step）为 false，否则断点会卡在命中地址永不前进
+    std::atomic<bool> respectBreakpoints{true};
     uint64_t instrCount = 0;   // code hook 内累计（仅 run 期间有效）
     std::chrono::steady_clock::time_point deadline{};
     bool hasDeadline = false;
@@ -81,7 +83,9 @@ static void codeHook(uc_engine* uc, uint64_t address, uint32_t /*size*/, void* u
     }
     {
         std::lock_guard<std::mutex> lock(ctx->bpMutex);
-        if (ctx->breakpoints.count(address) > 0) {
+        if (ctx->respectBreakpoints.load() && ctx->breakpoints.count(address) > 0) {
+            __android_log_print(ANDROID_LOG_INFO, TAG,
+                                "breakpoint hit at 0x%llx", (unsigned long long)address);
             ctx->stopReason.store(STOP_BREAKPOINT);
             uc_emu_stop(uc);
             return;
@@ -320,7 +324,10 @@ Java_com_ai_fler_core_jni_UnicornBindings_nativeReadAllRegisters(
 // ─────────────────────────────────────────────────────────────
 
 // 运行并返回 [stopReason, pc, instrCount]
-static jlongArray runCore(JNIEnv* env, EmuContext* ctx, uint64_t maxInstrs, jlong timeoutMs) {
+// respectBp=false（单步）时不检查断点：断点停在 PC 处时单步必须能越过该地址前进
+static jlongArray runCore(JNIEnv* env, EmuContext* ctx, uint64_t maxInstrs, jlong timeoutMs,
+                          bool respectBp) {
+    ctx->respectBreakpoints.store(respectBp);
     ctx->stopReason.store(STOP_NONE);
     ctx->instrCount = 0;
     ctx->hasDeadline = timeoutMs > 0;
@@ -350,6 +357,10 @@ static jlongArray runCore(JNIEnv* env, EmuContext* ctx, uint64_t maxInstrs, jlon
 
     uint64_t pcAfter = 0;
     uc_reg_read(ctx->uc, UC_ARM64_REG_PC, &pcAfter);
+    __android_log_print(ANDROID_LOG_INFO, TAG,
+                        "run end: reason=%d pc=0x%llx instrs=%llu (bps=%zu)",
+                        reason, (unsigned long long)pcAfter,
+                        (unsigned long long)ctx->instrCount, ctx->breakpoints.size());
 
     jlongArray result = env->NewLongArray(3);
     jlong vals[3] = {reason, static_cast<jlong>(pcAfter), static_cast<jlong>(ctx->instrCount)};
@@ -363,7 +374,8 @@ Java_com_ai_fler_core_jni_UnicornBindings_nativeRun(
     auto* ctx = reinterpret_cast<EmuContext*>(handle);
     if (!ctx || !ctx->uc) return nullptr;
     std::lock_guard<std::mutex> lock(ctx->opMutex);
-    return runCore(env, ctx, static_cast<uint64_t>(instrCount < 0 ? 0 : instrCount), timeoutMs);
+    return runCore(env, ctx, static_cast<uint64_t>(instrCount < 0 ? 0 : instrCount),
+                   timeoutMs, true);
 }
 
 extern "C" JNIEXPORT jlongArray JNICALL
@@ -372,7 +384,7 @@ Java_com_ai_fler_core_jni_UnicornBindings_nativeStep(
     auto* ctx = reinterpret_cast<EmuContext*>(handle);
     if (!ctx || !ctx->uc) return nullptr;
     std::lock_guard<std::mutex> lock(ctx->opMutex);
-    jlongArray r = runCore(env, ctx, 1, 0);
+    jlongArray r = runCore(env, ctx, 1, 0, false);
     // 单步语义：指令数限制停止时原因码修正为 SINGLE_STEP
     if (r) {
         jlong vals[3];
@@ -417,6 +429,8 @@ Java_com_ai_fler_core_jni_UnicornBindings_nativeAddBreakpoint(
     if (!ctx) return JNI_FALSE;
     std::lock_guard<std::mutex> lock(ctx->bpMutex);
     ctx->breakpoints.insert(static_cast<uint64_t>(address));
+    __android_log_print(ANDROID_LOG_INFO, TAG, "breakpoint added: 0x%llx (total=%zu)",
+                        (unsigned long long)address, ctx->breakpoints.size());
     return JNI_TRUE;
 }
 

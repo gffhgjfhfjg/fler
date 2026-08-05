@@ -11,8 +11,10 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -35,6 +38,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -49,6 +54,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateMapOf
@@ -56,6 +62,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -66,6 +74,7 @@ import com.ai.fler.core.analysis.StringInfo
 import com.ai.fler.core.analysis.SymbolInfo
 import com.ai.fler.core.analysis.SymbolType
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 
 /**
  * ELF 结构 Tab（Engine 抽象层版本）。
@@ -86,6 +95,8 @@ fun StructureTab(
     onSectionClick: (SectionInfo) -> Unit,
     onSymbolClick: (SymbolInfo) -> Unit,
     onFunctionClick: (FunctionInfo) -> Unit,
+    onSymbolDebug: (SymbolInfo) -> Unit = {},
+    onFunctionDebug: (FunctionInfo) -> Unit = {},
     onStringsTabSelected: () -> Unit = {},
     viewModel: SoEditorViewModel,
     modifier: Modifier = Modifier
@@ -94,6 +105,16 @@ fun StructureTab(
     val selectedSubTab = StructureSubTab.values().getOrElse(selectedSubTabOrdinal) { StructureSubTab.SECTIONS }
     val flashAddress by viewModel.structureFlashAddress.collectAsStateWithLifecycle()
     val flashTrigger by viewModel.structureFlashTrigger.collectAsStateWithLifecycle()
+
+    // 长按交叉引用：复用汇编页的 XrefBottomSheet（同包 internal）。
+    // 符号/函数/字符串地址均为 vaddr 坐标，与 Rizin axt/axf 一致，可直接查询
+    val xrefData by viewModel.xrefData.collectAsStateWithLifecycle()
+    var showXrefSheet by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val openXrefs: (Long) -> Unit = { addr ->
+        viewModel.loadXrefs(addr)
+        showXrefSheet = true
+    }
 
     // 呼吸脉冲动画：用 Animatable 驱动 0→1→0→1→0（2 次呼吸）
     val pulseAlpha = remember { Animatable(0f) }
@@ -277,6 +298,8 @@ fun StructureTab(
                 )
                 StructureSubTab.SYMBOLS -> SymbolsList(
                     filteredSymbols, onSymbolClick,
+                    onSymbolDebug = onSymbolDebug,
+                    onSymbolXref = { openXrefs(it.address) },
                     listState = listStates[StructureSubTab.SYMBOLS.ordinal]!!,
                     flashAddress = flashAddress,
                     flashAlpha = pulseAlpha.value,
@@ -285,6 +308,8 @@ fun StructureTab(
                 )
                 StructureSubTab.DYNAMIC_SYMBOLS -> SymbolsList(
                     filteredDynamicSymbols, onSymbolClick,
+                    onSymbolDebug = onSymbolDebug,
+                    onSymbolXref = { openXrefs(it.address) },
                     listState = listStates[StructureSubTab.DYNAMIC_SYMBOLS.ordinal]!!,
                     flashAddress = flashAddress,
                     flashAlpha = pulseAlpha.value,
@@ -293,6 +318,8 @@ fun StructureTab(
                 )
                 StructureSubTab.FUNCTIONS -> FunctionsList(
                     filteredFunctions, onFunctionClick,
+                    onFunctionDebug = onFunctionDebug,
+                    onFunctionXref = { openXrefs(it.vaddr) },
                     listState = listStates[StructureSubTab.FUNCTIONS.ordinal]!!,
                     flashAddress = flashAddress,
                     flashAlpha = pulseAlpha.value,
@@ -301,6 +328,7 @@ fun StructureTab(
                 )
                 StructureSubTab.STRINGS -> StringsList(
                     filteredStrings,
+                    onStringXref = { openXrefs(it.address) },
                     listState = listStates[StructureSubTab.STRINGS.ordinal]!!,
                     isFiltered = currentQuery.isNotBlank(),
                     modifier = Modifier.fillMaxSize()
@@ -333,6 +361,23 @@ fun StructureTab(
                 }
             }
         }
+    }
+
+    // 交叉引用面板（符号/函数/字符串长按菜单入口）：
+    // 点击结果行 → vaddr 转文件偏移后切到汇编 Tab 并定位高亮
+    if (showXrefSheet) {
+        XrefBottomSheet(
+            xrefData = xrefData,
+            onDismiss = { showXrefSheet = false },
+            onXrefClick = { addr ->
+                showXrefSheet = false
+                scope.launch {
+                    val paddr = viewModel.resolveJumpAddress(addr)
+                    viewModel.loadDisassembly(paddr, highlightAfterLoad = paddr)
+                    viewModel.setTab(EditorTab.DISASSEMBLY)
+                }
+            }
+        )
     }
 }
 
@@ -606,6 +651,8 @@ private fun FlagChip(text: String) {
 private fun SymbolsList(
     symbols: List<SymbolInfo>,
     onSymbolClick: (SymbolInfo) -> Unit,
+    onSymbolDebug: (SymbolInfo) -> Unit = {},
+    onSymbolXref: (SymbolInfo) -> Unit = {},
     listState: LazyListState,
     flashAddress: Long?,
     flashAlpha: Float = 0f,
@@ -628,39 +675,53 @@ private fun SymbolsList(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        items(
+        itemsIndexed(
             items = symbols,
-            key = { "${it.name}_${it.address}" }
-        ) { symbol ->
+            // 索引入 key：同名同址符号（静态/动态表重复导出、UND 地址均为 0）
+            // 会使 name_address 碰撞，导致 LazyColumn 抛 "Key was already used" 崩溃
+            key = { index, _ -> index }
+        ) { _, symbol ->
             val isFlash = flashAddress != null && symbol.address == flashAddress
             val a = if (isFlash) flashAlpha else 0f
             SymbolRow(
                 symbol = symbol,
                 flashBg = flashColor(a),
                 flashScale = flashScale(a),
-                onClick = { onSymbolClick(symbol) }
+                onClick = { onSymbolClick(symbol) },
+                onDebug = { onSymbolDebug(symbol) },
+                onXref = { onSymbolXref(symbol) }
             )
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SymbolRow(
     symbol: SymbolInfo,
     flashBg: Color = Color.Transparent,
     flashScale: Float = 1f,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onDebug: () -> Unit = {},
+    onXref: () -> Unit = {}
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .graphicsLayer { scaleX = flashScale; scaleY = flashScale }
-            .clickable { onClick() }
-            .background(MaterialTheme.colorScheme.surface)
-            .background(flashBg)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+    var showMenu by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val addressText = "0x${symbol.address.toString(16).uppercase()}"
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .graphicsLayer { scaleX = flashScale; scaleY = flashScale }
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { showMenu = true }
+                )
+                .background(MaterialTheme.colorScheme.surface)
+                .background(flashBg)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
         SymbolTypeBadge(type = symbol.type)
         Spacer(modifier = Modifier.width(8.dp))
         Text(
@@ -671,12 +732,21 @@ private fun SymbolRow(
             maxLines = 1
         )
         Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = "0x${symbol.address.toString(16).uppercase().padStart(16, '0')}",
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        // 主地址 = vaddr（仿真坐标）；副行标注 paddr（汇编/hex 文件偏移坐标）
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                text = "0x${symbol.address.toString(16).uppercase().padStart(16, '0')}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "paddr 0x${symbol.paddr.toString(16).uppercase().padStart(16, '0')}",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            )
+        }
         Spacer(modifier = Modifier.width(8.dp))
         if (symbol.size > 0) {
             Text(
@@ -684,6 +754,31 @@ private fun SymbolRow(
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        }
+        // 长按菜单：复制地址 / 调试（跳转仿真并预填地址）
+        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+            DropdownMenuItem(
+                text = { Text("复制地址（$addressText）") },
+                onClick = {
+                    clipboard.setText(AnnotatedString(addressText))
+                    showMenu = false
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("调试（跳转仿真）") },
+                onClick = {
+                    showMenu = false
+                    onDebug()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("交叉引用") },
+                onClick = {
+                    showMenu = false
+                    onXref()
+                }
             )
         }
     }
@@ -719,6 +814,8 @@ private fun SymbolTypeBadge(type: SymbolType) {
 private fun FunctionsList(
     functions: List<FunctionInfo>,
     onFunctionClick: (FunctionInfo) -> Unit,
+    onFunctionDebug: (FunctionInfo) -> Unit = {},
+    onFunctionXref: (FunctionInfo) -> Unit = {},
     listState: LazyListState,
     flashAddress: Long?,
     flashAlpha: Float = 0f,
@@ -741,39 +838,52 @@ private fun FunctionsList(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        items(
+        itemsIndexed(
             items = functions,
-            key = { "${it.name}_${it.vaddr}" }
-        ) { func ->
+            // 同名同址函数（如 symtab/dynsym 重复识别）会导致 key 碰撞崩溃，索引入 key 天然唯一
+            key = { index, _ -> index }
+        ) { _, func ->
             val isFlash = flashAddress != null && func.vaddr == flashAddress
             val a = if (isFlash) flashAlpha else 0f
             FunctionRow(
                 func = func,
                 flashBg = flashColor(a),
                 flashScale = flashScale(a),
-                onClick = { onFunctionClick(func) }
+                onClick = { onFunctionClick(func) },
+                onDebug = { onFunctionDebug(func) },
+                onXref = { onFunctionXref(func) }
             )
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FunctionRow(
     func: FunctionInfo,
     flashBg: Color = Color.Transparent,
     flashScale: Float = 1f,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onDebug: () -> Unit = {},
+    onXref: () -> Unit = {}
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .graphicsLayer { scaleX = flashScale; scaleY = flashScale }
-            .clickable { onClick() }
-            .background(MaterialTheme.colorScheme.surface)
-            .background(flashBg)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+    var showMenu by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val addressText = "0x${func.vaddr.toString(16).uppercase()}"
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .graphicsLayer { scaleX = flashScale; scaleY = flashScale }
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { showMenu = true }
+                )
+                .background(MaterialTheme.colorScheme.surface)
+                .background(flashBg)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
         Text(
             text = "FN",
             style = MaterialTheme.typography.labelSmall,
@@ -802,12 +912,19 @@ private fun FunctionRow(
             }
         }
         Spacer(modifier = Modifier.width(8.dp))
+        // 主地址 = vaddr（仿真坐标）；副行标注 paddr（汇编/hex 文件偏移坐标）
         Column(horizontalAlignment = Alignment.End) {
             Text(
                 text = "0x${func.vaddr.toString(16).uppercase().padStart(8, '0')}",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "paddr 0x${func.offset.toString(16).uppercase().padStart(8, '0')}",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
             )
             if (func.size > 0) {
                 Text(
@@ -816,6 +933,31 @@ private fun FunctionRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+        }
+        // 长按菜单：复制地址 / 调试（跳转仿真并预填函数地址）
+        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+            DropdownMenuItem(
+                text = { Text("复制函数地址（$addressText）") },
+                onClick = {
+                    clipboard.setText(AnnotatedString(addressText))
+                    showMenu = false
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("调试（跳转仿真）") },
+                onClick = {
+                    showMenu = false
+                    onDebug()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("交叉引用") },
+                onClick = {
+                    showMenu = false
+                    onXref()
+                }
+            )
         }
     }
 }
@@ -827,6 +969,7 @@ private fun FunctionRow(
 @Composable
 private fun StringsList(
     strings: List<StringInfo>,
+    onStringXref: (StringInfo) -> Unit = {},
     listState: LazyListState,
     isFiltered: Boolean = false,
     modifier: Modifier = Modifier
@@ -847,52 +990,71 @@ private fun StringsList(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        items(
+        itemsIndexed(
             items = strings,
-            key = { "${it.address}_${it.string.hashCode()}" }
-        ) { str ->
-            StringRow(str = str)
+            // 同地址/同内容字符串会使 address_hashCode 碰撞，索引入 key 天然唯一
+            key = { index, _ -> index }
+        ) { _, str ->
+            StringRow(str = str, onXref = { onStringXref(str) })
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun StringRow(str: StringInfo) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
-        Text(
-            text = str.string,
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 2,
-            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-        )
-        Row {
-            Text(
-                text = "0x${str.address.toString(16).uppercase().padStart(8, '0')}",
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            if (str.section.isNotBlank()) {
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = str.section,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
+private fun StringRow(str: StringInfo, onXref: () -> Unit = {}) {
+    var showMenu by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = {},
+                    onLongClick = { showMenu = true }
                 )
-            }
-            if (str.size > 0) {
-                Spacer(modifier = Modifier.width(8.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        ) {
+            Text(
+                text = str.string,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+            Row {
                 Text(
-                    text = "${str.size}B",
+                    text = "0x${str.address.toString(16).uppercase().padStart(8, '0')}",
                     style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (str.section.isNotBlank()) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = str.section,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                if (str.size > 0) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "${str.size}B",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
+        }
+        // 长按菜单：交叉引用（查哪些代码引用了该字符串，常用于定位提示文案/密钥）
+        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+            DropdownMenuItem(
+                text = { Text("交叉引用") },
+                onClick = {
+                    showMenu = false
+                    onXref()
+                }
+            )
         }
     }
 }

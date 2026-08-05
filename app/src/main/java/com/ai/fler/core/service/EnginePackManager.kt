@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.ai.fler.core.analysis.AnalysisSession
 import com.ai.fler.core.analysis.SoEditorCache
+import com.ai.fler.core.log.AppLogger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -43,6 +44,7 @@ class EnginePackManager @Inject constructor(
     private val analysisSession: AnalysisSession,
     private val soEditorCache: SoEditorCache,
     private val backupManager: BackupManager,
+    private val appLogger: AppLogger,
 ) {
     private val engineDir: File by lazy { File(context.filesDir, "engines") }
 
@@ -181,6 +183,8 @@ class EnginePackManager @Inject constructor(
                 attempt++
                 Log.i(TAG, "开始下载引擎包 (第 $attempt/${MAX_DOWNLOAD_ATTEMPTS} 次尝试), 源: ${downloader.sourceDescription()}")
                 send(EngineProgress(EngineProgress.Phase.DOWNLOADING))
+                Log.i(TAG, "开始下载引擎包")
+                appLogger.info(TAG, "开始下载引擎包")
                 _progress.value = EngineProgress(EngineProgress.Phase.DOWNLOADING)
 
                 try {
@@ -243,6 +247,7 @@ class EnginePackManager @Inject constructor(
 
             // 3. 解压
             Log.i(TAG, "开始解压到: ${engineDir.absolutePath}")
+            appLogger.info(TAG, "开始解压")
             send(EngineProgress(EngineProgress.Phase.EXTRACTING))
             _progress.value = EngineProgress(EngineProgress.Phase.EXTRACTING)
 
@@ -285,6 +290,7 @@ class EnginePackManager @Inject constructor(
 
             // 5. 完成
             Log.i(TAG, "引擎包就绪完成")
+            appLogger.info(TAG, "引擎包就绪完成")
             send(EngineProgress(EngineProgress.Phase.COMPLETED))
             _progress.value = EngineProgress(EngineProgress.Phase.COMPLETED)
             notifyVersionsChanged()
@@ -293,6 +299,7 @@ class EnginePackManager @Inject constructor(
 
         } catch (e: Exception) {
             Log.e(TAG, "引擎包准备失败: ${e.message}", e)
+            appLogger.error(TAG, "引擎包准备失败: ${e.message}")
             val error = EngineProgress(
                 phase = EngineProgress.Phase.FAILED,
                 errorMessage = e.message ?: "未知错误",

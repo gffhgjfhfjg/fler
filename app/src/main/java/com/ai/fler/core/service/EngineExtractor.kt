@@ -1,6 +1,7 @@
 package com.ai.fler.core.service
 
 import android.util.Log
+import com.ai.fler.core.log.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
@@ -16,7 +17,9 @@ import javax.inject.Singleton
  * LZMA2 编解码由 org.tukaani:xz 提供。
  */
 @Singleton
-class EngineExtractor @Inject constructor() {
+class EngineExtractor @Inject constructor(
+    private val appLogger: AppLogger,
+) {
 
     companion object {
         private const val TAG = "FlerEngine"
@@ -38,6 +41,7 @@ class EngineExtractor @Inject constructor() {
         targetDir: File,
         onProgress: (Float) -> Unit,
     ): Unit = withContext(Dispatchers.IO) {
+        appLogger.info(TAG, "开始解压 7z: ${archive.absolutePath}, 大小 ${archive.length()} bytes")
         Log.i(TAG, "开始解压 7z: ${archive.absolutePath}, 大小 ${archive.length()} bytes")
 
         // 清理上一次可能残留的半成品文件
