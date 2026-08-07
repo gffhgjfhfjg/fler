@@ -3,6 +3,8 @@ package com.ai.fler.core.mcp
 import com.ai.fler.core.analysis.AnalysisCapability
 import com.ai.fler.core.analysis.AnalysisSession
 import com.ai.fler.core.analysis.EngineRegistry
+import com.ai.fler.core.analysis.FunctionInfo
+import com.ai.fler.data.dao.DartMethodDao
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -18,6 +20,7 @@ import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -46,12 +49,116 @@ import javax.inject.Singleton
 @Singleton
 class EngineMcpToolRegistry @Inject constructor(
     private val registry: EngineRegistry,
-    private val session: AnalysisSession
+    private val session: AnalysisSession,
+    private val axisResolver: AddressAxisResolver,
+    private val dartMethodDao: DartMethodDao
 ) {
 
     companion object {
         private const val TOOL_PREFIX = "engine_"
     }
+
+    /**
+     * disassemble 专用坐标归一：目标轴随当前引擎变化。
+     * Rizin(pdj) 按 vaddr 寻址；自研引擎 Capstone 按文件偏移寻址。
+     */
+    private suspend fun normalizeForDisasm(input: Long): Long {
+        val engineId = session.currentEngine()?.engineId
+        if (engineId == "self") {
+            val soPath = session.currentFilePath() ?: return input
+            val res = axisResolver.resolve(soPath, input) ?: return input
+            return when (res.inputAxis) {
+                AddressAxis.VADDR -> res.fileOffset
+                else -> input
+            }
+        }
+        return normalizeToVaddr("disassemble", input)
+    }
+
+    /**
+     * 把引擎地址类工具的入参统一归一到 vaddr（Rizin 的 pdj/afij/aflj/afbj/axtj/axfj
+     * 均按 io.va 用 vaddr 寻址）。入参若被识别为文件偏移则自动换算；歧义时拒绝猜测。
+     */
+    private suspend fun normalizeToVaddr(owner: String, input: Long): Long {
+        val soPath = session.currentFilePath()
+        if (soPath == null) return input
+        val res = axisResolver.resolve(soPath, input) ?: return input
+        return when (res.inputAxis) {
+            AddressAxis.VADDR, AddressAxis.NONE -> input
+            AddressAxis.FILE_OFFSET -> res.vaddr
+            AddressAxis.AMBIGUOUS -> throw McpToolException(
+                "$owner: 地址 0x${input.toString(16)} 坐标歧义（既是 ${res.section} 的 vaddr 又是另一段文件偏移），" +
+                    "请先用 translate_address(soPath, address) 明确坐标轴"
+            )
+        }
+    }
+
+    /**
+     * read_bytes/write_bytes 专用坐标归一：目标轴为文件偏移。
+     * 传入虚拟地址（如 .text vaddr 0x11665408）自动换算为文件偏移；
+     * 已是文件偏移则原样放行；歧义时拒绝猜测。
+     */
+    private suspend fun normalizeForRead(input: Long): Long {
+        val soPath = session.currentFilePath() ?: return input
+        val res = axisResolver.resolve(soPath, input) ?: return input
+        return when (res.inputAxis) {
+            AddressAxis.VADDR -> res.fileOffset
+            AddressAxis.FILE_OFFSET, AddressAxis.NONE -> input
+            AddressAxis.AMBIGUOUS -> throw McpToolException(
+                "read/write_bytes: 地址 0x${input.toString(16)} 坐标歧义（既是 ${res.section} 的 vaddr 又是另一段文件偏移），" +
+                    "请先用 translate_address(soPath, address) 明确坐标轴"
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Blutter Dart 方法合并（Dart AOT 上 Rizin 只识别 ~2 个函数，函数级
+    // 工具靠合并 Blutter 恢复的 5 万级方法才可用）。缓存按 soPath 存。
+    // ------------------------------------------------------------------
+    private data class DartFunction(val vaddr: Long, val paddr: Long, val name: String, val size: Long)
+
+    private val dartFunctionCache = ConcurrentHashMap<String, List<DartFunction>>()
+
+    private suspend fun dartFunctions(): List<DartFunction> {
+        val soPath = session.currentFilePath() ?: return emptyList()
+        dartFunctionCache[soPath]?.let { return it }
+        val methods = try {
+            dartMethodDao.getMethodsBySoPathLight(soPath)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        if (methods.isEmpty()) return emptyList()
+        val funcs = methods.mapNotNull { m ->
+            val vaddr = m.functionOffset ?: return@mapNotNull null
+            if (vaddr <= 0L) return@mapNotNull null
+            val name = if (m._className.isNotBlank()) "${m._className}.${m.methodName}" else m.methodName
+            val paddr = axisResolver.resolve(soPath, vaddr)?.fileOffset ?: vaddr
+            DartFunction(vaddr, paddr, name, m.functionSize ?: 0L)
+        }.sortedBy { it.vaddr }
+        dartFunctionCache[soPath] = funcs
+        return funcs
+    }
+
+    /** 命中包含 addr 的 Dart 方法（按 functionOffset 升序；size 为 0 时以相邻方法起点为界）。 */
+    private suspend fun dartFunctionAt(addr: Long): DartFunction? {
+        val funcs = dartFunctions()
+        if (funcs.isEmpty()) return null
+        var idx = -1
+        for (i in funcs.indices) {
+            if (funcs[i].vaddr <= addr) idx = i else break
+        }
+        if (idx < 0) return null
+        val f = funcs[idx]
+        val end = when {
+            f.size > 0L -> f.vaddr + f.size
+            idx + 1 < funcs.size -> funcs[idx + 1].vaddr
+            else -> Long.MAX_VALUE
+        }
+        return if (addr < end) f else null
+    }
+
+    private fun DartFunction.toFunctionInfo(): FunctionInfo =
+        FunctionInfo(name = name, offset = paddr, vaddr = vaddr, size = size)
 
     fun buildTools(): Map<String, McpToolHandlers.McpTool> {
         val list = mutableListOf<McpToolHandlers.McpTool>()
@@ -59,7 +166,7 @@ class EngineMcpToolRegistry @Inject constructor(
         // 通用：引擎清单
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "list_engines",
-            description = "列出当前注册的分析/仿真引擎及各自能力",
+            description = "列出已注册的分析引擎（rizin/self）与仿真引擎（unicorn）及其能力 capabilities，用于确认某能力由哪个引擎提供、是否可用。无需先打开会话",
             inputSchema = objProps()
         ) { _ ->
             val analysisEngines = registry.listAnalysis()
@@ -95,7 +202,7 @@ class EngineMcpToolRegistry @Inject constructor(
         // 打开 so 会话
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "open",
-            description = "打开 so 会话并准备分析；可选 autoAnalyze = true 自动 aaa",
+            description = "打开 so 文件的分析会话；之后所有 engine_* 工具（除带独立 soPath 的）都作用于该会话，同一 soPath 复用。返回 handle/engineId/bias 摘要（各节 vaddr 与文件偏移的差值分组，0 表示 vaddr==偏移）。注意：Dart AOT 大库（libapp.so）Rizin 几乎识别不出函数，函数导航应依赖 list_functions/find_function_at 的 Blutter 合并结果；对普通 so 可用 autoAnalyze=true 自动 aaa",
             inputSchema = objProps(
                 "soPath" to strType(schemaRequired = true, "so 文件绝对路径"),
                 "engineId" to strType(schemaRequired = false, "使用指定引擎；空则按能力自动选"),
@@ -120,6 +227,7 @@ class EngineMcpToolRegistry @Inject constructor(
                     put("handle", result.handle.value.toString())
                     put("engineId", result.engineId)
                     put("filePath", result.filePath)
+                    put("bias", axisResolver.biasSummary(result.filePath))
                 }
                 is com.ai.fler.core.analysis.OpenResult.Failure -> buildJsonObject {
                     put("ok", false)
@@ -130,7 +238,7 @@ class EngineMcpToolRegistry @Inject constructor(
 
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "close",
-            description = "关闭指定 so 的分析会话",
+            description = "关闭当前分析会话并释放引擎资源。切换分析对象前调用，避免后一个 engine_* 工具作用到残留会话",
             inputSchema = objProps()
         ) { _ ->
             // 同步等待关闭完成：工具 handler 是 suspend，fire-and-forget 会让
@@ -139,10 +247,23 @@ class EngineMcpToolRegistry @Inject constructor(
             buildJsonObject { put("ok", true) }
         }
 
+        // 手动触发分析（Dart AOT 大库默认由项目恢复跳过 aaa，需要时手动跑）
+        list += McpToolHandlers.McpTool(
+            name = TOOL_PREFIX + "analyze",
+            description = "对当前会话执行 Rizin aaa 全量分析（识别函数/CFG/交叉引用）。仅对需要 Rizin 级函数/CFG/xref 的普通 so 使用；Dart AOT 大库（libapp.so）开销极高、可能 OOM，函数导航请用 list_functions/find_function_at 的 Blutter 合并结果",
+            inputSchema = objProps()
+        ) { _ ->
+            val ok = session.analyze()
+            buildJsonObject {
+                put("ok", ok)
+                if (ok) put("functions", session.listFunctions().size)
+            }
+        }
+
         // ELF_PARSING 能力工具
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "get_info",
-            description = "获取 so 的架构/位宽/保护位（NX/PIE/RELRO/Canary 等）信息",
+            description = "获取当前 so 的架构/位宽/端序/机器类型/类 + 保护属性（canary/nx/pie/relro/是否 stripped）+ 真实文件大小。用于研判文件类型与安全加固情况",
             inputSchema = objProps()
         ) { _ ->
             val info = session.getFileInfo()
@@ -168,7 +289,7 @@ class EngineMcpToolRegistry @Inject constructor(
 
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "list_sections",
-            description = "列出 so 节区（名称/偏移/大小/权限/类型）",
+            description = "列出 so 节区：name/type/offset（文件偏移）/address（vaddr）/size/perm。Dart 库各节 vaddr 可能≠文件偏移（如 libflutter 的 .data.rel.ro 差 0x10000），此时同数值在 offset 与 vaddr 两个坐标系都成立，地址语义需用 translate_address 判明；perm 过滤写法如 r-x（Rizin 格式为 -r-x）",
             inputSchema = objProps(
                 "perm" to strType(false, "权限过滤，如 r-x / rw-；空=不过滤"),
                 "type" to strType(false, "节类型过滤，如 PROGBITS / NOBITS / SYMTAB / dynsym")
@@ -202,7 +323,7 @@ class EngineMcpToolRegistry @Inject constructor(
 
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "list_symbols",
-            description = "列出 so 符号（含 demangle 名称 / bind / type / size）",
+            description = "列出 so 动态符号：name/demangled/type/bind/address（vaddr）/size/section，支持按名字、类型（FUNC/OBJECT/SECTION/...）、bind（GLOBAL/LOCAL/WEAK）过滤。用于定位导出符号与未剥离的调试信息",
             inputSchema = objProps(
                 "query" to strType(false, "模糊匹配（名字/demangle）；空=全部"),
                 "type" to strType(false, "FUNC / OBJECT / SECTION / FILE / TLS / COMMON"),
@@ -240,7 +361,7 @@ class EngineMcpToolRegistry @Inject constructor(
         // 函数分析
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "list_functions",
-            description = "列出 Rizin 识别到的函数（aflj 结构）",
+            description = "列出当前 so 的函数。Dart AOT 库（libapp.so）自动合并 Blutter 恢复的 Dart 方法（数万条，名称=ClassName.methodName，offset/vaddr/size 齐全）；普通 so 返回 Rizin aflj 结果。query 按名称子串过滤，limit 限返回条数。Dart 库上结果可能以 Dart 方法为主，Rizin 函数极少",
             inputSchema = objProps(
                 "query" to strType(false, "名字模糊匹配"),
                 "limit" to intType(false, def = 5000, "返回条目上限")
@@ -248,8 +369,17 @@ class EngineMcpToolRegistry @Inject constructor(
         ) { p ->
             val q = p.str("query")?.lowercase()
             val limit = (p.int("limit") ?: 5000).coerceAtLeast(1)
-            val all = session.listFunctions()
-            val out = all.asSequence()
+            val rizin = session.listFunctions()
+            val seen = HashSet<Long>(rizin.size + 16)
+            rizin.forEach { seen.add(it.vaddr) }
+            val merged = buildList {
+                addAll(rizin)
+                // Dart AOT：合并 Blutter 方法（按 vaddr 去重，Blutter 优先于 Rizin 已识别项不冲突）
+                addAll(dartFunctions().mapNotNull { d ->
+                    if (seen.add(d.vaddr)) d.toFunctionInfo() else null
+                })
+            }
+            val out = merged.asSequence()
                 .filter { q == null || it.name.lowercase().contains(q) || it.signature.lowercase().contains(q) }
                 .take(limit)
             buildJsonArray {
@@ -271,13 +401,14 @@ class EngineMcpToolRegistry @Inject constructor(
 
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "find_function_at",
-            description = "查找包含指定地址的函数",
+            description = "查询包含指定地址（vaddr 或文件偏移，自动识别）的函数。先查 Rizin 函数，未命中则查 Blutter Dart 方法（支持命中方法内部任意指令地址）。返回 name/offset/vaddr/size。用于把任意代码地址定位到所属函数后再反汇编",
             inputSchema = objProps(
-                "address" to strOrLongType(true, "hex 或十进制地址")
+                "address" to strOrLongType(true, "hex 或十进制地址（vaddr 或文件偏移，自动识别）")
             )
         ) { p ->
-            val addr = p.parseHexOrDec("address") ?: throw McpToolException("address 缺失或非法")
+            val addr = normalizeToVaddr("find_function_at", p.parseHexOrDec("address") ?: throw McpToolException("address 缺失或非法"))
             val f = session.findFunctionContaining(addr)
+                ?: dartFunctionAt(addr)?.toFunctionInfo()
                 ?: return@McpTool buildJsonObject { put("found", false) }
             buildJsonObject {
                 put("found", true)
@@ -293,12 +424,12 @@ class EngineMcpToolRegistry @Inject constructor(
 
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "function_cfg",
-            description = "返回某函数的基本块 CFG（afbj 结构）",
+            description = "返回某函数的基本块 CFG：每块的 addr/size/指令数 nInstr/后继 succs/前驱 preds。functionOffset 为函数起始 vaddr 或文件偏移。仅对 Rizin 已分析（aaa 后）的普通 so 有效，Dart 方法无 CFG",
             inputSchema = objProps(
-                "functionOffset" to strOrLongType(true, "函数起始地址")
+                "functionOffset" to strOrLongType(true, "函数起始地址（vaddr 或文件偏移，自动识别）")
             )
         ) { p ->
-            val off = p.parseHexOrDec("functionOffset") ?: throw McpToolException("functionOffset 非法")
+            val off = normalizeToVaddr("function_cfg", p.parseHexOrDec("functionOffset") ?: throw McpToolException("functionOffset 非法"))
             val bbs = session.getFunctionCfg(off)
             buildJsonArray {
                 bbs.forEach { b ->
@@ -316,13 +447,13 @@ class EngineMcpToolRegistry @Inject constructor(
         // 交叉引用
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "xrefs_to",
-            description = "查询哪些地址引用了 target",
+            description = "查询哪些地址引用了 target（反向交叉引用）。target 为 vaddr 或文件偏移，自动识别；返回 from/to/type。仅对已执行 aaa 分析的会话有效（Dart 大库上基本为空），需交叉引用请先 engine.analyze",
             inputSchema = objProps(
-                "target" to strOrLongType(true, "目标地址"),
+                "target" to strOrLongType(true, "目标地址（vaddr 或文件偏移，自动识别）"),
                 "limit" to intType(false, def = 200, "返回条目上限")
             )
         ) { p ->
-            val t = p.parseHexOrDec("target") ?: throw McpToolException("target 非法")
+            val t = normalizeToVaddr("xrefs_to", p.parseHexOrDec("target") ?: throw McpToolException("target 非法"))
             val limit = (p.int("limit") ?: 200).coerceAtLeast(1)
             val list = session.xrefsTo(t).take(limit)
             buildJsonArray {
@@ -339,13 +470,13 @@ class EngineMcpToolRegistry @Inject constructor(
 
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "xrefs_from",
-            description = "查询某地址引用了哪些目标",
+            description = "查询指定地址引用了哪些目标（正向交叉引用）。from 为 vaddr 或文件偏移，自动识别；返回 from/to/type。仅对已执行 aaa 分析的会话有效（Dart 大库上基本为空）",
             inputSchema = objProps(
-                "from" to strOrLongType(true, "源地址"),
+                "from" to strOrLongType(true, "源地址（vaddr 或文件偏移，自动识别）"),
                 "limit" to intType(false, def = 200, "返回条目上限")
             )
         ) { p ->
-            val from = p.parseHexOrDec("from") ?: throw McpToolException("from 非法")
+            val from = normalizeToVaddr("xrefs_from", p.parseHexOrDec("from") ?: throw McpToolException("from 非法"))
             val limit = (p.int("limit") ?: 200).coerceAtLeast(1)
             val list = session.xrefsFrom(from).take(limit)
             buildJsonArray {
@@ -362,22 +493,31 @@ class EngineMcpToolRegistry @Inject constructor(
         // 反汇编
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "disassemble",
-            description = "从指定偏移反汇编 N 字节",
+            description = "从指定地址反汇编 N 字节（默认 4096，上限 65536）。offset 可传 vaddr 或文件偏移，自动识别（歧义时按当前引擎坐标轴归一）。返回 baseAddress/inputAddress/count/instructions，每条含 address/size/mnemonic/opStr/bytes，vaddr≠文件偏移时附 fileOffset。建议先用 find_function_at 定位函数起点再反汇编",
             inputSchema = objProps(
-                "offset" to strOrLongType(true, "文件偏移（hex/dec）"),
+                "offset" to strOrLongType(true, "文件偏移或 vaddr（hex/dec），自动识别"),
                 "size" to intType(false, def = 4096, "反汇编字节数，上限 65536")
             )
         ) { p ->
-            val offset = p.parseHexOrDec("offset") ?: throw McpToolException("offset 非法")
+            val raw = p.parseHexOrDec("offset") ?: throw McpToolException("offset 非法")
+            val offset = normalizeForDisasm(raw)
             val size = (p.int("size") ?: 4096).coerceIn(4, 65536)
+            val soPath = session.currentFilePath()
             val insns = session.disassemble(offset, size.toLong())
             buildJsonObject {
                 put("baseAddress", "0x${offset.toString(16)}")
+                put("inputAddress", "0x${raw.toString(16)}")
                 put("count", insns.size)
                 putJsonArray("instructions") {
                     insns.forEach { i ->
                         addJsonObject {
                             put("address", "0x${i.address.toString(16)}")
+                            if (soPath != null) {
+                                val fileOff = axisResolver.resolve(soPath, i.address)?.fileOffset
+                                if (fileOff != null && fileOff != i.address) {
+                                    put("fileOffset", "0x${fileOff.toString(16)}")
+                                }
+                            }
                             put("size", i.size)
                             put("mnemonic", i.mnemonic)
                             put("opStr", i.opStr)
@@ -393,7 +533,7 @@ class EngineMcpToolRegistry @Inject constructor(
         // 汇编
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "assemble",
-            description = "把一条汇编指令文本编码为机器码",
+            description = "用汇编器把单条 ARM64 指令编码为机器码（预览，不写文件）。assembly 如 'MOV W0, #1' / 'BL #0x4000'；address 为指令所在地址（PC 相对分支必需）。返回 hex 字节 + size",
             inputSchema = objProps(
                 "assembly" to strType(true, "如 MOV W0, #1 / BL #0x4000"),
                 "address" to strOrLongType(false, "指令所在地址，分支 PC-rel 需要")
@@ -415,13 +555,13 @@ class EngineMcpToolRegistry @Inject constructor(
         // 字节读写
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "read_bytes",
-            description = "从 so 文件按偏移读取字节",
+            description = "按文件偏移读取 so 原始字节（hex 字符串，空格分隔）。offset 可传 vaddr 或文件偏移，自动归一为文件偏移；歧义地址直接报错，请先用 translate_address 明确坐标轴。用于查看原始字节/机器码/常量区",
             inputSchema = objProps(
                 "offset" to strOrLongType(true, "文件偏移"),
                 "size" to intType(false, def = 256, "字节数，上限 1MB")
             )
         ) { p ->
-            val off = p.parseHexOrDec("offset") ?: throw McpToolException("offset 非法")
+            val off = normalizeForRead(p.parseHexOrDec("offset") ?: throw McpToolException("offset 非法"))
             val size = (p.int("size") ?: 256).coerceIn(1, 1024 * 1024)
             val b = session.readBytes(off, size.toLong())
             buildJsonObject {
@@ -435,13 +575,13 @@ class EngineMcpToolRegistry @Inject constructor(
 
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "write_bytes",
-            description = "写入字节补丁（会自动加入撤销栈）。hex 字符串以空格分隔",
+            description = "写字节补丁到文件偏移（写前自动备份并记入撤销栈，可 undo_patch 回滚）。offset 归一规则同 read_bytes（歧义报错）；hex 为空格分隔十六进制如 'C0 03 5F D6'。写前建议先 read_bytes 确认原值",
             inputSchema = objProps(
                 "offset" to strOrLongType(true, "文件偏移"),
                 "hex" to strType(true, "以空格分隔的十六进制，如 C0 03 5F D6")
             )
         ) { p ->
-            val off = p.parseHexOrDec("offset") ?: throw McpToolException("offset 非法")
+            val off = normalizeForRead(p.parseHexOrDec("offset") ?: throw McpToolException("offset 非法"))
             val hex = p.str("hex")?.trim() ?: throw McpToolException("hex 缺失")
             val bytes = hex.split(Regex("\\s+"))
                 .filter { it.isNotBlank() }
@@ -455,7 +595,7 @@ class EngineMcpToolRegistry @Inject constructor(
         // 字符串扫描
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "scan_strings",
-            description = "扫描 so 中的 ASCII 字符串",
+            description = "扫描 so 中的 ASCII 字符串（整文件流式扫描）。minLen 默认 4 / maxLen 512。返回 address（vaddr）/paddr（文件偏移）/size/section/string；query 做不区分大小写的子串过滤。适合搜 Dart 符号名、渠道标识、敏感字符串（如 'MethodChannel'、'http'）",
             inputSchema = objProps(
                 "minLen" to intType(false, def = 4, "最小长度"),
                 "maxLen" to intType(false, def = 512, "最大长度"),
@@ -490,7 +630,7 @@ class EngineMcpToolRegistry @Inject constructor(
         // 哈希
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "md5",
-            description = "整个 so 文件的 MD5（引擎能力 BINARY_HASH）",
+            description = "整个 so 文件的 MD5 摘要（流式计算，与设备 md5sum 一致）。用于校验文件完整性/确认当前分析的版本",
             inputSchema = objProps()
         ) { _ ->
             buildJsonObject {
@@ -501,7 +641,7 @@ class EngineMcpToolRegistry @Inject constructor(
         }
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "sha256",
-            description = "整个 so 文件的 SHA256",
+            description = "整个 so 文件的 SHA256 摘要（流式计算，与设备 sha256sum 一致）",
             inputSchema = objProps()
         ) { _ ->
             buildJsonObject {
@@ -512,7 +652,7 @@ class EngineMcpToolRegistry @Inject constructor(
         }
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "crc32",
-            description = "CRC32；offset/size 空则整文件",
+            description = "计算 so 的 CRC32。offset/size 都不传则整文件；传则计算文件偏移 [offset, offset+size) 范围（offset 为文件偏移，不做 vaddr 归一）",
             inputSchema = objProps(
                 "offset" to strOrLongType(false, "起始偏移"),
                 "size" to intType(false, def = 1024 * 1024, "字节数")

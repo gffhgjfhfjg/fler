@@ -89,15 +89,19 @@ class McpProtocol(
         }
     }
 
-    private suspend fun toolsCall(id: JsonElement?, params: JsonObject): JsonObject {        val name = params["name"]?.jsonPrimitive?.contentOrNull
+    private suspend fun toolsCall(id: JsonElement?, params: JsonObject): JsonObject {
+        val name = params["name"]?.jsonPrimitive?.contentOrNull
             ?: return McpErrors.errorJson(id, McpErrors.INVALID_PARAMS, "缺少工具名")
         val tool = handlers.tools[name]
             ?: return McpErrors.errorJson(id, McpErrors.TOOL_NOT_FOUND, "工具不存在: $name")
         val arguments = params["arguments"]?.jsonObject ?: JsonObject(emptyMap())
+        val start = System.currentTimeMillis()
+        logger.info("工具调用: $name args=${arguments.toString().take(500)}")
 
         return try {
             val data = tool.handler(arguments)
-            logger.info("工具调用: $name")
+            val elapsed = System.currentTimeMillis() - start
+            logger.info("工具完成: $name 耗时=${elapsed}ms")
             // 把工具返回的 JSON 作为 text content 回传给客户端
             val text = json.encodeToString(data)
             buildJsonObject {

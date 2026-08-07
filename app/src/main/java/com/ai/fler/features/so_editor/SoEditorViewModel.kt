@@ -684,6 +684,22 @@ class SoEditorViewModel @Inject constructor(
     }
 
     /**
+     * 从文件偏移（反汇编坐标）加载交叉引用。
+     *
+     * 反汇编指令的 [DisasmInstruction.address] 是文件偏移（paddr），
+     * 而 [loadXrefs] 内的 axtj/axfj 工作于 Rizin 虚拟地址（vaddr）空间。
+     * PIE/加载后的库 vaddr≠paddr（如 emu_demo 差 0x4000）时，直接拿 paddr
+     * 去查会让所有反汇编入口的 xref 永远为空——这里先做 paddr→vaddr 换算再查。
+     */
+    fun loadXrefsAtFileOffset(fileOffset: Long) {
+        _xrefData.value = _xrefData.value.copy(address = fileOffset, isLoading = true)
+        viewModelScope.launch {
+            val vaddr = session.paddrToVaddr(fileOffset)
+            loadXrefs(vaddr)
+        }
+    }
+
+    /**
      * 为一批 xref 地址计算函数名。
      * 优先 [dartFunctionLabels]（ClassName.methodName），
      * 再查 [uiState].functions 的包含关系（vaddr ≤ addr < vaddr+size）。
@@ -831,8 +847,12 @@ class SoEditorViewModel @Inject constructor(
                     // xref 已就绪则跳过 aar（会话级去重，避免每次切 Tab 回来都重扫）
                     if (!soEditorCache.isXrefReady(soPath)) {
                         val rebuilt = session.reanalyzeXrefs()
-                        Log.i(TAG, "xref 补充扫描: $rebuilt")
-                        soEditorCache.markXrefReady(soPath)
+                        // 仅在重建成功时才标记；失败留待下次打开重试（避免失败后本会话永不补扫）
+                        if (rebuilt) {
+                            soEditorCache.markXrefReady(soPath)
+                        } else {
+                            Log.w(TAG, "xref 补充扫描失败，未标记就绪，下次打开自动重试")
+                        }
                     } else {
                         Log.i(TAG, "xref 已就绪，跳过 aar")
                     }
@@ -919,13 +939,15 @@ class SoEditorViewModel @Inject constructor(
                 }
                 // 补充扫描 xref（aar 不依赖函数边界，不影响已有 xref）
                 val rebuilt = session.reanalyzeXrefs()
-                soEditorCache.markXrefReady(soPath)
+                // 仅在重建成功时才标记；失败留待下次打开重试
+                if (rebuilt) soEditorCache.markXrefReady(soPath)
                 Log.i(TAG, "加载 Dart 方法标签: ${labels.size} 条 (Blutter), 函数合并后 ${merged.size} 条, Rizin 注入 $injected 个, xref 补充扫描 $rebuilt")
             } else {
                 // Rizin 注入已缓存，但 xref 可能尚未就绪（如旧项目升级后首次打开）
                 if (!soEditorCache.isXrefReady(soPath)) {
                     val rebuilt = session.reanalyzeXrefs()
-                    soEditorCache.markXrefReady(soPath)
+                    // 仅在重建成功时才标记；失败留待下次打开重试
+                    if (rebuilt) soEditorCache.markXrefReady(soPath)
                     Log.i(TAG, "Rizin 注入已缓存，补充 xref 扫描: $rebuilt")
                 } else {
                     Log.i(TAG, "Rizin 注入已缓存: ${labels.size} 条 (跳过 Rizin 注入 + aar)")

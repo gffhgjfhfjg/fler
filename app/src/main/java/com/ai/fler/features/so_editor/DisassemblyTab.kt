@@ -314,7 +314,7 @@ fun DisassemblyTab(
             },
             onXref = {
                 menuInstruction = null
-                viewModel.loadXrefs(inst.address)
+                viewModel.loadXrefsAtFileOffset(inst.address)
                 showXrefSheet = true
             },
             onCallFunction = {

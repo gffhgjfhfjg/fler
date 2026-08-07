@@ -27,7 +27,7 @@ class McpConfig @Inject constructor(
     private val prefs: SharedPreferences =
         context.getSharedPreferences("mcp_server", Context.MODE_PRIVATE)
 
-    private val _enabled = MutableStateFlow(prefs.getBoolean(KEY_ENABLED, false))
+    private val _enabled = MutableStateFlow(prefs.getBoolean(KEY_ENABLED, true))
     val enabled: StateFlow<Boolean> = _enabled.asStateFlow()
 
     private val _bindMode = MutableStateFlow(

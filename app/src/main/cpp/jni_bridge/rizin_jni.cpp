@@ -20,15 +20,84 @@
 #include <rizin/rz_core.h>
 #include <rizin/rz_io.h>
 #include <rizin/rz_project.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
+#include <map>
 
 static const char* TAG = "FlerRizinJNI";
 
 // RzCore* 指针存为 jlong（64 位），在 64 位平台上安全
 #define CORE(handle) reinterpret_cast<RzCore*>(handle)
+
+// core 指针 -> 打开的文件绝对路径（nativeReadBytes 裸 pread 兜底用，
+// 不依赖 Rizin 内部 io->desc->name，那个字段在部分版本为空）。
+std::map<RzCore*, std::string> g_corePaths;
+
+/**
+ * 裸文件直读（绕过 Rizin io）。
+ *
+ * Rizin io 层对这类 Dart AOT so 只建立了第一个 PT_LOAD 段的有效 map，
+ * 首段之后的内容 rz_io_pread_at 一律返回 0 字节（症状：.text 反汇编/xref
+ * 全部落空）。兜底用 mmap 直读（elf_parser 同款，已验证全文件可读）：
+ * 实测本设备上 pread 超过 ~2MB 就返回 EOF，而 mmap 全文件正常。
+ */
+static ssize_t raw_pread_all(const char* path, ut64 off, uint8_t* buf, size_t size) {
+    if (!path || size == 0) return -1;
+    int fd = ::open(path, O_RDWR);
+    if (fd < 0) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "raw mmap open 失败 path=%s errno=%d", path, errno);
+        return -1;
+    }
+    struct stat st;
+    if (::fstat(fd, &st) < 0) { ::close(fd); return -1; }
+    if (off >= static_cast<ut64>(st.st_size)) { ::close(fd); return 0; }
+    void* map = ::mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "raw mmap 失败 path=%s errno=%d", path, errno);
+        ::close(fd); return -1;
+    }
+    size_t n = size;
+    if (off + n > static_cast<ut64>(st.st_size)) n = static_cast<size_t>(static_cast<ut64>(st.st_size) - off);
+    std::memcpy(buf, static_cast<const uint8_t*>(map) + off, n);
+    ::munmap(map, static_cast<size_t>(st.st_size));
+    ::close(fd);
+    return static_cast<ssize_t>(n);
+}
+
+/**
+ * 裸文件直写（绕过 Rizin io），mmap + memcpy + msync，返回成功写入字节数。
+ */
+static ssize_t raw_pwrite_all(const char* path, ut64 off, const uint8_t* buf, size_t size) {
+    if (!path || size == 0) return -1;
+    int fd = ::open(path, O_RDWR);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (::fstat(fd, &st) < 0) { ::close(fd); return -1; }
+    if (off + size > static_cast<ut64>(st.st_size)) { ::close(fd); return -1; }
+    void* map = ::mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) { ::close(fd); return -1; }
+    std::memcpy(static_cast<uint8_t*>(map) + off, buf, size);
+    int ms = ::msync(map, static_cast<size_t>(st.st_size), MS_SYNC);
+    ::munmap(map, static_cast<size_t>(st.st_size));
+    ::close(fd);
+    return ms == 0 ? static_cast<ssize_t>(size) : -1;
+}
+
+/** 从 RzCore 取当前文件路径（裸 I/O 兜底用）。优先用 g_corePaths 旁路表，null 时回退 io->desc->name。 */
+static const char* core_file_path(RzCore* core) {
+    if (!core) return nullptr;
+    auto it = g_corePaths.find(core);
+    if (it != g_corePaths.end() && !it->second.empty()) return it->second.c_str();
+    if (core->io && core->io->desc) return core->io->desc->name;
+    return nullptr;
+}
 
 // Android NDK 不提供 execinfo.h 的 backtrace 系列函数。
 // Rizin librz_util 引用了它们用于崩溃日志，Android 上用空实现即可。
@@ -63,6 +132,7 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeOpen(
         env->ReleaseStringUTFChars(jPath, path);
         return 0;
     }
+    g_corePaths[core] = path;
 
     // 打开文件：先尝试 RW（mode 6），失败则降级到只读（mode 4）
     // 某些解压后的 SO 文件可能没有写权限，RW 打开会失败
@@ -80,9 +150,25 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeOpen(
     }
 
     // 加载二进制信息（节区、符号、入口等）
-    if (!rz_core_bin_load(core, path, UT64_MAX)) {
+    // 基址必须用 0LL：传 UT64_MAX 会让 Rizin 以「无基址」方式装载，
+    // 导致 io 只为第一个 PT_LOAD 段建立 map，首段之后的 .text/.rodata
+    // 全部不可读（症状：反汇编/xref/函数分析全空）。基址 0 时各段按
+    // ELF 自身 vaddr 建 map（libflutter 第二段 vaddr=offset+0x10000 也正确）。
+    if (!rz_core_bin_load(core, path, 0LL)) {
         __android_log_print(ANDROID_LOG_WARN, TAG, "rz_core_bin_load failed (non-fatal): %s", path);
         // 非致命：仍可用 rizin 做字节级读写和反汇编，只是没有符号信息
+    }
+
+    // 探针：列出装载后的 io map，确认所有 PT_LOAD 段都已映射（om 输出每行一个 map）。
+    char* maps = rz_core_cmd_str(core, "om");
+    if (maps) {
+        __android_log_print(ANDROID_LOG_INFO, TAG, "io maps after load:\n%s", maps);
+        free(maps);
+    } else {
+        char* mapsj = rz_core_cmd_str(core, "omj");
+        __android_log_print(ANDROID_LOG_INFO, TAG, "om 命令无输出（null），omj=%s",
+            mapsj ? mapsj : "(null)");
+        if (mapsj) free(mapsj);
     }
 
     // 设置默认架构为 ARM64（ELF 头可能已设，这里确保）
@@ -103,6 +189,7 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeClose(
 
     RzCore* core = CORE(handle);
     if (core) {
+        g_corePaths.erase(core);
         // rz_core_file_close_all 会关闭所有打开的文件
         rz_core_free(core);
         __android_log_print(ANDROID_LOG_INFO, TAG, "Rizin 已释放");
@@ -177,6 +264,17 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeReadBytes(
 
     std::vector<uint8_t> buf(static_cast<size_t>(jSize));
     int n = rz_io_pread_at(core->io, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(jSize));
+    if (n <= 0) {
+        // Rizin io 只映射首段时，首段之后的物理读返回 0。兜底：裸 pread 直读文件。
+        const char* path = core_file_path(core);
+        ssize_t rn = raw_pread_all(path, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(jSize));
+        __android_log_print(ANDROID_LOG_INFO, TAG,
+            "readBytes 兜底尝试 offset=0x%llx size=%lld rz=%d raw=%lld path=%s",
+            static_cast<unsigned long long>(jOffset),
+            static_cast<long long>(jSize), n, static_cast<long long>(rn),
+            path ? path : "(null)");
+        if (rn > 0) n = static_cast<int>(rn);
+    }
     if (n <= 0) return nullptr;
 
     jbyteArray result = env->NewByteArray(static_cast<jsize>(n));
@@ -237,6 +335,18 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeWriteBytes(
 
     int n = rz_io_pwrite_at(core->io, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(size));
     bool ok = (n == static_cast<int>(size));
+    if (!ok) {
+        // Rizin io 超出首段时无法物理写。兜底：裸 pwrite 直写文件。
+        const char* path = core_file_path(core);
+        ssize_t wn = raw_pwrite_all(path, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(size));
+        if (wn == static_cast<ssize_t>(size)) {
+            ok = true;
+            n = static_cast<int>(wn);
+            __android_log_print(ANDROID_LOG_INFO, TAG,
+                "writeBytes: rz_io_pwrite_at 失败，已用裸 pwrite 兜底 offset=0x%llx size=%d",
+                static_cast<unsigned long long>(jOffset), static_cast<int>(size));
+        }
+    }
 
     // 写后读回校验（物理直读），确认字节已落盘
     bool readbackMatched = false;

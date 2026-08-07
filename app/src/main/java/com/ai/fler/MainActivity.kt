@@ -10,9 +10,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.ai.fler.app.navigation.AppNavGraph
 import com.ai.fler.app.theme.FlerTheme
+import com.ai.fler.core.mcp.McpConfig
+import com.ai.fler.features.mcp.McpServerService
 import com.ai.fler.features.onboarding.OnboardingPreferences
 import com.ai.fler.features.onboarding.OnboardingScreen
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 
 /**
  * 唯一 Activity。
@@ -23,9 +26,16 @@ import dagger.hilt.android.AndroidEntryPoint
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
+    @Inject lateinit var config: McpConfig
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // 启动时自动拉起 MCP 服务器（默认启用 + 前台服务 START_STICKY 保活），
+        // 方便 AI 代理随时连接，无需手动到设置里开关。
+        if (config.enabled.value) {
+            McpServerService.start(this)
+        }
         setContent {
             FlerTheme {
                 var showOnboarding by remember {

@@ -62,6 +62,9 @@ class RizinEngine(
     /** handle.value → 对应的项目文件路径（用于 close 时清理）。 */
     private val projectPaths = mutableMapOf<Long, String>()
 
+    /** handle.value → 打开的 so 文件路径（用于 fileSize 等取真实文件信息）。 */
+    private val filePaths = mutableMapOf<Long, String>()
+
     // ------------------------------------------------------------------
     // 生命周期
     // ------------------------------------------------------------------
@@ -77,6 +80,7 @@ class RizinEngine(
 
         val h = nextHandle++
         openHandles[h] = corePtr
+        filePaths[h] = filePath
 
         // 尝试从 Rizin Project 恢复（跳过 aaa 全量分析）
         var projectLoaded = false
@@ -107,12 +111,37 @@ class RizinEngine(
             }
         }
 
+        // 项目恢复成功。轻量探针：记录恢复态是否真的带 xref 表（.rzdb 是否序列化 xref）。
+        // 只做日志、不做自动修复：在已加载项目之上再叠 aar/aaa 会让分析态内存翻倍，
+        // 实测 libapp.so 恢复后补扫 aar 触发原生 OOM（Scudo Out of memory → SIGABRT）。
+        // xref 的修复由「无项目时的首开全量 aaa」保证，或由上层按需触发（loadDartFunctionLabels）。
+        if (projectLoaded) {
+            val hasXrefs = projectHasXrefs(AnalysisHandle(h))
+            Log.i(TAG, "Rizin Project 恢复完成，xref 探针=$hasXrefs（false=项目未序列化 xref 表）")
+        }
+
         return OpenResult.Success(AnalysisHandle(h), filePath, engineId)
+    }
+
+    /**
+     * 探测恢复态是否带 xref：对入口点（[iEj] 首个 vaddr）查一次 axtj/axfj 是否非空。
+     * 仅用于诊断日志，不做任何分析，代价为两次轻量查询。
+     */
+    private suspend fun projectHasXrefs(handle: AnalysisHandle): Boolean {
+        val entries = cmd(handle, "iEj") ?: return false
+        val m = Regex("\"vaddr\":(\\d+)").find(entries) ?: return false
+        val vaddr = m.groupValues[1].toLongOrNull() ?: return false
+        val hex = "0x${vaddr.toString(16)}"
+        val to = cmd(handle, "axtj @ $hex") ?: return false
+        val from = cmd(handle, "axfj @ $hex") ?: return false
+        return (to.isNotBlank() && to.trim() != "[]") ||
+            (from.isNotBlank() && from.trim() != "[]")
     }
 
     override suspend fun close(handle: AnalysisHandle) {
         val corePtr = openHandles.remove(handle.value) ?: return
         projectPaths.remove(handle.value)
+        filePaths.remove(handle.value)
         withContext(Dispatchers.IO) { RizinBindings.close(corePtr) }
     }
 
@@ -201,12 +230,8 @@ class RizinEngine(
 
     override suspend fun getFileInfo(handle: AnalysisHandle): FileInfo? {
         val json = cmd(handle, "ij") ?: return null
-        val path = openHandles[handle.value]
-        val fileSize = if (path != 0L) {
-            // corePtr 对应的文件大小通过 fileSize 命令获取
-            val sizeStr = cmd(handle, "i~size[1]") ?: ""
-            sizeStr.trim().toLongOrNull() ?: 0L
-        } else 0L
+        // fileSize 直接用真实文件长度（此前用「i~size[1]」命令解析不稳定，返回 0）
+        val fileSize = filePaths[handle.value]?.let { withContext(Dispatchers.IO) { File(it).length() } } ?: 0L
         return RizinJsonParser.parseFileInfo(json, fileSize)
     }
 
@@ -247,14 +272,49 @@ class RizinEngine(
     }
 
     override suspend fun scanStrings(handle: AnalysisHandle, options: StringScanOptions): List<StringInfo> {
-        // izzj 扫描所有字符串
-        val json = cmd(handle, "izzj") ?: return emptyList()
-        val all = RizinJsonParser.parseStrings(json)
-        // 按选项过滤
-        return all.filter {
-            it.string.length in options.minLen..options.maxLen &&
-            (options.scanSections.isEmpty() || it.section in options.scanSections)
+        // izzj 对 Dart AOT 大库返回空（io map 枚举异常），改为 readBytes 流式整文件扫描
+        val file = filePaths[handle.value]?.let { File(it) } ?: return emptyList()
+        val fileSize = file.length()
+        val sections = try { getSections(handle) } catch (_: Exception) { emptyList() }
+
+        val out = mutableListOf<StringInfo>()
+        var runStart = -1L
+        var run = StringBuilder()
+        var pos = 0L
+
+        fun flushRun() {
+            if (run.isNotEmpty()) {
+                if (run.length >= options.minLen && run.length <= options.maxLen) {
+                    val paddr = runStart
+                    val sec = sections.lastOrNull {
+                        it.offset > 0 && paddr >= it.offset && paddr < it.offset + it.size
+                    }
+                    val vaddr = if (sec != null) sec.address + (paddr - sec.offset) else paddr
+                    out += StringInfo(run.toString(), vaddr, paddr, run.length, sec?.name ?: "")
+                }
+                run.clear()
+                runStart = -1L
+            }
         }
+
+        while (pos < fileSize) {
+            val n = minOf(CHUNK, fileSize - pos)
+            val data = readBytes(handle, pos, n)
+            if (data.isEmpty()) break
+            data.forEachIndexed { i, b ->
+                val c = b.toInt() and 0xff
+                if (c in 0x20..0x7e) {
+                    if (runStart < 0) runStart = pos + i
+                    if (run.length < options.maxLen) run.append(c.toChar())
+                } else {
+                    flushRun()
+                }
+            }
+            pos += n
+        }
+        flushRun()
+
+        return out
     }
 
     // ------------------------------------------------------------------
@@ -369,14 +429,43 @@ class RizinEngine(
         //
         // 副作用：defineFunction 中 af 会清除该地址范围内的 xref 条目，
         // 但 aar 会重新扫描整个二进制并重建所有 xref 表，覆盖 af 的副作用。
+        //
+        // 注意：这里不再追加 e anal.datarefs=true / e anal.xrefs=true。
+        // anal.datarefs 在 Rizin 中默认已开启，且对数据密集的 libapp.so（Dart 对象池）
+        // 显式开启会让 aar 在「已加载项目」之上叠加分析时把内存打爆（实测 Scudo OOM 崩溃）。
+        // 保持默认配置，让 aar 行为与首开 aaa 一致、可存活。
+
         val r = cmd(handle, "aar") ?: return false
         val trimmed = r.trim().lowercase()
         if (trimmed.startsWith("error", ignoreCase = true)) {
             Log.w(TAG, "aar 不可用，回退到 aac")
             val r2 = cmd(handle, "aac") ?: return false
-            return !r2.trim().startsWith("unknown", ignoreCase = true)
+            if (r2.trim().startsWith("unknown", ignoreCase = true)) return false
         }
-        return true
+
+        // 探针校验：命令是否报错不能证明 xref 真的建出来了。
+        // 取第一个已知函数，确认 axtj/axfj 确实能查到 xref 才算成功。
+        // 函数为空（无法探针）时宽松地视为成功，避免无谓重扫。
+        val probeOk = xrefsProbeOk(handle)
+        if (!probeOk) Log.w(TAG, "reanalyzeXrefs 探针未检出 xref，判定为失败")
+        return probeOk
+    }
+
+    /**
+     * 探针校验 xref 表已可查询。
+     * 取 `aflj` 第一个函数的 vaddr，查 `axtj`/`axfj` 是否非空。
+     * 无函数可探时返回 true（无法验证，交由外层放行）。
+     */
+    private suspend fun xrefsProbeOk(handle: AnalysisHandle): Boolean {
+        val funcs = listFunctions(handle)
+        if (funcs.isEmpty()) return true
+        val probe = funcs.first().vaddr
+        val hex = "0x${probe.toString(16)}"
+        val to = cmd(handle, "axtj @ $hex") ?: return false
+        val from = cmd(handle, "axfj @ $hex") ?: return false
+        val hasTo = to.isNotBlank() && to.trim() != "[]"
+        val hasFrom = from.isNotBlank() && from.trim() != "[]"
+        return hasTo || hasFrom
     }
 
     // ------------------------------------------------------------------
@@ -476,29 +565,52 @@ class RizinEngine(
     // 二进制哈希
     // ------------------------------------------------------------------
 
-    override suspend fun md5(handle: AnalysisHandle): String? {
-        // Rizin 不直接提供 md5 命令，用 ph 命令
-        val md5 = cmd(handle, "ph md5") ?: return null
-        return md5.trim().takeIf { it.isNotEmpty() }
-    }
+    override suspend fun md5(handle: AnalysisHandle): String? =
+        streamDigest(handle, "MD5")
 
-    override suspend fun sha256(handle: AnalysisHandle): String? {
-        val sha256 = cmd(handle, "ph sha256") ?: return null
-        return sha256.trim().takeIf { it.isNotEmpty() }
-    }
+    override suspend fun sha256(handle: AnalysisHandle): String? =
+        streamDigest(handle, "SHA-256")
 
     override suspend fun crc32(handle: AnalysisHandle, offset: Long?, size: Long?): Long? {
-        val cmd = if (offset != null) {
-            "ph crc32 ${size ?: 1024} @ 0x${offset.toString(16)}"
-        } else {
-            "ph crc32"
+        val filePath = filePaths[handle.value]?.let { File(it) } ?: return null
+        val fileSize = filePath.length()
+        val start = offset ?: 0L
+        val length = size ?: (fileSize - start)
+        if (length <= 0 || start >= fileSize) return null
+        val crc = java.util.zip.CRC32()
+        val guard = (fileSize - start).coerceAtLeast(0L)
+        var pos = start
+        var remaining = length
+        info@ while (remaining > 0 && pos < fileSize) {
+            val n = minOf(CHUNK, remaining, guard - (pos - start)).coerceAtLeast(1L)
+            val data = readBytes(handle, pos, n)
+            if (data.isEmpty()) return null
+            crc.update(data)
+            pos += data.size.toLong()
+            remaining -= data.size.toLong()
         }
-        val result = this.cmd(handle, cmd) ?: return null
-        return result.trim().toLongOrNull(16)
+        return crc.value
+    }
+
+    /** 以 readBytes 流式计算整文件摘要（rizin 的 ph 不带 size 只哈希当前块，是错误的整文件语义）。 */
+    private suspend fun streamDigest(handle: AnalysisHandle, alg: String): String? {
+        val file = filePaths[handle.value]?.let { File(it) } ?: return null
+        val fileSize = file.length()
+        val md = java.security.MessageDigest.getInstance(alg)
+        var pos = 0L
+        while (pos < fileSize) {
+            val n = minOf(CHUNK, fileSize - pos)
+            val data = readBytes(handle, pos, n)
+            if (data.isEmpty()) return null
+            md.update(data)
+            pos += data.size.toLong()
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
     }
 
     companion object {
         private const val TAG = "RizinEngine"
+        private const val CHUNK = 256L * 1024L
 
         /**
          * 计算 Rizin Project 文件路径。

@@ -46,6 +46,7 @@ class McpToolHandlers @Inject constructor(
     private val patchService: McpPatchService,
     private val engineMcp: EngineMcpToolRegistry,
     private val emulationMcp: EmulationMcpToolRegistry,
+    private val axisResolver: AddressAxisResolver,
 ) : McpResourceProvider {
 
     class McpTool(
@@ -54,6 +55,21 @@ class McpToolHandlers @Inject constructor(
         val inputSchema: JsonObject,
         val handler: suspend (JsonObject) -> JsonElement,
     )
+
+    // ========== 坐标换算辅助 ==========
+
+    /** 分析对应的 libapp.so 路径（坐标换算用）。 */
+    private suspend fun libAppPath(analysisId: Long): String? =
+        analysisDao.getById(analysisId)?.libappPath
+
+    /** functionOffset(vaddr) → 文件偏移；so 不可用或地址无效时返回 null。
+     *  歧义（同节偏差≠0，数字同时是文件偏移与 vaddr）时按 vaddr 解读取 altFileOffset，
+     *  因为方法工具的 functionOffset 恒为 Blutter 给的 vaddr。 */
+    private fun fileOffsetOf(soPath: String?, functionOffset: Long): Long? {
+        if (soPath == null || functionOffset <= 0) return null
+        val res = axisResolver.resolve(soPath, functionOffset) ?: return null
+        return if (res.ambiguous) (res.altFileOffset ?: res.fileOffset) else res.fileOffset
+    }
 
     val tools: Map<String, McpTool> = buildMap {
         buildList {
@@ -84,7 +100,7 @@ class McpToolHandlers @Inject constructor(
     private fun buildAnalysisTools(): List<McpTool> = listOf(
         McpTool(
             name = "list_analyses",
-            description = "列出 App 内所有分析记录（含类/方法/PP 计数与 libapp.so 路径）",
+            description = "列出 App 内所有 Blutter 分析记录（近 200 条）：含 id（analysisId，供后续 list_methods/get_method 等用）、类/方法/PP 计数、libapp.so 路径。分析对应一次 libapp.so 的 Blutter 恢复结果",
             inputSchema = buildJsonObject { put("type", "object"); put("properties", buildJsonObject {}) }
         ) { _ ->
             val rows = analysisDao.getRecentList(200)
@@ -105,7 +121,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_analysis",
-            description = "获取一次分析的详情与 SO 文件列表",
+            description = "获取某次分析（analysisId 必填）的详情：libapp/libflutter 路径、类/方法/PP 计数、errorMessage，以及该分析涉及的 libraries 列表。分析 id 来自 list_analyses",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -141,7 +157,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_projects",
-            description = "列出所有项目（id/名称/apk/dartVersion/状态）",
+            description = "列出所有被分析的项目：id/名称/apk 路径/dartVersion/引擎版本/状态/更新时间。项目是分析的容器，每次 Blutter 分析属于某个项目",
             inputSchema = buildJsonObject { put("type", "object"); put("properties", buildJsonObject {}) }
         ) { _ ->
             val projects = projectDao.getAll().first()
@@ -164,7 +180,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_project",
-            description = "获取项目详情与该项目下所有分析记录",
+            description = "获取项目详情与该项目下的全部分析记录（含各分析 id/计数/状态）。项目 id 来自 list_projects",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") { putJsonObject("projectId") { put("type", "integer") } }
@@ -207,7 +223,7 @@ class McpToolHandlers @Inject constructor(
     private fun buildBrowseTools(): List<McpTool> = listOf(
         McpTool(
             name = "list_classes",
-            description = "列出某次分析的所有类及方法数",
+            description = "列出某次分析（analysisId 必填）的全部 Dart 类：id/className/superClass/方法数。Dart 类层级是 Blutter 恢复的 Dart 语义结构（区别于 ELF 符号）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") { putJsonObject("analysisId") { put("type", "integer") } }
@@ -232,7 +248,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_methods",
-            description = "列出某次分析的方法（可按类/名称过滤，分页）",
+            description = "分页列出某次分析（analysisId 必填）的 Dart 方法；可按 classId/名称过滤。返回方法 id/className/methodName/functionOffset（vaddr）/fileOffset（若 vaddr≠文件偏移则换算）/functionSize。functionOffset 恒为 vaddr，作反汇编偏移时需经 translate_address 或 fileOffset 字段",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -255,6 +271,7 @@ class McpToolHandlers @Inject constructor(
             val total = dartMethodDao.countMethodsWithClass(id, name, classId)
             val offset = ((page - 1) * pageSize).coerceAtMost(total)
             val rows = dartMethodDao.searchMethodsWithClass(id, name, classId, pageSize, offset)
+            val soPath = libAppPath(id)
 
             buildJsonObject {
                 put("total", total)
@@ -269,6 +286,7 @@ class McpToolHandlers @Inject constructor(
                             put("className", r._className)
                             put("methodName", r.method.methodName)
                             put("functionOffset", r.method.functionOffset ?: 0)
+                            fileOffsetOf(soPath, r.method.functionOffset ?: 0)?.let { put("fileOffset", it) }
                             put("functionSize", r.method.functionSize ?: 0)
                         }
                     }
@@ -277,7 +295,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_method",
-            description = "获取方法详情与完整反汇编（src_code），大字段默认截断",
+            description = "获取单个 Dart 方法详情与 Blutter 反汇编伪代码（src_code 大字段默认截断，includeSrc=true 返回完整）。用 methodId 或 name 定位；methodId 来自 list_methods。src_code 为 Blutter 恢复的反汇编，适合读业务逻辑/关键算法",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -304,6 +322,7 @@ class McpToolHandlers @Inject constructor(
             val m = match.method
             val src = m.srcCode ?: ""
             val capped = if (!full && src.length > MAX_SRC) src.take(MAX_SRC) else src
+            val soPath = libAppPath(id)
             buildJsonObject {
                 put("found", true)
                 put("id", m.id)
@@ -311,6 +330,7 @@ class McpToolHandlers @Inject constructor(
                 put("className", match._className)
                 put("methodName", m.methodName)
                 put("functionOffset", m.functionOffset ?: 0)
+                fileOffsetOf(soPath, m.functionOffset ?: 0)?.let { put("fileOffset", it) }
                 put("functionSize", m.functionSize ?: 0)
                 put("srcTruncated", !full && src.length > MAX_SRC)
                 put("srcCode", capped)
@@ -318,7 +338,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_pp_entry",
-            description = "按 pp 偏移查对象池条目",
+            description = "按 pp 偏移（vmOffset）查 Dart 对象池条目：type/description（可读描述）/fileOffset/引用它的方法数。pp 对象池是 Dart AOT 的数据区，ppOffset 常出现在 get_pp_references 或方法 src_code 的 [pp+0x..] 中",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -348,7 +368,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "search_strings",
-            description = "搜索分析中的字符串常量",
+            description = "在某次分析的字符串常量中搜索子串（query 必填，不区分大小写）。返回 ppOffset/description/fileOffset。用于按关键词定位 Dart 字符串及其文件位置（如渠道、URL、错误提示）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -379,7 +399,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "search_calls",
-            description = "反查哪些方法调用了目标（按方法全名/名称，SQL 扫描 src_code）",
+            description = "反查哪些 Dart 方法内部调用了目标（target 为方法名子串，SQL 扫描各方法 src_code）。返回调用方方法（className/methodName/functionOffset/fileOffset/size）。本质是 Dart 级调用关系（区别于 engine 的机器码 xref）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -394,6 +414,7 @@ class McpToolHandlers @Inject constructor(
             val target = p.str("target") ?: throw McpToolException("target 缺失")
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
             val rows = dartMethodDao.searchSrcWithClass(id, target, limit)
+            val soPath = libAppPath(id)
             buildJsonObject {
                 put("count", rows.size)
                 put("truncated", rows.size == limit)
@@ -404,6 +425,7 @@ class McpToolHandlers @Inject constructor(
                             put("className", r._className)
                             put("methodName", r.method.methodName)
                             put("functionOffset", r.method.functionOffset ?: 0)
+                            fileOffsetOf(soPath, r.method.functionOffset ?: 0)?.let { put("fileOffset", it) }
                             put("functionSize", r.method.functionSize ?: 0)
                         }
                     }
@@ -412,7 +434,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_class",
-            description = "获取类详情与该类的方法列表（classId 或 className）",
+            description = "获取某个 Dart 类详情（classId 或 className 二选一，分析 id 必填）：superClass + 该类全部方法（methodName/functionOffset/fileOffset/size）。用于按类梳理业务方法面",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -431,6 +453,7 @@ class McpToolHandlers @Inject constructor(
                     (className != null && it.className.equals(className, ignoreCase = true))
             } ?: return@McpTool buildJsonObject { put("found", false) }
             val methods = dartMethodDao.getMethodsByClassIdWithClass(id, cls.id)
+            val soPath = libAppPath(id)
             buildJsonObject {
                 put("found", true)
                 put("id", cls.id)
@@ -443,6 +466,7 @@ class McpToolHandlers @Inject constructor(
                             put("id", m.method.id)
                             put("methodName", m.method.methodName)
                             put("functionOffset", m.method.functionOffset ?: 0)
+                            fileOffsetOf(soPath, m.method.functionOffset ?: 0)?.let { put("fileOffset", it) }
                             put("functionSize", m.method.functionSize ?: 0)
                         }
                     }
@@ -451,7 +475,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_strings",
-            description = "列出某次分析的全部字符串常量（分页）",
+            description = "分页列出某次分析的全部字符串常量（SQL 下推）：ppOffset/description/fileOffset。数据量大（数万条）请用 search_strings 按关键词定位，或用本工具分页浏览",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -487,7 +511,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_method_callers",
-            description = "反查哪些方法在 src_code 中引用了指定方法名（调用关系）",
+            description = "反查哪些 Dart 方法的 src_code 中引用了指定方法名（methodName 必填）——调用关系反向查询。返回调用方 id/className/methodName/functionOffset/fileOffset。适合从被调方法向上找调用链",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -502,6 +526,7 @@ class McpToolHandlers @Inject constructor(
             val name = p.str("methodName") ?: throw McpToolException("methodName 缺失")
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
             val rows = dartMethodDao.searchSrcWithClass(id, name, limit)
+            val soPath = libAppPath(id)
             buildJsonObject {
                 put("count", rows.size)
                 put("truncated", rows.size == limit)
@@ -512,6 +537,7 @@ class McpToolHandlers @Inject constructor(
                             put("className", r._className)
                             put("methodName", r.method.methodName)
                             put("functionOffset", r.method.functionOffset ?: 0)
+                            fileOffsetOf(soPath, r.method.functionOffset ?: 0)?.let { put("fileOffset", it) }
                         }
                     }
                 }
@@ -519,7 +545,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_pp_references",
-            description = "反查哪些方法引用了指定 pp 偏移（[pp+0x..]）",
+            description = "反查哪些 Dart 方法在 src_code 中引用了指定 pp 偏移（自动拼 [pp+0x..] 匹配）。返回引用方法 id/className/methodName/functionOffset/fileOffset + target 串。用于从对象池数据追到使用方",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -535,6 +561,7 @@ class McpToolHandlers @Inject constructor(
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
             val target = "[pp+0x" + off.toString(16) + "]"
             val rows = dartMethodDao.searchSrcWithClass(id, target, limit)
+            val soPath = libAppPath(id)
             buildJsonObject {
                 put("target", target)
                 put("count", rows.size)
@@ -546,6 +573,7 @@ class McpToolHandlers @Inject constructor(
                             put("className", r._className)
                             put("methodName", r.method.methodName)
                             put("functionOffset", r.method.functionOffset ?: 0)
+                            fileOffsetOf(soPath, r.method.functionOffset ?: 0)?.let { put("fileOffset", it) }
                         }
                     }
                 }
@@ -558,7 +586,7 @@ class McpToolHandlers @Inject constructor(
     private fun buildDisasmTools(): List<McpTool> = listOf(
         McpTool(
             name = "disassemble_range",
-            description = "用 Capstone 反汇编 so 文件指定偏移范围（不可解码字显示为 .word，不截断）",
+            description = "用 Capstone 反汇编 so 文件指定【文件偏移】范围的 ARM64 代码（独立于分析会话，给定 soPath 即可）。offset 为文件偏移（非 vaddr）；不可解码字显示为 .word，结果不截断。返回 baseAddress/count/instructions（address/size/mnemonic/opStr/bytes）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -594,7 +622,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_elf_sections",
-            description = "列出 so 文件的 ELF 节头",
+            description = "列出 so 文件的 ELF 节头（独立于会话，给定 soPath 即可）：name/type/address(vaddr)/offset(文件偏移)/size/flags。address 与 offset 的差即该节的 vaddr 偏差",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") { putJsonObject("soPath") { put("type", "string") } }
@@ -621,7 +649,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_elf_symbols",
-            description = "列出 so 文件符号（默认动态符号表）",
+            description = "列出 so 文件符号（独立于会话）：默认动态符号表（dynamic 默认 true；传 false 取 .symtab）。返回 name/address(vaddr)/size/type/binding",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -651,7 +679,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "find_symbol_offset",
-            description = "按符号名解析 ELF 动态符号的地址",
+            description = "按符号名（精确匹配）解析 ELF 动态符号的地址。返回 found/address(vaddr)/size。用于定位 JNI/导出函数入口后再反汇编",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -675,7 +703,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "translate_address",
-            description = "换算地址：vaddr ↔ file offset（经 ELF 节头）+ 返回符号上下文",
+            description = "地址坐标换算：判断一个数值是文件偏移还是 vaddr，并给出另一个坐标与所在节、偏差 bias。当数值同时是某段 vaddr 与另一段文件偏移（带偏差的 so）时 ambiguous=true 并返回 altVaddr/altFileOffset——此时 read_bytes/write_bytes 会报歧义，需用本工具确认后再把明确的 fileOffset 传入。address 传十进制或 0x 十六进制字符串均可",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -687,34 +715,26 @@ class McpToolHandlers @Inject constructor(
         ) { p ->
             val so = p.str("soPath") ?: throw McpToolException("soPath 缺失")
             val addr = p.long("address") ?: throw McpToolException("address 缺失")
-            val sections = ElfParserBindings().use { parser ->
-                if (!parser.open(so)) throw McpToolException("无法打开 $so")
-                parser.getSections().filter { it.offset > 0 && it.size > 0 }
-            }
-            var fileOffset = addr
-            var vaddr = addr
-            var sectionName = ""
-            // 已落在某节的文件偏移范围 → 视为文件偏移
-            val inFile = sections.firstOrNull { addr >= it.offset && addr < it.offset + it.size }
-            val inVaddr = sections.firstOrNull { addr >= it.address && addr < it.address + it.size }
-            when {
-                inFile != null -> { fileOffset = addr; vaddr = inFile.address + (addr - inFile.offset); sectionName = inFile.name }
-                inVaddr != null -> { vaddr = addr; fileOffset = inVaddr.offset + (addr - inVaddr.address); sectionName = inVaddr.name }
-            }
+            val res = axisResolver.resolve(so, addr)
             val ctx = addressTranslator.getContext(addr)
             buildJsonObject {
                 put("input", addr)
-                put("interpretedAsFileOffset", inFile != null)
-                put("fileOffset", fileOffset)
-                put("vaddr", vaddr)
-                put("section", sectionName)
+                put("axis", res?.inputAxis?.name ?: "NONE")
+                put("interpretedAsFileOffset", res?.inputAxis == AddressAxis.FILE_OFFSET)
+                put("ambiguous", res?.ambiguous == true)
+                put("fileOffset", res?.fileOffset ?: addr)
+                put("vaddr", res?.vaddr ?: addr)
+                put("bias", res?.bias ?: 0)
+                put("section", res?.section ?: "")
+                if (res?.altVaddr != null) put("altVaddr", res.altVaddr)
+                if (res?.altFileOffset != null) put("altFileOffset", res.altFileOffset)
                 put("symbol", ctx.symbol ?: "")
                 put("mappingFound", ctx.found)
             }
         },
         McpTool(
             name = "assemble_instruction",
-            description = "用 Keystone 汇编一条 ARM64 指令并返回机器码（不写盘，预览用）",
+            description = "用 Keystone 汇编一条 ARM64 指令并返回机器码（预览，不写文件）。assembly 如 'MOV W0, #1' / 'BL #0x4000'；address 为指令所在地址（PC 相对分支需要）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -742,7 +762,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "read_so_bytes",
-            description = "读取 so 文件指定偏移的原始字节（hex dump）",
+            description = "读取 so 文件指定【文件偏移】的原始字节（hex dump，独立于会话）。offset 为文件偏移（非 vaddr）；返回 baseOffset/size/bytes",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -768,7 +788,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "search_elf_symbols",
-            description = "在 so 动态符号表中按名称子串搜索符号",
+            description = "在 so 动态符号表中按名称子串（不区分大小写）搜索符号。返回 count/truncated/symbols（name/address(vaddr)/size）。用于模糊定位符号",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -807,7 +827,7 @@ class McpToolHandlers @Inject constructor(
     private fun buildPatchTools(): List<McpTool> = listOf(
         McpTool(
             name = "patch_instruction",
-            description = "用 Capstone cs_asm 汇编一条指令并写入 so 文件（破坏性，默认关闭；写前备份+CRC+可撤销）",
+            description = "用 Keystone 汇编一条指令并【写入】so 文件【文件偏移】（破坏性补丁，默认关闭；写前自动备份+CRC 校验+可撤销）。offset 为文件偏移；写前建议 read_so_bytes 确认原值。需先在设置启用补丁",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -835,7 +855,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "undo_patch",
-            description = "撤销最后一次补丁（默认关闭）",
+            description = "撤销该 so 最近一次补丁，恢复原字节（默认关闭；需先启用补丁）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") { putJsonObject("soPath") { put("type", "string") } }
@@ -852,7 +872,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_patches",
-            description = "列出指定 so 的补丁记录（默认关闭）",
+            description = "列出指定 so 的全部补丁记录（offset/oldBytes/newBytes/timestamp，默认关闭；需先启用补丁）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") { putJsonObject("soPath") { put("type", "string") } }
@@ -878,7 +898,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "patch_bytes",
-            description = "写任意原始字节到 so 文件指定偏移（破坏性，默认关闭；写前备份+可撤销）",
+            description = "写任意原始字节到 so 文件指定【文件偏移】（破坏性，默认关闭；写前自动备份+可撤销）。offset 为文件偏移；hex 为空格分隔十六进制如 '1F 20 03 D5'。写前建议先 read_so_bytes 确认原值，需先启用补丁",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {

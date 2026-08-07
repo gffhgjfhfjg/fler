@@ -44,7 +44,7 @@ class EmulationMcpToolRegistry @Inject constructor(
 
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "open",
-            description = "打开 so 的仿真会话（Unicorn：PT_LOAD 装载 + 栈/heap/哨兵内存）；同路径复用",
+            description = "打开 so 的 Unicorn 仿真会话（装载 PT_LOAD 段 + 分配栈/heap/哨兵内存），同路径复用。注意：仿真内存地址是「装载后的虚拟地址」坐标系，与 engine_* 分析工具的 ELF vaddr/文件偏移不同；找不到函数入口时先用 find_symbol_offset/translate_address 定位",
             inputSchema = objProps(
                 "soPath" to strType(true, "so 文件绝对路径")
             )
@@ -96,8 +96,8 @@ class EmulationMcpToolRegistry @Inject constructor(
 
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "call_function",
-            description = "调用 so 内函数：参数写 x0-x7（最多 8 个），LR 设哨兵，运行至返回/断点/超时，返回 x0。" +
-                "function 支持函数名或 hex 地址；会话未打开时自动 open",
+            description = "调用 so 内函数：参数写入 x0-x7（最多 8 个），LR 设哨兵，运行至函数返回/断点/超时，返回 x0。" +
+                "function 支持导出函数名或 hex 地址（装载后虚拟地址）；会话未打开时自动 open",
             inputSchema = objProps(
                 "soPath" to strType(true, "so 文件绝对路径"),
                 "function" to strType(true, "函数名或 hex 地址（如 0x1234）"),

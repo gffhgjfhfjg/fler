@@ -56,6 +56,12 @@ class AnalysisSession @Inject constructor(
     /** 当前已打开会话对应的引擎。 */
     suspend fun currentEngine(): BinaryAnalysisEngine? = mutex.withLock { currentEngine }
 
+    /** 当前已打开会话对应的文件路径（用于坐标轴换算等）。未 open 返回 null。 */
+    suspend fun currentFilePath(): String? = mutex.withLock {
+        if (!currentHandle.isValid) return@withLock null
+        sessions[currentHandle.value]?.filePath
+    }
+
     // ------------------------------------------------------------------
     // 会话生命周期
     // ------------------------------------------------------------------
@@ -155,7 +161,40 @@ class AnalysisSession @Inject constructor(
     ): OpenResult {
         val engine = registry.getAnalysis(engineId)
             ?: return OpenResult.Failure("未注册引擎: $engineId")
-        return open(filePath, options, requireCaps = engine.capabilities.toList())
+        if (!File(filePath).exists()) {
+            return OpenResult.Failure("文件不存在: $filePath")
+        }
+        return mutex.withLock {
+            // 同路径且同引擎已有会话 → 直接复用
+            val existingH = pathToHandle[filePath]
+            if (existingH != null) {
+                val entry = sessions[existingH]
+                if (entry != null && entry.engineId == engineId) {
+                    val eng = registry.getAnalysis(entry.engineId)
+                    if (eng != null && eng.isHandleValid(AnalysisHandle(existingH))) {
+                        currentHandle = AnalysisHandle(existingH)
+                        currentEngine = eng
+                        backupManager.setCurrentFile(filePath)
+                        return@withLock OpenResult.Success(
+                            AnalysisHandle(existingH), filePath, engineId
+                        )
+                    }
+                }
+            }
+            // 用指定引擎打开（不按能力优先级挑选——否则 self 的子能力集永远被 rizin 抢走）
+            when (val r = engine.open(filePath, options)) {
+                is OpenResult.Success -> {
+                    sessions[r.handle.value] = SessionEntry(r.handle, engine.engineId, filePath, now())
+                    pathToHandle[filePath] = r.handle.value
+                    currentHandle = r.handle
+                    currentEngine = engine
+                    backupManager.setCurrentFile(filePath)
+                    evictIfNeeded()
+                    OpenResult.Success(r.handle, filePath, engine.engineId)
+                }
+                is OpenResult.Failure -> OpenResult.Failure(r.reason)
+            }
+        }
     }
 
     suspend fun closeAll() {
@@ -208,6 +247,12 @@ class AnalysisSession @Inject constructor(
         withEngine { e, h -> e.scanStrings(h, options) }.orEmpty()
 
     suspend fun listFunctions(): List<FunctionInfo> = withEngine { e, h -> e.listFunctions(h) }.orEmpty()
+
+    /** 对当前会话执行全量分析（Rizin aaa）。非 Rizin 引擎 no-op 返回 false。 */
+    suspend fun analyze(): Boolean = withEngine { e, h ->
+        (e as? com.ai.fler.core.analysis.engine.RizinEngine)?.autoAnalyze(h) ?: false
+    } ?: false
+
     suspend fun findFunctionContaining(address: Long): FunctionInfo? =
         withEngine { e, h -> e.findFunctionContaining(h, address) }
     suspend fun findFunctionsByName(query: String): List<FunctionInfo> =
