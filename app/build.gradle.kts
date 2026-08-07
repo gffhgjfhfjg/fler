@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
+    alias(libs.plugins.kover)
 }
 
 android {
@@ -42,8 +43,16 @@ android {
 
     buildTypes {
         release {
-            optimization {
-                enable = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            // 真机冒烟用本地 debug 签名，避免依赖发布签名
+            signingConfig = signingConfigs.getByName("debug")
+            ndk {
+                debugSymbolLevel = "FULL"
             }
         }
     }
@@ -55,6 +64,18 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    testOptions {
+        unitTests {
+            // Robolectric 需要资源类加载（isIncludeAndroidResources）
+            isIncludeAndroidResources = true
+            all {
+                it.useJUnit()
+                // Robolectric 默认最大 SDK 支持到 35，编译 SDK 36 时固定运行在可运行 SDK
+                it.systemProperty("robolectric.enabledSdks", "28,29,30,31,32,33,34,35")
+            }
+        }
     }
 }
 
@@ -100,6 +121,10 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.mockk)
+    testImplementation(libs.turbine)
+    testImplementation(libs.robolectric)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
 }

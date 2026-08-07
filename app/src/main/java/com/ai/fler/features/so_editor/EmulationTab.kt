@@ -763,7 +763,10 @@ private fun LogSection(viewModel: EmulationViewModel, state: EmulationUiState) {
                 )
             } else {
                 LazyColumn(state = listState) {
-                    items(state.logs) { log ->
+                    items(
+                        items = state.logs,
+                        key = { log -> log.hashCode() }
+                    ) { log ->
                         Text(
                             log,
                             style = MaterialTheme.typography.labelSmall,

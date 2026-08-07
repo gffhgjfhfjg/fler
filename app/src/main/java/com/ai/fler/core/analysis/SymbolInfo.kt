@@ -1,11 +1,14 @@
 package com.ai.fler.core.analysis
 
+import androidx.compose.runtime.Immutable
+
 /**
  * ELF 符号信息（Engine 抽象层数据模型）。
  *
  * 合并了旧版 [com.ai.fler.core.jni.ElfSymbol] 与 Rizin librz_bin 的符号字段
  * （demangle、bind 字符串形式等）。
  */
+@Immutable
 data class SymbolInfo(
     val name: String,
     val demangledName: String? = null,   // Rizin 专有：demangle 后的可读名称
@@ -50,6 +53,7 @@ enum class SymbolBind(val code: Byte) {
 }
 
 /** 导入符号信息（Rizin iij）。 */
+@Immutable
 data class ImportInfo(
     val name: String,
     val type: String = "",   // FUNC / OBJECT
@@ -58,6 +62,7 @@ data class ImportInfo(
 )
 
 /** 重定位信息（Rizin irj）。 */
+@Immutable
 data class RelocInfo(
     val name: String = "",
     val address: Long = 0,
@@ -65,6 +70,7 @@ data class RelocInfo(
 )
 
 /** 字符串扫描结果（Rizin izzj）。 */
+@Immutable
 data class StringInfo(
     val string: String,
     val address: Long,           // 虚拟地址
@@ -74,6 +80,7 @@ data class StringInfo(
 )
 
 /** 文件基本信息（Rizin ij bin 部分）。 */
+@Immutable
 data class FileInfo(
     val arch: String = "",      // arm / x86 / mips ...
     val bits: Int = 0,          // 32 / 64

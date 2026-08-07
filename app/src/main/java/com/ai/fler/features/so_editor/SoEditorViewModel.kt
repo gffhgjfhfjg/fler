@@ -1,5 +1,7 @@
 package com.ai.fler.features.so_editor
 
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.Stable
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -105,6 +107,13 @@ class SoEditorViewModel @Inject constructor(
     private val _dartFunctionLabels = MutableStateFlow<Map<Long, String>>(emptyMap())
     val dartFunctionLabels: StateFlow<Map<Long, String>> = _dartFunctionLabels.asStateFlow()
 
+    /**
+     * 按 vaddr 排序的函数快照（供 xref 二分查找复用，避免每次点击指令都全量排序 5 万级函数列表）。
+     * [functionsSnapshotRef] 跟踪上一次排序时的 functions 引用，引用变化才重建快照。
+     */
+    private var functionsByVaddr: List<FunctionInfo> = emptyList()
+    private var functionsSnapshotRef: List<FunctionInfo>? = null
+
     /** 结构Tab各子Tab的滚动位置（index to offset），用于切到汇编Tab再回来时保持位置。 */
     private val _structureScrollStates = MutableStateFlow<Map<Int, Pair<Int, Int>>>(emptyMap())
     val structureScrollStates: StateFlow<Map<Int, Pair<Int, Int>>> = _structureScrollStates.asStateFlow()
@@ -176,17 +185,15 @@ class SoEditorViewModel @Inject constructor(
             }
         }
 
-        // 从持久化恢复历史，再过滤一次：缓存被清理后文件可能不存在，避免用户点击打开空文件路径
-        _recentFiles.value = loadRecentFiles()
+        // 从持久化恢复历史（IO 协程，避免主线程同步读 SharedPreferences 卡顿）。
+        // 先给空列表，IO 读完再过滤不存在的文件并更新。
         viewModelScope.launch(Dispatchers.IO) {
-            val snapshot = _recentFiles.value
-            if (snapshot.isNotEmpty()) {
-                val existing = snapshot.filter { java.io.File(it.path).exists() }
-                if (existing.size != snapshot.size) {
-                    _recentFiles.value = existing
-                    saveRecentFiles(existing)
-                }
+            val files = loadRecentFiles()
+            val existing = files.filter { java.io.File(it.path).exists() }
+            if (existing.size != files.size) {
+                saveRecentFiles(existing)
             }
+            _recentFiles.value = existing
         }
     }
 
@@ -772,45 +779,58 @@ class SoEditorViewModel @Inject constructor(
      * 优先 [dartFunctionLabels]（ClassName.methodName），
      * 再查 [uiState].functions 的包含关系（vaddr ≤ addr < vaddr+size）。
      * 若两者都不命中，从函数列表找最近的函数起始地址。
+     *
+     * 排序快照按 functions 引用复用：仅当 [uiState].functions 引用变化时才重建
+     * [functionsByVaddr]，避免每次点击指令都对 5 万级函数列表重复 sortedBy。
+     * 整体在 [Dispatchers.Default] 执行，防止首次构建快照时主线程排序卡顿。
      */
-    private fun buildXrefFunctionNames(addresses: Set<Long>): Map<Long, String> {
-        if (addresses.isEmpty()) return emptyMap()
-        val dartLabels = _dartFunctionLabels.value
-        val functions = _uiState.value.functions
-        if (functions.isEmpty()) return emptyMap()
+    private suspend fun buildXrefFunctionNames(addresses: Set<Long>): Map<Long, String> =
+        withContext(Dispatchers.Default) {
+            if (addresses.isEmpty()) return@withContext emptyMap()
+            val dartLabels = _dartFunctionLabels.value
+            val functions = _uiState.value.functions
+            if (functions.isEmpty()) return@withContext emptyMap()
 
-        // 按 vaddr 排序 + 二分定位，避免对每个地址线性扫描全部函数（函数数以万计时
-        // 原实现最坏 O(N) / 地址，xref 面板一次可能数百地址）。
-        val sorted = functions.sortedBy { it.vaddr }
-        val result = mutableMapOf<Long, String>()
-        for (addr in addresses) {
-            // 1) 精确命中 Dart 标签
-            if (addr in dartLabels) { result[addr] = dartLabels[addr]!!; continue }
-            // 2) 二分定位最后一个 vaddr <= addr 的函数，从近到远找包含 addr 的函数。
-            //    函数区间互不重叠时，包含 addr 的只会是 vaddr 最大的那几个之一。
-            val idx = sorted.binarySearchBy(addr) { it.vaddr }
-            val hi = if (idx >= 0) idx else -idx - 2
-            if (hi >= 0) {
-                var fallback: String? = null   // size=0 的最近函数（退而求其次）
-                for (i in hi downTo 0) {
-                    val f = sorted[i]
-                    if (f.size > 0) {
-                        // 最近的 size>0 函数包含 addr：最精确的匹配
-                        if (addr < f.vaddr + f.size) { result[addr] = f.name }
-                        // 该函数在 addr 之前已结束，更早的函数更不可能包含 addr
-                        break
-                    }
-                    // size=0 的函数视为退而求其次的候选，继续向前找 size>0 的精确匹配
-                    if (fallback == null) fallback = f.name
+            // 引用未变则复用已排序快照；引用变了（如 Dart 标签合并后）才重建
+            val sorted = if (functionsSnapshotRef === functions) {
+                functionsByVaddr
+            } else {
+                functions.sortedBy { it.vaddr }.also {
+                    functionsByVaddr = it
+                    functionsSnapshotRef = functions
                 }
-                if (addr in result) continue
-                if (fallback != null) { result[addr] = fallback; continue }
-                // 3) 无包含关系：取 addr 之前的最后一个函数作为近似归属
-                result[addr] = sorted[hi].name
             }
+            if (sorted.isEmpty()) return@withContext emptyMap()
+
+            val result = mutableMapOf<Long, String>()
+            for (addr in addresses) {
+                // 1) 精确命中 Dart 标签
+                if (addr in dartLabels) { result[addr] = dartLabels[addr]!!; continue }
+                // 2) 二分定位最后一个 vaddr <= addr 的函数，从近到远找包含 addr 的函数。
+                //    函数区间互不重叠时，包含 addr 的只会是 vaddr 最大的那几个之一。
+                val idx = sorted.binarySearchBy(addr) { it.vaddr }
+                val hi = if (idx >= 0) idx else -idx - 2
+                if (hi >= 0) {
+                    var fallback: String? = null   // size=0 的最近函数（退而求其次）
+                    for (i in hi downTo 0) {
+                        val f = sorted[i]
+                        if (f.size > 0) {
+                            // 最近的 size>0 函数包含 addr：最精确的匹配
+                            if (addr < f.vaddr + f.size) { result[addr] = f.name }
+                            // 该函数在 addr 之前已结束，更早的函数更不可能包含 addr
+                            break
+                        }
+                        // size=0 的函数视为退而求其次的候选，继续向前找 size>0 的精确匹配
+                        if (fallback == null) fallback = f.name
+                    }
+                    if (addr in result) continue
+                    if (fallback != null) { result[addr] = fallback; continue }
+                    // 3) 无包含关系：取 addr 之前的最后一个函数作为近似归属
+                    result[addr] = sorted[hi].name
+                }
+            }
+            result
         }
-        return result
-    }
 
     /** 清除交叉引用面板。 */
     fun clearXrefs() {
@@ -1152,6 +1172,7 @@ class SoEditorViewModel @Inject constructor(
 
 enum class EditorTab { STRUCTURE, HEX, DISASSEMBLY, EMULATION }
 
+@Immutable
 data class SoEditorUiState(
     val filePath: String = "",
     val fileName: String = "",
@@ -1168,6 +1189,7 @@ data class SoEditorUiState(
     val errorMessage: String? = null
 )
 
+@Stable
 data class HexDataState(
     val offset: Long = 0,
     val data: ByteArray = ByteArray(0),
@@ -1189,6 +1211,7 @@ data class HexDataState(
 @kotlinx.serialization.Serializable
 data class RecentFile(val path: String, val name: String)
 
+@Immutable
 data class DisassemblyDataState(
     val baseAddress: Long = 0,
     val loadedSize: Long = 0,
@@ -1199,6 +1222,7 @@ data class DisassemblyDataState(
 )
 
 /** 交叉引用面板状态。 */
+@Immutable
 data class XrefDataState(
     val address: Long = 0,
     val xrefsTo: List<Xref> = emptyList(),   // 谁调用/引用了我

@@ -1,12 +1,18 @@
 package com.ai.fler.core.analysis
 
+import androidx.compose.runtime.Immutable
+
 /**
  * 一条反汇编指令（Engine 抽象层数据模型）。
  *
  * 与 [com.ai.fler.core.jni.DisasmInstruction] 字段保持一致，
  * 便于 [SelfAnalysisEngine] 零开销桥接。Rizin / Capstone 引擎各自把解码结果
  * 转换为本类；UI 层依赖本包的 `DisasmInstruction`，不再依赖 core.jni 的。
+ *
+ * @Immutable 约定：[bytes] 数组创建后不被修改（ViewModel 只做整体替换）。
+ * 已实现 equals/hashCode 基于 contentEquals，Compose 会按值比较。
  */
+@Immutable
 data class DisasmInstruction(
     val address: Long,
     val size: Int,

@@ -1,5 +1,7 @@
 package com.ai.fler.core.analysis
 
+import androidx.compose.runtime.Immutable
+
 /**
  * ELF 节区信息（Engine 抽象层数据模型）。
  *
@@ -7,6 +9,7 @@ package com.ai.fler.core.analysis
  * 避免依赖具体的 JNI 数据类。RizinEngine 把 librz_bin 的 RzBinSection
  * 转换为本类；SelfAnalysisEngine 把旧 ElfSection 包装为本类。
  */
+@Immutable
 data class SectionInfo(
     val name: String,
     val type: String = "",          // Rizin: prog_bits/symtab/strtab/dynsym/nobits/rela 等

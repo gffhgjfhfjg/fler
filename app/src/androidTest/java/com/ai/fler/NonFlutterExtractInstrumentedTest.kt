@@ -2,6 +2,7 @@ package com.ai.fler
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.ai.fler.core.log.AppLogger
 import com.ai.fler.core.service.ApkExtractor
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
@@ -61,7 +62,7 @@ class NonFlutterExtractInstrumentedTest {
             deleteRecursively()
             mkdirs()
         }
-        val extractor = ApkExtractor(context)
+        val extractor = ApkExtractor(context, AppLogger())
         val result = extractor.extract(apkPath!!, outDir)
 
         assertTrue("提取应成功: ${result.error}", result.isSuccess)
@@ -95,7 +96,7 @@ class NonFlutterExtractInstrumentedTest {
             deleteRecursively()
             mkdirs()
         }
-        val extractor = ApkExtractor(context)
+        val extractor = ApkExtractor(context, AppLogger())
         val result = extractor.extract(fakeApk.absolutePath, outDir)
 
         assertFalse("无 native 库的 APK 应失败", result.isSuccess)

@@ -32,6 +32,12 @@ class EngineLoader @Inject constructor(
     private val loadedLibs = mutableSetOf<String>()
     private val loadLock = Any()
 
+    /** symlink 是否已准备就绪。lib/ 目录内容在进程内不变（引擎包解压后即固定），
+     *  首次 [prepareVersionedSymlinks] 完成后置 true，后续 ensureSharedLibsLoaded
+     *  直接跳过全量 ELF 扫描，避免每次加载引擎都重读所有 .so 的 .dynamic 段。 */
+    @Volatile
+    private var symlinksPrepared = false
+
     companion object {
         private const val TAG = "FlerEngine"
     }
@@ -127,24 +133,36 @@ class EngineLoader @Inject constructor(
      *    而 libicudata.so 的 SONAME 是不带版本号的 libicudata.so —— 单靠 SONAME 规则
      *    不会生成 .so.73 链接，必须按 NEEDED 补齐）
      *
-     * 幂等：已存在的 symlink 不会重建。
+     * 幂等：首次完成后 [symlinksPrepared] 置 true，后续直接跳过全量 ELF 扫描；
+     * 已存在的 symlink 也不会重建。lib/ 内容在进程内不变（引擎包解压后即固定），
+     * 故进程内只需准备一次。
      */
     private fun prepareVersionedSymlinks() {
+        if (symlinksPrepared) return
         val libDir = File(engineDir, "lib")
         if (!libDir.isDirectory) return
 
         val soFiles = libDir.listFiles { f -> f.isFile && f.name.endsWith(".so") } ?: return
 
-        // 1) SONAME → 文件名
-        for (soFile in soFiles) {
-            val soname = readElfSoname(soFile) ?: continue
+        // 一次性读取所有 .so 的 .dynamic 段：原 readElfSoname + readElfNeeded 各调一次
+        // readDynamicInfo（每次读 ELF 头 + 节区表 + .dynstr + .dynamic），合并后每文件只读一次。
+        val infos = soFiles.mapNotNull { soFile ->
+            readDynamicInfo(soFile)?.let { soFile to it }
+        }
+
+        // 1) SONAME → 文件名（DT_SONAME, tag=14）
+        for ((soFile, info) in infos) {
+            val soname = info.entries.firstOrNull { it.first == 14L }?.second
+                ?.let { readString(info.dynstr, it) } ?: continue
             if (soname == soFile.name) continue
             createSymlinkIfNeeded(libDir, soname, soFile)
         }
 
-        // 2) DT_NEEDED → 基础文件名
-        for (soFile in soFiles) {
-            val needed = readElfNeeded(soFile) ?: emptyList()
+        // 2) DT_NEEDED → 基础文件名（tag=1）
+        for ((soFile, info) in infos) {
+            val needed = info.entries.filter { it.first == 1L }
+                .mapNotNull { (_, v) -> readString(info.dynstr, v) }
+                .filter { it.isNotEmpty() }
             for (need in needed) {
                 if (!need.startsWith("lib") || !need.endsWith(".so")) continue
                 if (File(libDir, need).exists()) continue
@@ -156,6 +174,7 @@ class EngineLoader @Inject constructor(
                 createSymlinkIfNeeded(libDir, need, target)
             }
         }
+        symlinksPrepared = true
     }
 
     private fun createSymlinkIfNeeded(libDir: File, linkName: String, target: File) {
@@ -244,25 +263,6 @@ class EngineLoader @Inject constructor(
             Log.w(TAG, "读取动态段失败 ${file.name}: ${e.message}")
         }
         return null
-    }
-
-    /**
-     * 读取 ELF64 文件的 SONAME（DT_SONAME，tag=14）。
-     */
-    private fun readElfSoname(file: File): String? {
-        val info = readDynamicInfo(file) ?: return null
-        val value = info.entries.firstOrNull { it.first == 14L }?.second ?: return null
-        return readString(info.dynstr, value)
-    }
-
-    /**
-     * 读取 ELF64 文件的 DT_NEEDED 依赖列表（tag=1）。
-     */
-    private fun readElfNeeded(file: File): List<String>? {
-        val info = readDynamicInfo(file) ?: return null
-        return info.entries.filter { it.first == 1L }
-            .mapNotNull { (_, v) -> readString(info.dynstr, v) }
-            .filter { it.isNotEmpty() }
     }
 
     /** 从 dynstr 按偏移读 C 字符串。 */

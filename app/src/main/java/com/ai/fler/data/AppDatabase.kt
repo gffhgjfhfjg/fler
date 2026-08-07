@@ -37,7 +37,7 @@ import com.ai.fler.data.entity.Project
         AddressMapping::class,
         DartCallEdge::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {

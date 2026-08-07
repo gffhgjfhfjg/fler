@@ -1,5 +1,6 @@
 package com.ai.fler.features.so_editor
 
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ai.fler.core.analysis.CallResult
@@ -22,6 +23,7 @@ import javax.inject.Inject
 /**
  * 仿真 Tab UI 状态。
  */
+@Immutable
 data class EmulationUiState(
     val isSessionOpen: Boolean = false,
     val isOpening: Boolean = false,

@@ -26,9 +26,6 @@ interface DartMethodDao {
     @Query("SELECT * FROM dart_methods WHERE id = :id")
     suspend fun getById(id: Long): DartMethod?
 
-    @Query("SELECT * FROM dart_methods WHERE analysis_id = :analysisId ORDER BY method_name")
-    suspend fun getByAnalysisIdList(analysisId: Long): List<DartMethod>
-
     /** 轻量投影（不含 src_code 大字段）：供 AddressTranslator 构建地址映射。
      * 55781 条方法全量载入 src_code 会占用数百 MB 内存，此处只取必要列。 */
     @Query(
@@ -108,15 +105,6 @@ interface DartMethodDao {
     )
     suspend fun searchSrcWithClass(analysisId: Long, target: String, limit: Int): List<MethodWithClass>
 
-    /** 方法 + 所属类名（供 ASM 方法列表展示）。 */
-    @Query(
-        "SELECT dm.*, dc.class_name AS _class_name FROM dart_methods dm " +
-            "INNER JOIN dart_classes dc ON dm.class_id = dc.id " +
-            "WHERE dm.analysis_id = :analysisId " +
-            "ORDER BY dc.class_name, dm.method_name"
-    )
-    suspend fun getMethodsWithClass(analysisId: Long): List<MethodWithClass>
-
     /** Keyset 分页：方法列表（轻量投影，不含 src_code）。 */
     @Query(
         "SELECT dm.id, dm.class_id, dm.method_name, dm.selector, dm.function_offset, dm.function_size, dc.class_name AS _class_name FROM dart_methods dm " +
@@ -146,17 +134,6 @@ interface DartMethodDao {
             "ORDER BY dm.function_offset"
     )
     suspend fun getMethodsBySoPathLight(soPath: String): List<MethodLight>
-
-    /** 按 SO 路径查找所有 Dart 方法（完整信息），用于 SO 编辑器注入函数标签。
-     * 限定 library_name='libapp.so'（原因同 [getMethodsBySoPathLight]）。 */
-    @Query(
-        "SELECT dm.*, dc.class_name AS _class_name FROM dart_methods dm " +
-            "INNER JOIN dart_classes dc ON dm.class_id = dc.id " +
-            "WHERE dm.analysis_id IN (SELECT l.analysis_id FROM libraries l WHERE l.path = :soPath AND l.library_name = 'libapp.so') " +
-            "AND dm.function_offset > 0 " +
-            "ORDER BY dm.function_offset"
-    )
-    suspend fun getMethodsBySoPath(soPath: String): List<MethodWithClass>
 
     /** 分页取方法体（functionOffset + src_code），供 DartCallGraphBuilder 解析调用边。
      * 一次只取一页避免把数万条大文本 src_code 全载入内存。 */

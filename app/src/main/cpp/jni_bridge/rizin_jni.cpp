@@ -25,11 +25,14 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
+#include <mutex>
 
 static const char* TAG = "FlerRizinJNI";
 
@@ -40,6 +43,13 @@ static const char* TAG = "FlerRizinJNI";
 // 不依赖 Rizin 内部 io->desc->name，那个字段在部分版本为空）。
 std::map<RzCore*, std::string> g_corePaths;
 
+// core 指针 -> (mmap 起址, 文件大小) 缓存，避免每次 nativeReadBytes 兜底都
+// 重新 open + mmap + munmap + close 全文件。scanStrings 对 40MB libapp.so
+// 会触发 ~160 次 readBytes，无缓存时每次完整 mmap/munmap 一遍 40MB。
+// mmap 生命周期与 RzCore 绑定，在 nativeClose 中释放。
+static std::unordered_map<RzCore*, std::pair<void*, size_t>> g_coreMmaps;
+static std::mutex g_mmapMutex;
+
 /**
  * 裸文件直读（绕过 Rizin io）。
  *
@@ -47,27 +57,46 @@ std::map<RzCore*, std::string> g_corePaths;
  * 首段之后的内容 rz_io_pread_at 一律返回 0 字节（症状：.text 反汇编/xref
  * 全部落空）。兜底用 mmap 直读（elf_parser 同款，已验证全文件可读）：
  * 实测本设备上 pread 超过 ~2MB 就返回 EOF，而 mmap 全文件正常。
+ *
+ * mmap 按 RzCore* 句柄缓存（[g_coreMmaps]）：scanStrings 对 40MB libapp.so
+ * 会触发 ~160 次循环 readBytes，无缓存时每次都完整 open+mmap+munmap+close
+ * 一遍 40MB，累计 160 次全文件 mmap；复用后只 mmap 一次，结束时随
+ * nativeClose 一起释放。Android 上 MAP_SHARED 的 page cache 由内核管理，
+ * 不会因长时间持有 mmap 导致物理内存常驻。
  */
-static ssize_t raw_pread_all(const char* path, ut64 off, uint8_t* buf, size_t size) {
+static ssize_t raw_pread_all(RzCore* core, const char* path, ut64 off, uint8_t* buf, size_t size) {
     if (!path || size == 0) return -1;
-    int fd = ::open(path, O_RDWR);
-    if (fd < 0) {
-        __android_log_print(ANDROID_LOG_ERROR, TAG, "raw mmap open 失败 path=%s errno=%d", path, errno);
-        return -1;
+    std::lock_guard<std::mutex> lock(g_mmapMutex);
+
+    void* map = nullptr;
+    size_t fileSize = 0;
+    auto it = g_coreMmaps.find(core);
+    if (it != g_coreMmaps.end()) {
+        map = it->second.first;
+        fileSize = it->second.second;
+    } else {
+        int fd = ::open(path, O_RDONLY);
+        if (fd < 0) {
+            __android_log_print(ANDROID_LOG_ERROR, TAG, "raw mmap open 失败 path=%s errno=%d", path, errno);
+            return -1;
+        }
+        struct stat st;
+        if (::fstat(fd, &st) < 0) { ::close(fd); return -1; }
+        fileSize = static_cast<size_t>(st.st_size);
+        map = ::mmap(nullptr, fileSize, PROT_READ, MAP_SHARED, fd, 0);
+        ::close(fd);
+        if (map == MAP_FAILED) {
+            __android_log_print(ANDROID_LOG_ERROR, TAG, "raw mmap 失败 path=%s errno=%d size=%zu", path, errno, fileSize);
+            return -1;
+        }
+        g_coreMmaps[core] = {map, fileSize};
+        __android_log_print(ANDROID_LOG_INFO, TAG,
+            "raw mmap 缓存建立 core=%p path=%s size=%zu", core, path, fileSize);
     }
-    struct stat st;
-    if (::fstat(fd, &st) < 0) { ::close(fd); return -1; }
-    if (off >= static_cast<ut64>(st.st_size)) { ::close(fd); return 0; }
-    void* map = ::mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_SHARED, fd, 0);
-    if (map == MAP_FAILED) {
-        __android_log_print(ANDROID_LOG_ERROR, TAG, "raw mmap 失败 path=%s errno=%d", path, errno);
-        ::close(fd); return -1;
-    }
-    size_t n = size;
-    if (off + n > static_cast<ut64>(st.st_size)) n = static_cast<size_t>(static_cast<ut64>(st.st_size) - off);
+
+    if (off >= fileSize) return 0;
+    size_t n = std::min(size, fileSize - static_cast<size_t>(off));
     std::memcpy(buf, static_cast<const uint8_t*>(map) + off, n);
-    ::munmap(map, static_cast<size_t>(st.st_size));
-    ::close(fd);
     return static_cast<ssize_t>(n);
 }
 
@@ -175,6 +204,11 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeOpen(
     rz_core_cmd_str(core, "e asm.arch=arm");
     rz_core_cmd_str(core, "e asm.bits=64");
 
+    // 关闭 io.cache：写入必须直接落盘而非只写内存缓存。
+    // 一次性设置：每次 nativeWriteBytes 都发命令会引入额外 rz_core_cmd_str
+    // 开销（命令解析 + 字符串分配），open 时设一次后续写操作均生效。
+    rz_core_cmd_str(core, "e io.cache=false");
+
     __android_log_print(ANDROID_LOG_INFO, TAG, "Rizin 打开成功: %s", path);
     env->ReleaseStringUTFChars(jPath, path);
     return reinterpret_cast<jlong>(core);
@@ -189,6 +223,15 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeClose(
 
     RzCore* core = CORE(handle);
     if (core) {
+        // 释放 mmap 缓存（必须在 rz_core_free 之前，用 core 作 key 查找）
+        {
+            std::lock_guard<std::mutex> lock(g_mmapMutex);
+            auto it = g_coreMmaps.find(core);
+            if (it != g_coreMmaps.end()) {
+                ::munmap(it->second.first, it->second.second);
+                g_coreMmaps.erase(it);
+            }
+        }
         g_corePaths.erase(core);
         // rz_core_file_close_all 会关闭所有打开的文件
         rz_core_free(core);
@@ -267,7 +310,7 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeReadBytes(
     if (n <= 0) {
         // Rizin io 只映射首段时，首段之后的物理读返回 0。兜底：裸 pread 直读文件。
         const char* path = core_file_path(core);
-        ssize_t rn = raw_pread_all(path, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(jSize));
+        ssize_t rn = raw_pread_all(core, path, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(jSize));
         __android_log_print(ANDROID_LOG_INFO, TAG,
             "readBytes 兜底尝试 offset=0x%llx size=%lld rz=%d raw=%lld path=%s",
             static_cast<unsigned long long>(jOffset),
@@ -315,7 +358,8 @@ Java_com_ai_fler_core_jni_RizinBindings_nativePaddrToVaddr(
  * map 翻译，也绕过 ELF 段写权限检查（io.va=true 时代码段的 map 是 R-X，
  * rz_core_write_at → rz_io_write 会因无写权限而失败，这是此前写入失败的根因）。
  * 读取侧 rz_io_pread_at 同样是物理直读（nread_at 会受段 map 裁剪），二者地址空间一致。
- * 另强制关闭 io.cache，保证写入直接落到文件而非内存缓存。
+ * io.cache 已在 nativeOpen 中一次性关闭，保证写入直接落到文件而非内存缓存，
+ * 此处不再每次发命令以减少 rz_core_cmd_str 解析开销。
  */
 JNIEXPORT jboolean JNICALL
 Java_com_ai_fler_core_jni_RizinBindings_nativeWriteBytes(
@@ -330,9 +374,7 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeWriteBytes(
     std::vector<uint8_t> buf(static_cast<size_t>(size));
     env->GetByteArrayRegion(jData, 0, size, reinterpret_cast<jbyte*>(buf.data()));
 
-    // 写入必须落盘：关闭 io.cache，避免只写内存缓存
-    rz_core_cmd_str(core, "e io.cache=false");
-
+    // io.cache 已在 nativeOpen 中一次性关闭，这里直接物理直写。
     int n = rz_io_pwrite_at(core->io, static_cast<ut64>(jOffset), buf.data(), static_cast<size_t>(size));
     bool ok = (n == static_cast<int>(size));
     if (!ok) {
@@ -348,11 +390,18 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeWriteBytes(
         }
     }
 
-    // 写后读回校验（物理直读），确认字节已落盘
+    // 写后读回校验（物理直读），确认字节已落盘。
+    // 读侧同样需要兜底：写入首段之外的区域时 rz_io_pread_at 返回 0，
+    // 用 raw_pread_all（复用 mmap 缓存）读回才能正确比对。
     bool readbackMatched = false;
     if (ok && size > 0) {
         std::vector<uint8_t> check(static_cast<size_t>(size));
         int r = rz_io_pread_at(core->io, static_cast<ut64>(jOffset), check.data(), static_cast<size_t>(size));
+        if (r != size) {
+            const char* path = core_file_path(core);
+            ssize_t rr = raw_pread_all(core, path, static_cast<ut64>(jOffset), check.data(), static_cast<size_t>(size));
+            if (rr > 0) r = static_cast<int>(rr);
+        }
         readbackMatched = (r == size) && (std::memcmp(check.data(), buf.data(), size) == 0);
     }
 

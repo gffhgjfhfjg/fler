@@ -30,7 +30,9 @@ import androidx.room.PrimaryKey
         Index(value = ["method_id"]),
         Index(value = ["analysis_id"]),
         Index(value = ["vm_offset"]),
-        Index(value = ["file_offset"])
+        Index(value = ["file_offset"]),
+        Index(value = ["analysis_id", "type"]),
+        Index(value = ["analysis_id", "caller_count"])
     ]
 )
 data class PpEntry(

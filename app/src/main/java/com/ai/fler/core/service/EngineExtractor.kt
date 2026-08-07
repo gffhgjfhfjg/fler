@@ -278,7 +278,9 @@ class EngineExtractor @Inject constructor(
     fun computeSha256(file: File): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
-            val buffer = ByteArray(8192)
+            // 64KB buffer：引擎包动辄数十 MB，8KB buffer 会让 read 系统调用次数
+            // 翻 8 倍。64KB 与常见 IO 工具默认值对齐，单次读取开销小且内存占用可控。
+            val buffer = ByteArray(64 * 1024)
             while (true) {
                 val read = input.read(buffer)
                 if (read == -1) break

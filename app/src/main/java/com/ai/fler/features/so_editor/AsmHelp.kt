@@ -129,7 +129,10 @@ fun AsmHelpDialog(onDismiss: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(vertical = 4.dp)
             ) {
-                items(asmHelpSections) { section ->
+                items(
+                    items = asmHelpSections,
+                    key = { it.title }
+                ) { section ->
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
                             text = section.title,

@@ -1,10 +1,13 @@
 package com.ai.fler.core.analysis
 
+import androidx.compose.runtime.Immutable
+
 /**
  * 函数分析信息（Rizin aaa 识别的函数）。
  *
  * 对应 Rizin afij / aflj。新增能力（旧自研引擎不支持）。
  */
+@Immutable
 data class FunctionInfo(
     val name: String,
     val offset: Long,                  // 文件偏移（paddr）或虚拟地址，由实现保证与反汇编 offset 对齐
@@ -33,6 +36,7 @@ data class BasicBlock(
 /**
  * 交叉引用信息（Rizin ax/axfj/axtj）。
  */
+@Immutable
 data class Xref(
     val from: Long,
     val to: Long,

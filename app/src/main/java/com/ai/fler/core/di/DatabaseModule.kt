@@ -39,7 +39,7 @@ object DatabaseModule {
             AppDatabase::class.java,
             AppDatabase.DATABASE_NAME
         )
-            .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+            .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
             .fallbackToDestructiveMigration()
             .build()
     }
@@ -93,6 +93,20 @@ object DatabaseModule {
             db.execSQL(
                 "CREATE INDEX IF NOT EXISTS `index_dart_methods_analysis_id_function_offset` " +
                     "ON `dart_methods` (`analysis_id`, `function_offset`)"
+            )
+        }
+    }
+
+    /** 6 → 7：pp_entries 增加 (analysis_id, type) 和 (analysis_id, caller_count) 复合索引，加速 PP 字符串筛选和 top caller 排序。 */
+    private val MIGRATION_6_7 = object : Migration(6, 7) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_pp_entries_analysis_id_type` " +
+                    "ON `pp_entries` (`analysis_id`, `type`)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_pp_entries_analysis_id_caller_count` " +
+                    "ON `pp_entries` (`analysis_id`, `caller_count`)"
             )
         }
     }

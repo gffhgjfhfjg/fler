@@ -285,7 +285,10 @@ private fun HexDataView(
         state = listState,
         modifier = modifier.padding(vertical = 2.dp)
     ) {
-        items(count = rows) { rowIndex ->
+        items(
+            count = rows,
+            key = { rowIndex -> baseOffset + rowIndex * bytesPerRow }
+        ) { rowIndex ->
             val startIndex = rowIndex * bytesPerRow
             val endIndex = minOf(startIndex + bytesPerRow, data.size)
             val rowOffset = baseOffset + startIndex

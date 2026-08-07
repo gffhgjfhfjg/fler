@@ -804,7 +804,10 @@ private fun SectionJumpDialog(
                 )
             } else {
                 LazyColumn(modifier = Modifier.height(360.dp)) {
-                    items(sections) { section ->
+                    items(
+                        items = sections,
+                        key = { it.name }
+                    ) { section ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1233,7 +1236,7 @@ private fun DisassemblyRow(
             .fillMaxWidth()
             .then(scaleModifier)
             .background(backgroundColor)
-            .pointerInput(Unit) {
+            .pointerInput(onClick, onLongClick) {
                 detectTapGestures(
                     onTap = { onClick() },
                     onLongPress = { onLongClick() }

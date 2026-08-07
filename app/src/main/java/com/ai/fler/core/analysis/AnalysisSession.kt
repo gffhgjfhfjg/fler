@@ -46,21 +46,22 @@ class AnalysisSession @Inject constructor(
     private var nextHandleSeq = 1L
 
     // 当前打开的默认会话（UI 层打开某文件时默认绑定）。
-    // @Volatile：外部只读访问（currentHandle()/currentEngine() 已加锁，此处为防御性标注）。
-    @Volatile private var currentHandle: AnalysisHandle = AnalysisHandle.INVALID
-    @Volatile private var currentEngine: BinaryAnalysisEngine? = null
+    // 三个字段均为 @Volatile：纯内存读方法（currentHandle/currentEngine/currentFilePath）
+    // 直接读这三个字段，不走 Mutex，避免 UI 状态查询被引擎查询阻塞。
+    // 写入全部在 mutex.withLock 内完成（open/openWithEngine/closeAll/evictIfNeeded）。
+    // 字段名加 Value 后缀避免与方法名同名（Kotlin 属性 getter 与方法签名冲突）。
+    @Volatile private var currentHandleValue: AnalysisHandle = AnalysisHandle.INVALID
+    @Volatile private var currentEngineValue: BinaryAnalysisEngine? = null
+    @Volatile private var currentFilePathValue: String? = null
 
-    /** 当前已打开会话对应的 handle。未 open 返回 INVALID。 */
-    suspend fun currentHandle(): AnalysisHandle = mutex.withLock { currentHandle }
+    /** 当前已打开会话对应的 handle。未 open 返回 INVALID。纯内存读，零阻塞。 */
+    fun currentHandle(): AnalysisHandle = currentHandleValue
 
-    /** 当前已打开会话对应的引擎。 */
-    suspend fun currentEngine(): BinaryAnalysisEngine? = mutex.withLock { currentEngine }
+    /** 当前已打开会话对应的引擎。纯内存读，零阻塞。 */
+    fun currentEngine(): BinaryAnalysisEngine? = currentEngineValue
 
-    /** 当前已打开会话对应的文件路径（用于坐标轴换算等）。未 open 返回 null。 */
-    suspend fun currentFilePath(): String? = mutex.withLock {
-        if (!currentHandle.isValid) return@withLock null
-        sessions[currentHandle.value]?.filePath
-    }
+    /** 当前已打开会话对应的文件路径（用于坐标轴换算等）。未 open 返回 null。纯内存读，零阻塞。 */
+    fun currentFilePath(): String? = currentFilePathValue
 
     // ------------------------------------------------------------------
     // 会话生命周期
@@ -89,10 +90,13 @@ class AnalysisSession @Inject constructor(
                 if (entry != null) {
                     val engine = registry.getAnalysis(entry.engineId)
                     if (engine != null && engine.isHandleValid(AnalysisHandle(existingH))) {
-                        currentHandle = AnalysisHandle(existingH)
-                        currentEngine = engine
+                        currentHandleValue = AnalysisHandle(existingH)
+                        currentEngineValue = engine
+                        currentFilePathValue = filePath
                         backupManager.setCurrentFile(filePath)
-                        return@withLock OpenResult.Success(
+                        // 直接返回复用会话；若用 return@withLock 只会退出 lambda，
+                        // open 会继续落到下方引擎循环并重复 open 造成会话泄漏。
+                        return OpenResult.Success(
                             AnalysisHandle(existingH), filePath, entry.engineId
                         )
                     }
@@ -117,8 +121,9 @@ class AnalysisSession @Inject constructor(
                 is OpenResult.Success -> return mutex.withLock {
                     sessions[r.handle.value] = SessionEntry(r.handle, engine.engineId, filePath, now())
                     pathToHandle[filePath] = r.handle.value
-                    currentHandle = r.handle
-                    currentEngine = engine
+                    currentHandleValue = r.handle
+                    currentEngineValue = engine
+                    currentFilePathValue = filePath
                     backupManager.setCurrentFile(filePath)
                     evictIfNeeded()
                     OpenResult.Success(r.handle, filePath, engine.engineId)
@@ -146,9 +151,10 @@ class AnalysisSession @Inject constructor(
         if (pathToHandle[entry.filePath] == victim.key) pathToHandle.remove(entry.filePath)
         // RzCore 已关闭：注入标记/元数据缓存失效，下次打开需重新查询与注入
         soEditorCache.invalidate(entry.filePath)
-        if (currentHandle == entry.handle) {
-            currentHandle = AnalysisHandle.INVALID
-            currentEngine = null
+        if (currentHandleValue == entry.handle) {
+            currentHandleValue = AnalysisHandle.INVALID
+            currentEngineValue = null
+            currentFilePathValue = null
         }
         Log.i(TAG, "会话数超限(${MAX_SESSIONS})，淘汰最久未使用: ${entry.filePath}")
     }
@@ -172,8 +178,9 @@ class AnalysisSession @Inject constructor(
                 if (entry != null && entry.engineId == engineId) {
                     val eng = registry.getAnalysis(entry.engineId)
                     if (eng != null && eng.isHandleValid(AnalysisHandle(existingH))) {
-                        currentHandle = AnalysisHandle(existingH)
-                        currentEngine = eng
+                        currentHandleValue = AnalysisHandle(existingH)
+                        currentEngineValue = eng
+                        currentFilePathValue = filePath
                         backupManager.setCurrentFile(filePath)
                         return@withLock OpenResult.Success(
                             AnalysisHandle(existingH), filePath, engineId
@@ -186,8 +193,9 @@ class AnalysisSession @Inject constructor(
                 is OpenResult.Success -> {
                     sessions[r.handle.value] = SessionEntry(r.handle, engine.engineId, filePath, now())
                     pathToHandle[filePath] = r.handle.value
-                    currentHandle = r.handle
-                    currentEngine = engine
+                    currentHandleValue = r.handle
+                    currentEngineValue = engine
+                    currentFilePathValue = filePath
                     backupManager.setCurrentFile(filePath)
                     evictIfNeeded()
                     OpenResult.Success(r.handle, filePath, engine.engineId)
@@ -205,8 +213,9 @@ class AnalysisSession @Inject constructor(
             }
             sessions.clear()
             pathToHandle.clear()
-            currentHandle = AnalysisHandle.INVALID
-            currentEngine = null
+            currentHandleValue = AnalysisHandle.INVALID
+            currentEngineValue = null
+            currentFilePathValue = null
         }
     }
 
@@ -223,11 +232,13 @@ class AnalysisSession @Inject constructor(
     private suspend fun <R> withEngine(
         handle: AnalysisHandle? = null,
         block: suspend (BinaryAnalysisEngine, AnalysisHandle) -> R
-    ): R? = mutex.withLock {
-        val actual = handle.takeIf { it != null && it.isValid } ?: currentHandle
-        val pair = resolve(actual) ?: return@withLock null
-        pair.second.lastAccess = now()
-        block(pair.first, actual)
+    ): R? = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val actual = handle.takeIf { it != null && it.isValid } ?: currentHandleValue
+            val pair = resolve(actual) ?: return@withLock null
+            pair.second.lastAccess = now()
+            block(pair.first, actual)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -298,33 +309,14 @@ class AnalysisSession @Inject constructor(
      * 引擎层写盘 + 本层统一记录 patch，Rizin/Self 都走同一套撤销栈。
      */
     suspend fun writeBytes(offset: Long, data: ByteArray, soNameHint: String = ""): Boolean {
-        var filePathForVerify: String? = null
         val pair = withEngine { e, h ->
             val path = resolve(h)?.second?.filePath
-            filePathForVerify = path
             val old = e.readBytes(h, offset, data.size.toLong())
             val ok = e.writeBytes(h, offset, data)
             Triple(ok, old, soNameHint.ifBlank { path?.substringAfterLast('/') ?: "" })
         } ?: return false
-        if (pair.first && data.isNotEmpty()) {
-            // 落盘校验：直读磁盘确认字节已真正写入（防止 Rizin 写入只进 io.cache）
-            val path = filePathForVerify
-            if (path != null) {
-                try {
-                    val onDisk = withContext(Dispatchers.IO) {
-                        java.io.RandomAccessFile(path, "r").use { raf ->
-                            raf.seek(offset)
-                            val b = ByteArray(data.size)
-                            raf.readFully(b)
-                            b
-                        }
-                    }
-                    Log.i(TAG, "写盘校验 offset=0x${offset.toString(16)} matched=${onDisk.contentEquals(data)}")
-                } catch (e: Exception) {
-                    Log.w(TAG, "写盘校验失败 offset=0x${offset.toString(16)}", e)
-                }
-            }
-        }
+        // 落盘校验由 native 层 readback 负责（rizin_jni.cpp nativeWriteBytes 已做读回比对），
+        // 此处不再重复 RandomAccessFile 读盘，避免单次写产生 4 次 I/O。
         if (pair.first && pair.second.size == data.size) {
             backupManager.recordPatch(offset, pair.second, data, pair.third)
         }
