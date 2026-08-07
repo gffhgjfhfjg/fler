@@ -26,11 +26,11 @@ class EngineExtractor @Inject constructor(
     }
 
     /**
-     * 解压 7z 归档到目标目录。
+     * 解压 7z 归档到目标目录（旧协议整包用，全量覆盖）。
      *
      * 解压前会清空目标目录，避免上次失败的残留文件影响就绪判断与重试。
-     * 自动剥离归档内的公共顶层目录前缀（例如 7z 内部路径为 fler-engines/dartvm_3.12.2.so，
-     * 解压后落在 targetDir/dartvm_3.12.2.so 而非 targetDir/fler-engines/dartvm_3.12.2.so）。
+     * 自动剥离归档内的公共顶层目录前缀（例如 7z 内部路径为 lib/dartvm_3.12.2.so，
+     * 解压后落在 targetDir/dartvm_3.12.2.so 而非 targetDir/lib/dartvm_3.12.2.so）。
      *
      * @param archive 7z 文件
      * @param targetDir 解压目标目录
@@ -122,6 +122,91 @@ class EngineExtractor @Inject constructor(
 
         Log.i(TAG, "7z 解压完成 → ${targetDir.absolutePath}")
         onProgress(1.0f)
+    }
+
+    /**
+     * 增量解压 7z 归档到目标目录（不删除目标目录、不剥离顶层前缀）。
+     *
+     * 供按版本/运行库独立下载使用：每个 7z 内含的路径即为最终布局
+     * （运行库包 → lib/libc++_shared.so；版本包 → dartvm_<v>.so），
+     * 追加到引擎目录，不影响其它已装版本。
+     *
+     * @param archive 7z 文件
+     * @param targetDir 解压目标目录（已存在时追加，不清空）
+     * @param onProgress 进度回调 (0.0 ~ 1.0)
+     */
+    suspend fun extractIncremental(
+        archive: File,
+        targetDir: File,
+        onProgress: (Float) -> Unit,
+    ): Unit = withContext(Dispatchers.IO) {
+        appLogger.info(TAG, "增量解压 7z: ${archive.absolutePath}, 大小 ${archive.length()} bytes")
+        Log.i(TAG, "增量解压 7z: ${archive.absolutePath}, 大小 ${archive.length()} bytes")
+
+        val totalEntries = scanEntryNames(archive).size
+        Log.i(TAG, "7z 归档共 $totalEntries 个条目")
+        if (totalEntries == 0) {
+            onProgress(1.0f)
+            return@withContext
+        }
+        if (!targetDir.exists()) {
+            targetDir.mkdirs()
+        }
+
+        try {
+            SevenZFile.builder()
+                .setFile(archive)
+                .get()
+                .use { sevenZFile ->
+                    var processed = 0
+                    var entry = sevenZFile.nextEntry
+                    while (entry != null) {
+                        if (entry.name.isNotEmpty()) {
+                            val outputFile = File(targetDir, entry.name)
+                            if (entry.isDirectory) {
+                                outputFile.mkdirs()
+                            } else {
+                                outputFile.parentFile?.mkdirs()
+                                sevenZFile.getInputStream(entry).use { input ->
+                                    FileOutputStream(outputFile).use { output ->
+                                        input.copyTo(output)
+                                    }
+                                }
+                            }
+                        }
+                        processed++
+                        if (processed % 4 == 0 || processed == totalEntries) {
+                            Log.i(TAG, "解压 $processed/$totalEntries: ${entry.name}")
+                        }
+                        onProgress(processed.toFloat() / totalEntries.toFloat())
+                        entry = sevenZFile.nextEntry
+                    }
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "7z 增量解压失败: ${e.message}", e)
+            throw IllegalStateException("7z 解压失败: ${e.message}", e)
+        }
+
+        Log.i(TAG, "7z 增量解压完成 → ${targetDir.absolutePath}")
+        onProgress(1.0f)
+    }
+
+    /**
+     * 第一遍扫描：读取所有条目名，返回名称列表。
+     */
+    private fun scanEntryNames(archive: File): List<String> {
+        val names = mutableListOf<String>()
+        SevenZFile.builder()
+            .setFile(archive)
+            .get()
+            .use { sevenZFile ->
+                var e = sevenZFile.nextEntry
+                while (e != null) {
+                    names.add(e.name)
+                    e = sevenZFile.nextEntry
+                }
+            }
+        return names
     }
 
     /**

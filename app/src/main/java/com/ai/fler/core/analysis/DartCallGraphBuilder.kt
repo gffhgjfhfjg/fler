@@ -1,6 +1,7 @@
 package com.ai.fler.core.analysis
 
 import com.ai.fler.data.AppDatabase
+import com.ai.fler.data.dao.CallerInfo
 import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.MethodLight
@@ -11,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -41,9 +43,23 @@ class DartCallGraphBuilder @Inject constructor(
     /** 正在构建的分析集合（去重并发触发）。 */
     private val buildingIds = ConcurrentHashMap.newKeySet<Long>()
 
-    /** 该方法是否已建图（存在至少 1 条边即视为已构建）。 */
-    suspend fun isBuilt(analysisId: Long): Boolean =
-        dartCallGraphDao.countByAnalysisId(analysisId) > 0
+    /** 已完成建图的分析集合（进程内缓存，"已建完"含 0 边情形）。 */
+    private val builtIds = ConcurrentHashMap.newKeySet<Long>()
+
+    /** 分析 id -> 内存边索引（懒加载）。仅 [builtIds] 命中后构建；受 [edgeIndexLock] 保护。 */
+    private val edgeIndexes = HashMap<Long, EdgeIndex>()
+    private val edgeIndexLock = Any()
+
+    /** 该方法是否已建图：内存缓存命中直接返回，否则一次轻量 EXISTS 判空并回填。 */
+    suspend fun isBuilt(analysisId: Long): Boolean {
+        if (analysisId in builtIds) return true
+        val built = dartCallGraphDao.hasEdges(analysisId)
+        if (built) builtIds.add(analysisId)
+        return built
+    }
+
+    /** 是否已建完（进程内已完成 build，含 0 边）；供 MCP 状态字段免费读取。 */
+    fun hasCompleted(analysisId: Long): Boolean = analysisId in builtIds
 
     /** 是否正在为该分析构建（避免重复触发）。 */
     fun isBuilding(analysisId: Long): Boolean = buildingIds.contains(analysisId)
@@ -51,6 +67,15 @@ class DartCallGraphBuilder @Inject constructor(
     /** 是否已建图或正在建图（UI/MCP 提示用）。 */
     suspend fun isReadyOrBuilding(analysisId: Long): Boolean =
         isBuilt(analysisId) || isBuilding(analysisId)
+
+    /**
+     * 使该分析的内存缓存（builtIds/边索引）失效。删除分析后调用，
+     * 避免查询到残留状态。
+     */
+    fun invalidate(analysisId: Long) {
+        builtIds.remove(analysisId)
+        synchronized(edgeIndexLock) { edgeIndexes.remove(analysisId) }
+    }
 
     /**
      * 非阻塞确保建图：未建图且未在构建时，后台起一个常驻协程构建，立即返回。
@@ -82,6 +107,7 @@ class DartCallGraphBuilder @Inject constructor(
      * @return 本次落库的边数（去重后）。
      */
     suspend fun build(analysisId: Long): Int = withContext(Dispatchers.Default) {
+        invalidate(analysisId)
         val t0 = System.currentTimeMillis()
         android.util.Log.i("DartCallGraphBuilder", "build 开始 analysis=$analysisId")
         // 1) 方法索引（含类名投影，无 src 大字段），排序供二分。
@@ -111,8 +137,70 @@ class DartCallGraphBuilder @Inject constructor(
         }
         dartCallGraphDao.deleteByAnalysisId(analysisId)
         if (edges.isNotEmpty()) bulkInsert(edges.values)
+        builtIds.add(analysisId)
         android.util.Log.i("DartCallGraphBuilder", "建图完成 analysis=$analysisId parsed=$parsedMethods 边=${edges.size} 耗时=${System.currentTimeMillis()-t0}ms")
         edges.size
+    }
+
+    /** 该分析总边数：内存索引已加载则免费读取，否则一次 COUNT（显式状态查询可接受）。 */
+    suspend fun edgeCount(analysisId: Long): Int {
+        synchronized(edgeIndexLock) { edgeIndexes[analysisId] }?.let { return it.edgeCount }
+        return dartCallGraphDao.countByAnalysisId(analysisId)
+    }
+
+    /**
+     * 按被调方法名子串反查调用方（不区分大小写），走内存索引，避免每次请求 SQL LIKE 全表扫描。
+     *
+     * @return 图未就绪（未建完/分析失效）时返回 null，调用方据此回 `graphBuilt=false`；
+     *         已建完但无匹配返回非 null 空列表。
+     */
+    suspend fun findCallersByName(analysisId: Long, query: String, limit: Int): EdgeQueryResult? {
+        if (analysisId !in builtIds && !isBuilt(analysisId)) return null
+        val q = query.lowercase(Locale.ROOT)
+        val idx = synchronized(edgeIndexLock) { edgeIndexes[analysisId] }
+            ?: loadIndex(analysisId)?.also { loaded ->
+                synchronized(edgeIndexLock) {
+                    edgeIndexes.putIfAbsent(analysisId, loaded)
+                    trimLocked()
+                }
+            }
+            ?: return EdgeQueryResult(emptyList(), 0)
+        val out = ArrayList<CallerInfo>(minOf(limit, 16))
+        for (r in idx.callers) {
+            if (r.calleeNameLower.contains(q)) {
+                out.add(CallerInfo(r.methodId, r.callerName, r.callerVaddr, r.targetVaddr, r.siteVaddr, analysisId))
+                if (out.size >= limit) break
+            }
+        }
+        return EdgeQueryResult(out, idx.edgeCount)
+    }
+
+    /** 从 DB 一次性加载该分析全部边构建内存索引；无边返回 null。 */
+    private suspend fun loadIndex(analysisId: Long): EdgeIndex? {
+        val all = dartCallGraphDao.getAllByAnalysisId(analysisId)
+        if (all.isEmpty()) return null
+        val recs = ArrayList<EdgeIndex.CallerRec>(all.size)
+        for (e in all) {
+            recs.add(
+                EdgeIndex.CallerRec(
+                    calleeNameLower = e.calleeName.orEmpty().lowercase(Locale.ROOT),
+                    methodId = e.callerMethodId,
+                    callerName = e.callerName.orEmpty(),
+                    callerVaddr = e.callerVaddr,
+                    targetVaddr = e.calleeVaddr,
+                    siteVaddr = e.siteVaddr,
+                )
+            )
+        }
+        return EdgeIndex(recs.size, recs)
+    }
+
+    /** 超出 [MAX_CACHED_ANALYSES] 时淘汰最早加载的索引，控制内存（调用方需持 [edgeIndexLock]）。 */
+    private fun trimLocked() {
+        while (edgeIndexes.size > MAX_CACHED_ANALYSES) {
+            val oldest = edgeIndexes.keys.firstOrNull() ?: break
+            edgeIndexes.remove(oldest)
+        }
     }
 
     /**
@@ -242,6 +330,27 @@ class DartCallGraphBuilder @Inject constructor(
 
     private fun fullName(m: MethodLight): String = "${m._className}.${m.methodName}"
 
+    /** 名字子串反查结果：命中列表 + 该分析总边数（供状态字段）。 */
+    class EdgeQueryResult(
+        val callers: List<CallerInfo>,
+        val edgeCount: Int,
+    )
+
+    /** 单分析的只读内存边索引（calleeName 已小写化，便于子串过滤）。 */
+    private class EdgeIndex(
+        val edgeCount: Int,
+        val callers: List<CallerRec>,
+    ) {
+        data class CallerRec(
+            val calleeNameLower: String,
+            val methodId: Long,
+            val callerName: String,
+            val callerVaddr: Long,
+            val targetVaddr: Long,
+            val siteVaddr: Long,
+        )
+    }
+
     private class Func(
         val entry: MethodLight,
         val name: String,
@@ -255,6 +364,9 @@ class DartCallGraphBuilder @Inject constructor(
         private const val PAGE_SIZE = 1200
         private const val KIND_DIRECT_CALL = "DIRECT_CALL"
         private const val KIND_DIRECT_BRANCH = "DIRECT_BRANCH"
+
+        /** 内存边索引最多缓存的分析数（每个约 10~30MB，控内存）。 */
+        private const val MAX_CACHED_ANALYSES = 2
 
         private const val INSERT_SQL =
             "INSERT OR REPLACE INTO dart_call_edges " +

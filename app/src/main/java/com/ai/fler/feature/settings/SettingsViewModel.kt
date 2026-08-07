@@ -140,7 +140,7 @@ class SettingsViewModel @Inject constructor(
      *
      *  磁盘：
      *   - cacheDir/：apk_import_* / so_import_* / extracted_* / analysis_*.db{,-wal,-shm}
-     *                patches / blutter_tmp / fler-engines.7z
+     *                patches / blutter_tmp / fler-runtime-libs.7z / dartvm-*.7z
      *   - filesDir/：undo / mcp_patches
      *
      *  内存：
@@ -168,10 +168,7 @@ class SettingsViewModel @Inject constructor(
      */
     private fun sourceStateFromConfig(): EngineSourceState {
         return EngineSourceState(
-            primaryUrl = sourceConfig.primaryUrl,
-            fallbackUrl = sourceConfig.fallbackUrl,
-            checksumUrl = sourceConfig.checksumUrl,
-            versionUrl = sourceConfig.versionUrl,
+            manifestUrl = sourceConfig.manifestUrl,
             githubProxy = sourceConfig.githubProxy,
             isCustom = sourceConfig.isCustom()
         )
@@ -227,16 +224,10 @@ class SettingsViewModel @Inject constructor(
      * 保存下载源配置。
      */
     fun saveSourceConfig(
-        primaryUrl: String,
-        fallbackUrl: String,
-        checksumUrl: String,
-        versionUrl: String,
+        manifestUrl: String,
         githubProxy: String
     ) {
-        sourceConfig.primaryUrl = primaryUrl.trim()
-        sourceConfig.fallbackUrl = fallbackUrl.trim()
-        sourceConfig.checksumUrl = checksumUrl.trim()
-        sourceConfig.versionUrl = versionUrl.trim()
+        sourceConfig.manifestUrl = manifestUrl.trim()
         sourceConfig.githubProxy = githubProxy.trim()
 
         _sourceState.value = sourceStateFromConfig()
@@ -266,10 +257,7 @@ data class UpdateCheckState(
  * 引擎下载源状态。
  */
 data class EngineSourceState(
-    val primaryUrl: String = "",
-    val fallbackUrl: String = "",
-    val checksumUrl: String = "",
-    val versionUrl: String = "",
+    val manifestUrl: String = "",
     val githubProxy: String = "",
     val isCustom: Boolean = false
 )

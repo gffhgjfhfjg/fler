@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ai.fler.core.analysis.DartCallGraphBuilder
 import com.ai.fler.data.AppDatabase
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.ProjectDao
@@ -32,7 +33,8 @@ class ProjectDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val projectDao: ProjectDao,
     private val analysisDao: AnalysisDao,
-    private val appDatabase: AppDatabase
+    private val appDatabase: AppDatabase,
+    private val callGraphBuilder: DartCallGraphBuilder
 ) : ViewModel() {
 
     val projectId: Long = savedStateHandle["projectId"] ?: 0L
@@ -100,6 +102,7 @@ class ProjectDetailViewModel @Inject constructor(
             try {
                 Log.i(TAG, "删除分析记录: id=${analysis.id}, projectId=$projectId")
                 appDatabase.cascadeDeleteAnalysis(analysis.id)
+                callGraphBuilder.invalidate(analysis.id)
                 Log.i(TAG, "分析记录 ${analysis.id} 已删除")
             } catch (e: Exception) {
                 Log.e(TAG, "删除分析记录失败: id=${analysis.id}", e)

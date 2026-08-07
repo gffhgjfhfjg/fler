@@ -2,6 +2,7 @@ package com.ai.fler.features.engine
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ai.fler.core.service.EngineManifest
 import com.ai.fler.core.service.EnginePackManager
 import com.ai.fler.core.service.EngineSourceConfig
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -10,16 +11,18 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * 引擎下载/管理 ViewModel。
+ * 引擎下载/管理 ViewModel（v0.4.0 按版本按需下载）。
  *
  * 负责：
- * 1. 查询引擎包就绪状态
- * 2. 启动/取消引擎包下载
- * 3. 监听下载进度并更新 UI
+ * 1. 拉取远程 manifest（设置页下拉数据源）
+ * 2. 按需安装单个 Dart 版本引擎（先补必装运行库）
+ * 3. 安装/更新必装运行库
+ * 4. 监听下载进度并更新 UI
  */
 @HiltViewModel
 class EngineViewModel @Inject constructor(
@@ -29,10 +32,15 @@ class EngineViewModel @Inject constructor(
 
     data class EngineUiState(
         val isReady: Boolean = false,
+        val isRuntimeReady: Boolean = false,
         val progress: EnginePackManager.EngineProgress? = null,
         val isDownloading: Boolean = false,
         val errorMessage: String? = null,
         val isCustomSource: Boolean = false,
+        val manifest: EngineManifest? = null,
+        val loadingManifest: Boolean = false,
+        val manifestError: String? = null,
+        val selectedVersion: String? = null,
     )
 
     private val _uiState = MutableStateFlow(EngineUiState())
@@ -40,12 +48,16 @@ class EngineViewModel @Inject constructor(
 
     init {
         checkEngineStatus()
+        loadManifest()
         // 引擎版本变化（下载完成/清除）时实时刷新就绪状态
         viewModelScope.launch {
             enginePackManager.versionsEpoch.collect {
-                _uiState.value = _uiState.value.copy(
-                    isReady = enginePackManager.isEnginePackReady(),
-                )
+                _uiState.update {
+                    it.copy(
+                        isReady = enginePackManager.isEnginePackReady(),
+                        isRuntimeReady = enginePackManager.isRuntimeReady(),
+                    )
+                }
             }
         }
     }
@@ -54,52 +66,106 @@ class EngineViewModel @Inject constructor(
      * 检查引擎包就绪状态。
      */
     fun checkEngineStatus() {
-        val isReady = enginePackManager.isEnginePackReady()
-        _uiState.value = _uiState.value.copy(
-            isReady = isReady,
-            isCustomSource = sourceConfig.isCustom(),
-        )
+        _uiState.update {
+            it.copy(
+                isReady = enginePackManager.isEnginePackReady(),
+                isRuntimeReady = enginePackManager.isRuntimeReady(),
+                isCustomSource = sourceConfig.isCustom(),
+            )
+        }
     }
 
     /**
-     * 启动引擎包下载。
-     *
-     * @param force 为 true 时强制重新下载（「下载更新」用），即使已就绪也重下。
+     * 拉取远程 manifest（填充设置页版本下拉）。失败时保留旧数据并置 manifestError。
      */
-    fun startDownload(force: Boolean = false) {
-        if (_uiState.value.isDownloading) return
-
-        _uiState.value = _uiState.value.copy(
-            isDownloading = true,
-            errorMessage = null,
-        )
-
+    fun loadManifest() {
         viewModelScope.launch {
-            enginePackManager.ensureEnginesReady(force).collectLatest { progress ->
-                _uiState.value = _uiState.value.copy(
-                    progress = progress,
-                    isDownloading = progress.phase == EnginePackManager.EngineProgress.Phase.DOWNLOADING ||
-                            progress.phase == EnginePackManager.EngineProgress.Phase.EXTRACTING ||
-                            progress.phase == EnginePackManager.EngineProgress.Phase.VERIFYING ||
-                            progress.phase == EnginePackManager.EngineProgress.Phase.LOADING,
-                )
-
-                when (progress.phase) {
-                    EnginePackManager.EngineProgress.Phase.COMPLETED -> {
-                        _uiState.value = _uiState.value.copy(
-                            isDownloading = false,
-                            isReady = true,
-                        )
-                    }
-                    EnginePackManager.EngineProgress.Phase.FAILED -> {
-                        _uiState.value = _uiState.value.copy(
-                            isDownloading = false,
-                            errorMessage = progress.errorMessage,
-                        )
-                    }
-                    else -> { /* 继续 */ }
+            _uiState.update { it.copy(loadingManifest = true, manifestError = null) }
+            try {
+                val manifest = enginePackManager.fetchManifest()
+                _uiState.update {
+                    it.copy(
+                        manifest = manifest,
+                        loadingManifest = false,
+                        manifestError = if (manifest == null) "无法获取远程引擎清单" else null,
+                        selectedVersion = it.selectedVersion
+                            ?: manifest?.engines?.firstOrNull()?.dartVersion,
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        loadingManifest = false,
+                        manifestError = e.message ?: "无法获取远程引擎清单",
+                    )
                 }
             }
+        }
+    }
+
+    /** 选中下拉中的某个远程版本。 */
+    fun selectVersion(version: String) {
+        _uiState.update { it.copy(selectedVersion = version) }
+    }
+
+    /** 安装下拉当前选中的版本（先自动补装运行库）。 */
+    fun installSelectedVersion() {
+        val version = _uiState.value.selectedVersion ?: return
+        installEngine(version)
+    }
+
+    /** 安装指定 Dart 版本引擎。 */
+    fun installEngine(version: String) {
+        if (_uiState.value.isDownloading) return
+        _uiState.update { it.copy(isDownloading = true, errorMessage = null) }
+        viewModelScope.launch {
+            enginePackManager.installEngineVersion(version).collectLatest { progress ->
+                applyProgress(progress)
+            }
+        }
+    }
+
+    /** 安装（或更新）必装运行库。 */
+    fun installRuntimeLibs(force: Boolean = false) {
+        if (_uiState.value.isDownloading) return
+        _uiState.update { it.copy(isDownloading = true, errorMessage = null) }
+        viewModelScope.launch {
+            enginePackManager.installRuntimeLibs(force).collectLatest { progress ->
+                applyProgress(progress)
+            }
+        }
+    }
+
+    private fun applyProgress(progress: EnginePackManager.EngineProgress) {
+        _uiState.update {
+            it.copy(
+                progress = progress,
+                isDownloading = progress.phase == EnginePackManager.EngineProgress.Phase.DOWNLOADING ||
+                    progress.phase == EnginePackManager.EngineProgress.Phase.EXTRACTING ||
+                    progress.phase == EnginePackManager.EngineProgress.Phase.VERIFYING ||
+                    progress.phase == EnginePackManager.EngineProgress.Phase.LOADING,
+            )
+        }
+
+        when (progress.phase) {
+            EnginePackManager.EngineProgress.Phase.COMPLETED -> {
+                _uiState.update {
+                    it.copy(
+                        isDownloading = false,
+                        isReady = enginePackManager.isEnginePackReady(),
+                        isRuntimeReady = enginePackManager.isRuntimeReady(),
+                    )
+                }
+            }
+            EnginePackManager.EngineProgress.Phase.FAILED -> {
+                _uiState.update {
+                    it.copy(
+                        isDownloading = false,
+                        errorMessage = progress.errorMessage,
+                    )
+                }
+            }
+            else -> { /* 继续 */ }
         }
     }
 }

@@ -257,7 +257,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_methods",
-            description = "分页列出某次分析（analysisId 必填）的 Dart 方法；可按 classId/名称过滤。返回方法 id/className/methodName/functionOffset（vaddr）/fileOffset（若 vaddr≠文件偏移则换算）/functionSize。functionOffset 恒为 vaddr，作反汇编偏移时需经 translate_address 或 fileOffset 字段",
+            description = "分页列出某次分析（analysisId 必填）的 Dart 方法；可按 classId/名称过滤。返回方法 id/className/methodName/functionOffset（vaddr）/fileOffset（若 vaddr≠文件偏移则换算）/functionSize。functionOffset 恒为 vaddr，作反汇编偏移时需经 translate_address 或 fileOffset 字段。分页默认 page=1 / pageSize=200（上限 1000）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -347,7 +347,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_pp_entry",
-            description = "按 pp 偏移（vmOffset）查 Dart 对象池条目：type/description（可读描述）/fileOffset/引用它的方法数。pp 对象池是 Dart AOT 的数据区，ppOffset 常出现在 get_pp_references 或方法 src_code 的 [pp+0x..] 中",
+            description = "按 pp 偏移（vmOffset）查 Dart 对象池条目：type/description（可读描述）/fileOffset/引用它的方法数。pp 对象池是 Dart AOT 的数据区，ppOffset 常出现在 get_pp_references 或方法 src_code 的 [pp+0x..] 中。ppOffset 支持十进制或 0x 十六进制",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -377,7 +377,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "search_strings",
-            description = "在某次分析的字符串常量中搜索子串（query 必填，不区分大小写）。返回 ppOffset/description/fileOffset。用于按关键词定位 Dart 字符串及其文件位置（如渠道、URL、错误提示）",
+            description = "在某次分析的字符串常量中搜索子串（query 必填，不区分大小写）。返回 ppOffset/description/fileOffset。用于按关键词定位 Dart 字符串及其文件位置（如渠道、URL、错误提示）。注意：部分大 Flutter 包的对象池未含 String 类型条目，此时返回 0 属正常，可改查 engine_scan_strings",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -401,40 +401,6 @@ class McpToolHandlers @Inject constructor(
                             put("ppOffset", e.vmOffset)
                             put("description", e.description ?: "")
                             put("fileOffset", e.fileOffset)
-                        }
-                    }
-                }
-            }
-        },
-        McpTool(
-            name = "search_calls",
-            description = "反查哪些 Dart 方法调用了目标方法（target 为被调方法名子串，基于已构建的真实调用图 dart_call_edges）。返回调用方方法（name=类.方法 / vaddr / targetVaddr / siteVaddr）。区别于早期按 src_code 文本 LIKE 的假命中：这里只返回真实发出调用边的方法；图未构建时自动触发构建（首次可能较慢）",
-            inputSchema = buildJsonObject {
-                put("type", "object")
-                putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("target") { put("type", "string") }
-                    putJsonObject("limit") { put("type", "integer") }
-                }
-                putJsonArray("required") { add("analysisId"); add("target") }
-            }
-        ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
-            val target = p.str("target") ?: throw McpToolException("target 缺失")
-            val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
-            ensureGraph(id)
-            val infos = dartCallGraphDao.callersByName(id, target, limit)
-            buildJsonObject {
-                put("count", infos.size)
-                put("truncated", infos.size == limit)
-                put("graphSource", "DART_CALL_GRAPH")
-                putJsonArray("callers") {
-                    infos.forEach { c ->
-                        addJsonObject {
-                            put("caller", c.name)
-                            put("callerVaddr", c.vaddr)
-                            put("callTargetVaddr", c.targetVaddr)
-                            put("siteVaddr", c.siteVaddr)
                         }
                     }
                 }
@@ -483,7 +449,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_strings",
-            description = "分页列出某次分析的全部字符串常量（SQL 下推）：ppOffset/description/fileOffset。数据量大（数万条）请用 search_strings 按关键词定位，或用本工具分页浏览",
+            description = "分页列出某次分析的全部字符串常量（SQL 下推）：ppOffset/description/fileOffset。数据量大（数万条）请用 search_strings 按关键词定位，或用本工具分页浏览。分页默认 page=1 / pageSize=200（上限 1000）。注意：部分大 Flutter 包无 String 类型条目时 total=0 属正常",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -519,7 +485,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_method_callers",
-            description = "反查哪些 Dart 方法调用了指定方法（methodName 为被调方法名子串，基于真实调用图 dart_call_edges）。返回调用方 name=类.方法 / callerVaddr / callTargetVaddr / siteVaddr。图未构建时自动触发构建（首次可能较慢）。适合从被调方法向上找真实调用链",
+            description = "反查哪些 Dart 方法调用了目标方法（methodName 为被调方法名子串，不区分大小写，基于真实调用图 dart_call_edges）。返回调用方 name=类.方法 / callerVaddr / callTargetVaddr / siteVaddr，附 graphBuilt/edgeCount/isBuilding。适合从被调方法向上找真实调用链。analysisId 无效时返回 analysisExists=false；图未就绪时返回 graphBuilt=false + isBuilding，请稍后重查",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -534,11 +500,33 @@ class McpToolHandlers @Inject constructor(
             val name = p.str("methodName") ?: throw McpToolException("methodName 缺失")
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
             ensureGraph(id)
-            val infos = dartCallGraphDao.callersByName(id, name, limit)
+            val analysisExists = analysisDao.getById(id) != null
+            val res = callGraphBuilder.findCallersByName(id, name, limit)
+            if (!analysisExists) {
+                return@McpTool buildJsonObject {
+                    put("count", 0)
+                    put("graphBuilt", false)
+                    put("analysisExists", false)
+                    put("message", "分析不存在（analysisId=$id），请用 list_analyses 获取有效 id")
+                }
+            }
+            if (res == null) {
+                return@McpTool buildJsonObject {
+                    put("count", 0)
+                    put("graphBuilt", false)
+                    put("analysisExists", true)
+                    put("isBuilding", callGraphBuilder.isBuilding(id))
+                    put("message", "调用图未就绪（analysisId=$id），请稍后重查")
+                }
+            }
+            val infos = res.callers
             buildJsonObject {
                 put("count", infos.size)
                 put("truncated", infos.size == limit)
                 put("graphSource", "DART_CALL_GRAPH")
+                put("graphBuilt", true)
+                put("edgeCount", res.edgeCount)
+                put("isBuilding", callGraphBuilder.isBuilding(id))
                 putJsonArray("callers") {
                     infos.forEach { c ->
                         addJsonObject {
@@ -552,8 +540,8 @@ class McpToolHandlers @Inject constructor(
             }
         },
         McpTool(
-            name = "method_callees",
-            description = "列出某 Dart 方法内部真实调用的子方法（基于调用图 dart_call_edges）。methodId 或 methodName 二选一。返回被调 name/类名/calleeVaddr/调用类型（DIRECT_CALL/DIRECT_BRANCH）。图未构建时自动异步构建",
+            name = "get_method_callees",
+            description = "列出某 Dart 方法内部真实调用的子方法（基于调用图 dart_call_edges）。methodId 或 methodName 二选一（methodName 为精确匹配，如 UserHome._fetchList）。返回被调 name/类名/calleeVaddr/调用类型（DIRECT_CALL/DIRECT_BRANCH），附 graphBuilt/edgeCount/isBuilding。analysisId 无效时返回 analysisExists=false；图未就绪时返回 graphBuilt=false + isBuilding，请稍后重查",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -576,11 +564,32 @@ class McpToolHandlers @Inject constructor(
                 else -> throw McpToolException("需提供 methodId 或 methodName")
             }
             ensureGraph(id)
+            if (analysisDao.getById(id) == null) {
+                return@McpTool buildJsonObject {
+                    put("count", 0)
+                    put("graphBuilt", false)
+                    put("analysisExists", false)
+                    put("message", "分析不存在（analysisId=$id），请用 list_analyses 获取有效 id")
+                }
+            }
+            if (!callGraphBuilder.isBuilt(id)) {
+                return@McpTool buildJsonObject {
+                    put("count", 0)
+                    put("graphBuilt", false)
+                    put("analysisExists", true)
+                    put("isBuilding", callGraphBuilder.isBuilding(id))
+                    put("message", "调用图未就绪（analysisId=$id），请稍后重查")
+                }
+            }
             val callees = dartCallGraphDao.calleesOf(id, callerId, limit)
+            val edgeCount = callGraphBuilder.edgeCount(id)
             buildJsonObject {
                 put("count", callees.size)
                 put("truncated", callees.size == limit)
                 put("graphSource", "DART_CALL_GRAPH")
+                put("graphBuilt", true)
+                put("edgeCount", edgeCount)
+                put("isBuilding", callGraphBuilder.isBuilding(id))
                 putJsonArray("callees") {
                     callees.forEach { c ->
                         addJsonObject {
@@ -595,7 +604,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "dart_call_graph_status",
-            description = "查询某次分析 Dart 调用图（真实交叉引用）的构建状态：built=是否已有边、edgeCount=边数、building=是否正在后台构建。用于确认建图是否完成 / 何时可查 search_calls/get_method_callers/method_callees",
+            description = "查询某次分析 Dart 调用图（真实交叉引用）的构建状态：built=是否已建完（含 0 边情形）、edgeCount=边数、building=是否正在后台构建。用于确认建图是否完成 / 何时可查 get_method_callers/get_method_callees",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -608,7 +617,8 @@ class McpToolHandlers @Inject constructor(
             val count = dartCallGraphDao.countByAnalysisId(id)
             buildJsonObject {
                 put("analysisId", id)
-                put("built", count > 0)
+                put("analysisExists", analysisDao.getById(id) != null)
+                put("built", callGraphBuilder.hasCompleted(id) || count > 0)
                 put("edgeCount", count)
                 put("building", callGraphBuilder.isBuilding(id))
             }

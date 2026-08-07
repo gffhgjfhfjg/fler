@@ -8,7 +8,7 @@ import com.ai.fler.data.entity.DartCallEdge
 
 /**
  * Dart 调用图边 DAO。
- * 供 MCP（search_calls / get_method_callers / method_callees）与 App SO 编辑器
+ * 供 MCP（get_method_callers / get_method_callees）与 App SO 编辑器
  * 交叉引用面板读取真实调用关系。
  */
 @Dao
@@ -25,6 +25,14 @@ interface DartCallGraphDao {
 
     @Query("SELECT COUNT(*) FROM dart_call_edges WHERE analysis_id = :analysisId")
     suspend fun countByAnalysisId(analysisId: Long): Int
+
+    /** 该分析是否有至少 1 条边（轻量判空，供建图就绪快判）。 */
+    @Query("SELECT EXISTS(SELECT 1 FROM dart_call_edges WHERE analysis_id = :analysisId)")
+    suspend fun hasEdges(analysisId: Long): Boolean
+
+    /** 取该分析全部边（供内存索引一次加载）。 */
+    @Query("SELECT * FROM dart_call_edges WHERE analysis_id = :analysisId")
+    suspend fun getAllByAnalysisId(analysisId: Long): List<DartCallEdge>
 
     /** 该方法调用了谁（callerMethodId 作为源）。 */
     @Query(
@@ -53,7 +61,7 @@ interface DartCallGraphDao {
     )
     suspend fun callersOfVaddr(analysisId: Long, address: Long, limit: Int): List<CallerInfo>
 
-    /** 谁调用了名字含 calleeName 的方法（MCP get_method_callers / search_calls 帮助）。 */
+    /** 谁调用了名字含 calleeName 的方法（MCP get_method_callers 帮助）。 */
     @Query(
         "SELECT caller_method_id AS methodId, caller_name AS name, caller_vaddr AS vaddr, " +
             "callee_vaddr AS targetVaddr, site_vaddr AS siteVaddr, analysis_id AS analysisId " +

@@ -7,6 +7,7 @@ import com.ai.fler.core.analysis.SoEditorCache
 import com.ai.fler.core.log.AppLogger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,20 +20,24 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * 引擎包管理器。
+ * 引擎包管理器（v0.4.0 按版本拆分协议）。
  *
- * 协调"下载 → SHA256 校验 → 7z 解压 → 就绪检查"全流程，
- * 是 P1 阶段的核心类，后续所有分析功能依赖引擎包就绪。
+ * 引擎资产不再是单一整包，而是：
+ * - 运行库 `fler-runtime-libs.7z`（必装基线，内含 lib/libc++_shared.so），任何引擎加载前必须先就绪；
+ * - 每个 Dart 版本独立 `dartvm-<v>.7z`（内含 dartvm_<v>.so，增量共存，互不覆盖）。
+ *
+ * 下载/校验/解压信息全部来自远程 manifest.json（见 [EngineManifest]）。
  *
  * 引擎目录布局（解压后）：
  * ```
  * filesDir/engines/
- * ├── lib/                          ← 共享库（capstone 已静态进 APK，不再随包）
- * │   └── libc++_shared.so
- * ├── dartvm_3.13.0.so             ← 11 个版本引擎
- * ├── dartvm_3.12.1.so
+ * ├── lib/libc++_shared.so      ← 来自 fler-runtime-libs.7z（必装）
+ * ├── dartvm_3.13.0.so          ← 来自 dartvm-3.13.0.7z（按需）
  * └── ...
  * ```
+ *
+ * 注：ICU 不再是运行库必需（blutter dartvm 构建期已跳过 ICU 链接，readelf 无
+ * NEEDED libicuuc/libicudata），故不随包；EngineLoader 保留对旧包 ICU 的宽容加载。
  */
 @Singleton
 class EnginePackManager @Inject constructor(
@@ -54,6 +59,9 @@ class EnginePackManager @Inject constructor(
 
         /** 下载+SHA256 校验的最大尝试次数（失败自动重试）。 */
         private const val MAX_DOWNLOAD_ATTEMPTS = 3
+
+        /** 运行库包缓存文件名（cacheDir 下）。 */
+        private const val FILE_RUNTIME_LIBS = "fler-runtime-libs.7z"
     }
 
     /**
@@ -99,7 +107,7 @@ class EnginePackManager @Inject constructor(
     private val _versionsEpoch = MutableStateFlow(0L)
     val versionsEpoch: StateFlow<Long> = _versionsEpoch.asStateFlow()
 
-    /** 已安装引擎包版本（Fix 2：装完新版本后更新检测不再提示；缺省回退内置版本）。 */
+    /** 已安装引擎包版本（装完新版本后更新检测不再提示；缺省回退内置版本）。 */
     private var installedPackVersion: String
         get() = prefs().getString(KEY_INSTALLED_PACK_VERSION, null)
             ?: EngineSourceConfig.ENGINE_PACKAGE_VERSION
@@ -112,25 +120,19 @@ class EnginePackManager @Inject constructor(
         _versionsEpoch.value++
     }
 
-    /**
-     * 检查引擎包是否就绪。
-     *
-     * 严格条件（重启后也应满足，否则会触发重新下载）：
-     * 1. 至少一个 dartvm_*.so 存在
-     * 2. 必要共享库齐全（libc++_shared.so）
-     * 3. ICU 库（libicudata.so / libicuuc.so）可选，打包方式可能不同
-     *
-     * 注：libcapstone.so 已不需要——capstone 静态链接进 fler_jni.so，SO 编辑器
-     * 零引擎依赖；blutter 引擎包也改为静态 capstone（见 build-dartvm.sh）。
-     */
-    fun isEnginePackReady(): Boolean {
-        val hasDartVm = engineDir.listFiles()?.any {
-            it.name.startsWith("dartvm_") && it.name.endsWith(".so")
-        } ?: false
-        val libCxx = File(engineDir, "lib/libc++_shared.so")
-        // ICU 可选：部分引擎包将 ICU 静态链接进 dartvm，或打包方式不同
-        return hasDartVm && libCxx.exists()
-    }
+    // ========== 就绪状态 ==========
+
+    /** 运行库（必装基线）是否就绪：lib/libc++_shared.so 存在。 */
+    fun isRuntimeReady(): Boolean = File(engineDir, "lib/libc++_shared.so").exists()
+
+    /** 指定 Dart 版本的引擎是否已安装。 */
+    fun isEngineVersionReady(dartVersion: String): Boolean =
+        File(engineDir, "dartvm_${dartVersion}.so").exists()
+
+    /** 整体就绪：运行库 + 至少一个引擎版本。 */
+    fun isEnginePackReady(): Boolean =
+        isRuntimeReady() && engineDir.listFiles()
+            ?.any { it.name.startsWith("dartvm_") && it.name.endsWith(".so") } == true
 
     /**
      * 列出已安装的 Dart 引擎版本。
@@ -149,191 +151,126 @@ class EnginePackManager @Inject constructor(
     }
 
     /**
-     * 确保引擎包就绪：如无则下载+解压，如有则跳过。
-     *
-     * 使用 [channelFlow] 以便下载/解压回调也能把实时进度（字节/百分比）发送给订阅者
-     * （设置页进度条、前台服务通知），而不只是阶段切换。
-     *
-     * @return Flow<EngineProgress> 进度流
+     * 获取远程引擎清单（manifest.json）。失败返回 null（网络/源配置问题）。
      */
+    suspend fun fetchManifest(): EngineManifest? = downloader.fetchManifest()
+
+    // ========== 安装流程 ==========
+
     /**
-     * 确保引擎包就绪：未就绪时下载 + 校验 + 解压。
+     * 安装（或更新）运行库包 —— 必装基线。
      *
-     * @param force 为 true 时强制重新下载（「下载更新」用），跳过已就绪短路。
+     * 已就绪且非 force 时直接 COMPLETED 短路。
+     *
+     * @param force 为 true 时强制重新下载（「下载更新」用），即使已就绪也重下。
      */
-    fun ensureEnginesReady(force: Boolean = false): Flow<EngineProgress> = channelFlow {
-        if (!force && isEnginePackReady()) {
-            Log.i(TAG, "引擎包已就绪，跳过下载")
-            send(EngineProgress(EngineProgress.Phase.COMPLETED))
+    fun installRuntimeLibs(force: Boolean = false): Flow<EngineProgress> = channelFlow {
+        if (!force && isRuntimeReady()) {
+            Log.i(TAG, "运行库已就绪，跳过下载")
+            emitProgress(this, EngineProgress(EngineProgress.Phase.COMPLETED))
             return@channelFlow
         }
 
         try {
-            val archiveFile = File(context.cacheDir, "fler-engines.7z")
+            val manifest = downloader.fetchManifest()
+                ?: throw IllegalStateException("无法获取引擎清单 manifest.json（请检查下载源配置与网络）")
+            val rt = manifest.runtimeLibs
+                ?: throw IllegalStateException("manifest 缺少运行库信息（runtimeLibs）")
 
-            // 获取远程版本信息：优先用 version.json 的下载/校验地址（方案 B），失败回退默认源
-            val remote = downloader.fetchVersionInfo()
-            val downloadUrls = remote?.downloadUrl?.let { listOf(it) }
-            val checksumUrl = remote?.checksumUrl?.takeIf { it.isNotBlank() }
-                ?: sourceConfig.checksumUrl
+            installAsset(this, rt.file, rt.url, rt.sha256, FILE_RUNTIME_LIBS)
 
-            // 1+2. 下载 + SHA256 校验（失败自动重试，最多 MAX_DOWNLOAD_ATTEMPTS 次）
-            var attempt = 0
-            while (true) {
-                attempt++
-                Log.i(TAG, "开始下载引擎包 (第 $attempt/${MAX_DOWNLOAD_ATTEMPTS} 次尝试), 源: ${downloader.sourceDescription()}")
-                send(EngineProgress(EngineProgress.Phase.DOWNLOADING))
-                Log.i(TAG, "开始下载引擎包")
-                appLogger.info(TAG, "开始下载引擎包")
-                _progress.value = EngineProgress(EngineProgress.Phase.DOWNLOADING)
-
-                try {
-                    downloader.downloadEnginePack(
-                        archiveFile,
-                        urls = downloadUrls,
-                        onProgress = { downloaded, total, speed ->
-                            val p = EngineProgress(
-                                phase = EngineProgress.Phase.DOWNLOADING,
-                                downloadedBytes = downloaded,
-                                totalBytes = total,
-                                speed = speed,
-                            )
-                            _progress.value = p
-                            // 实时字节进度也发送给 flow 订阅者（进度条/通知）
-                            trySend(p)
-                        }
-                    )
-
-                    Log.i(TAG, "下载完成，文件大小: ${archiveFile.length()} bytes, 路径: ${archiveFile.absolutePath}")
-
-                    // SHA256 校验
-                    send(EngineProgress(EngineProgress.Phase.VERIFYING))
-                    _progress.value = EngineProgress(EngineProgress.Phase.VERIFYING)
-
-                    // 验证文件头（7z 魔术字节: 37 7A BC AF 27 1C）
-                    if (!isValid7zFile(archiveFile)) {
-                        Log.e(TAG, "文件头不是有效 7z 归档: ${archiveFile.absolutePath}")
-                        throw IllegalStateException("下载的文件不是有效的 7z 归档，可能下载不完整")
-                    }
-
-                    val expectedSha256 = downloader.fetchChecksum(checksumUrl)
-                    if (expectedSha256 != null) {
-                        Log.i(TAG, "获取到校验和: ${expectedSha256.take(16)}...")
-                        val isValid = extractor.verifyChecksum(archiveFile, expectedSha256)
-                        if (!isValid) {
-                            val actual = extractor.computeSha256(archiveFile)
-                            Log.e(TAG,
-                                "SHA256 校验失败: 期望 ${expectedSha256.take(16)}..., 实际 ${actual.take(16)}..., " +
-                                    "源: ${downloader.sourceDescription()}")
-                            throw IllegalStateException(
-                                "SHA256 校验失败（若在设置中自定义过下载源，请重置为默认）"
-                            )
-                        }
-                        Log.i(TAG, "SHA256 校验通过")
-                    } else {
-                        Log.w(TAG, "未获取到远程校验和，跳过 SHA256 校验")
-                    }
-
-                    break
-                } catch (e: Exception) {
-                    archiveFile.delete()
-                    if (attempt < MAX_DOWNLOAD_ATTEMPTS) {
-                        Log.w(TAG, "第 $attempt 次尝试失败: ${e.message}, 将重试", e)
-                        continue
-                    }
-                    throw e
-                }
+            if (!isRuntimeReady()) {
+                throw IllegalStateException("运行库安装后仍不可用（lib/libc++_shared.so 缺失），请清除引擎后重试")
             }
 
-            // 3. 解压
-            Log.i(TAG, "开始解压到: ${engineDir.absolutePath}")
-            appLogger.info(TAG, "开始解压")
-            send(EngineProgress(EngineProgress.Phase.EXTRACTING))
-            _progress.value = EngineProgress(EngineProgress.Phase.EXTRACTING)
-
-            extractor.extract(archiveFile, engineDir) { progress ->
-                val p = EngineProgress(
-                    phase = EngineProgress.Phase.EXTRACTING,
-                    extractProgress = progress,
-                )
-                _progress.value = p
-                // 实时解压进度也发送给 flow 订阅者
-                trySend(p)
-            }
-
-            // 解压后立即做一次严格的就绪检查，失败立刻抛错（不要到下次重启才"又要重下"）
-            val ready = isEnginePackReady()
-            if (!ready) {
-                val installed = listInstalledVersions()
-                val engineFiles = engineDir.listFiles()?.map { it.name }?.sorted() ?: emptyList()
-                val libFiles = File(engineDir, "lib").listFiles()?.map { it.name }?.sorted() ?: emptyList()
-                Log.e(TAG, buildString {
-                    append("解压后 isEnginePackReady() 仍然为 false!\n")
-                    append("  - 识别到引擎版本: $installed\n")
-                    append("  - engines/ 下文件: $engineFiles\n")
-                    append("  - engines/lib/ 下文件: $libFiles\n")
-                    append("  若发现文件多了一层 fler-engines/ 子目录，可能是顶层目录前缀未正确剥离。")
-                })
-                throw IllegalStateException(
-                    "解压成功但引擎仍不可用（目录结构不匹配）。" +
-                        "已安装引擎版本: $installed。请清除引擎后重试，或更新引擎包版本。"
-                )
-            }
-
-            // 清理临时文件
-            archiveFile.delete()
-
-            // 4. 预加载共享库
-            send(EngineProgress(EngineProgress.Phase.LOADING))
-            _progress.value = EngineProgress(EngineProgress.Phase.LOADING)
+            emitProgress(this, EngineProgress(EngineProgress.Phase.LOADING))
             engineLoader.ensureSharedLibsLoaded()
 
-            // 5. 完成
-            Log.i(TAG, "引擎包就绪完成")
-            appLogger.info(TAG, "引擎包就绪完成")
-            send(EngineProgress(EngineProgress.Phase.COMPLETED))
-            _progress.value = EngineProgress(EngineProgress.Phase.COMPLETED)
+            installedPackVersion = manifest.packVersion
             notifyVersionsChanged()
-            // Fix 2：记录本次实际安装的引擎包版本，避免更新后仍提示「发现新版本」
-            remote?.let { installedPackVersion = it.version }
-
+            Log.i(TAG, "运行库安装完成")
+            appLogger.info(TAG, "运行库安装完成")
+            emitProgress(this, EngineProgress(EngineProgress.Phase.COMPLETED))
         } catch (e: Exception) {
-            Log.e(TAG, "引擎包准备失败: ${e.message}", e)
-            appLogger.error(TAG, "引擎包准备失败: ${e.message}")
-            val error = EngineProgress(
+            Log.e(TAG, "运行库安装失败: ${e.message}", e)
+            appLogger.error(TAG, "运行库安装失败: ${e.message}")
+            val err = EngineProgress(
                 phase = EngineProgress.Phase.FAILED,
                 errorMessage = e.message ?: "未知错误",
             )
-            _progress.value = error
-            send(error)
+            _progress.value = err
+            send(err)
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * 按需安装指定 Dart 版本的引擎。
+     *
+     * 运行库未就绪时先自动补装运行库（必装基线）。已安装则直接 COMPLETED 短路。
+     */
+    fun installEngineVersion(dartVersion: String): Flow<EngineProgress> = channelFlow {
+        if (isEngineVersionReady(dartVersion)) {
+            Log.i(TAG, "引擎 Dart $dartVersion 已就绪，跳过下载")
+            emitProgress(this, EngineProgress(EngineProgress.Phase.COMPLETED))
+            return@channelFlow
+        }
+
+        try {
+            val manifest = downloader.fetchManifest()
+                ?: throw IllegalStateException("无法获取引擎清单 manifest.json（请检查下载源配置与网络）")
+            val entry = manifest.engines.firstOrNull { it.dartVersion == dartVersion }
+                ?: throw IllegalStateException("远程清单中不存在 Dart $dartVersion 引擎")
+
+            // 运行库必装：缺失时先补装
+            if (!isRuntimeReady()) {
+                val rt = manifest.runtimeLibs
+                    ?: throw IllegalStateException("manifest 缺少运行库信息（runtimeLibs），无法加载引擎")
+                installAsset(this, rt.file, rt.url, rt.sha256, FILE_RUNTIME_LIBS)
+                if (!isRuntimeReady()) {
+                    throw IllegalStateException("运行库安装后仍不可用，无法加载引擎")
+                }
+                engineLoader.ensureSharedLibsLoaded()
+            }
+
+            installAsset(this, entry.file, entry.url, entry.sha256, "dartvm-${dartVersion}.7z")
+
+            if (!isEngineVersionReady(dartVersion)) {
+                throw IllegalStateException("引擎 Dart $dartVersion 安装后仍不可用，请清除引擎后重试")
+            }
+
+            installedPackVersion = manifest.packVersion
+            notifyVersionsChanged()
+            Log.i(TAG, "引擎 Dart $dartVersion 安装完成")
+            appLogger.info(TAG, "引擎 Dart $dartVersion 安装完成")
+            emitProgress(this, EngineProgress(EngineProgress.Phase.COMPLETED))
+        } catch (e: Exception) {
+            Log.e(TAG, "引擎安装失败: ${e.message}", e)
+            appLogger.error(TAG, "引擎安装失败: ${e.message}")
+            val err = EngineProgress(
+                phase = EngineProgress.Phase.FAILED,
+                errorMessage = e.message ?: "未知错误",
+            )
+            _progress.value = err
+            send(err)
         }
     }.flowOn(Dispatchers.IO)
 
     /**
      * 检查引擎包更新。
      *
-     * 对比本地已安装版本与远程最新版本，返回更新信息（如有）。
+     * 对比本地已安装版本与远程最新 manifest 的 packVersion。
      */
     suspend fun checkForUpdates(): EngineUpdate? = withContext(Dispatchers.IO) {
         try {
-            val remote = downloader.fetchVersionInfo() ?: return@withContext null
-            val installed = listInstalledVersions()
-
-            // 判断是否需要更新：
-            // 1. 远程引擎版本号与「已安装引擎包版本」不同（装完新版本后不再提示）；
-            // 2. 远程支持版本包含本地未安装的 Dart 版本。
-            val hasNewVersion = remote.version != installedPackVersion ||
-                remote.dartVersions.any { !installed.contains(it) }
-
-            if (!hasNewVersion && installed.isNotEmpty()) {
+            val manifest = downloader.fetchManifest() ?: return@withContext null
+            if (manifest.packVersion == installedPackVersion) {
                 return@withContext null
             }
-
             EngineUpdate(
-                version = remote.version,
-                downloadUrl = remote.downloadUrl,
-                sizeBytes = remote.sizeBytes,
-                releaseNotes = remote.releaseNotes,
+                version = manifest.packVersion,
+                downloadUrl = manifest.runtimeLibs?.url ?: "",
+                sizeBytes = manifest.runtimeLibs?.sizeBytes ?: 0L,
+                releaseNotes = manifest.releaseNotes,
             )
         } catch (_: Exception) {
             null
@@ -353,7 +290,7 @@ class EnginePackManager @Inject constructor(
      *
      * 磁盘范围（不包含引擎引擎文件、不包含 Room DB）：
      *  - cacheDir/：apk_import_* / so_import_* / extracted_* / analysis_*.db{,-wal,-shm}
-     *                patches / blutter_tmp / fler-engines.7z
+     *                patches / blutter_tmp / fler-runtime-libs.7z / dartvm-*.7z / address_mappings
      *  - filesDir/：undo / mcp_patches
      *
      * 内存范围：
@@ -364,18 +301,20 @@ class EnginePackManager @Inject constructor(
     suspend fun cleanProjectCaches(): Long = withContext(Dispatchers.IO) {
         var freed = 0L
 
-        // ---------- 1. cacheDir：原有 8 类 + address_mappings 兜底 ----------
+        // ---------- 1. cacheDir：原 8 类 + 分版本下载临时包 + address_mappings 兜底 ----------
         val cache = context.cacheDir
         cache.listFiles()?.forEach { f ->
             val name = f.name
             val isAnalysisDb = f.isFile && name.startsWith("analysis_") &&
                 (name.endsWith(".db") || name.endsWith("-wal") || name.endsWith("-shm"))
+            val isEngineTemp = name == FILE_RUNTIME_LIBS ||
+                (name.startsWith("dartvm-") && name.endsWith(".7z"))
             val shouldDelete = name.startsWith("apk_import_") ||
                 name.startsWith("so_import_") ||
                 name.startsWith("extracted_") ||
                 name == "patches" ||
                 name == "blutter_tmp" ||
-                name == "fler-engines.7z" ||
+                isEngineTemp ||
                 name == "address_mappings" ||
                 isAnalysisDb
             if (shouldDelete) {
@@ -400,6 +339,89 @@ class EnginePackManager @Inject constructor(
         backupManager.clearAllInMemory()
 
         freed
+    }
+
+    // ========== 私有工具 ==========
+
+    /**
+     * 下载 → 7z 头校验 → SHA256 → 增量解压 指定资产到引擎目录。
+     * 失败自动重试（最多 [MAX_DOWNLOAD_ATTEMPTS] 次），完成后删除临时归档。
+     */
+    private suspend fun installAsset(
+        scope: ProducerScope<EngineProgress>,
+        displayName: String,
+        url: String,
+        sha256: String,
+        archiveFileName: String,
+    ) {
+        val archiveFile = File(context.cacheDir, archiveFileName)
+        var attempt = 0
+        while (true) {
+            attempt++
+            Log.i(TAG, "开始下载 $displayName (第 $attempt/${MAX_DOWNLOAD_ATTEMPTS} 次尝试), 源: ${downloader.sourceDescription()}")
+            appLogger.info(TAG, "开始下载 $displayName")
+            emitProgress(scope, EngineProgress(EngineProgress.Phase.DOWNLOADING))
+
+            try {
+                downloader.downloadAsset(url, archiveFile) { downloaded, total, speed ->
+                    val p = EngineProgress(
+                        phase = EngineProgress.Phase.DOWNLOADING,
+                        downloadedBytes = downloaded,
+                        totalBytes = total,
+                        speed = speed,
+                    )
+                    _progress.value = p
+                    scope.trySend(p)
+                }
+                Log.i(TAG, "下载完成: $displayName, 大小 ${archiveFile.length()} bytes, 路径: ${archiveFile.absolutePath}")
+
+                emitProgress(scope, EngineProgress(EngineProgress.Phase.VERIFYING))
+                if (!isValid7zFile(archiveFile)) {
+                    Log.e(TAG, "文件头不是有效 7z 归档: ${archiveFile.absolutePath}")
+                    throw IllegalStateException("下载的文件不是有效的 7z 归档，可能下载不完整")
+                }
+                if (sha256.isNotBlank()) {
+                    val isValid = extractor.verifyChecksum(archiveFile, sha256)
+                    if (!isValid) {
+                        val actual = extractor.computeSha256(archiveFile)
+                        Log.e(TAG, "SHA256 校验失败: 期望 ${sha256.take(16)}..., 实际 ${actual.take(16)}...")
+                        throw IllegalStateException(
+                            "SHA256 校验失败（若在设置中自定义过下载源，请重置为默认）"
+                        )
+                    }
+                    Log.i(TAG, "SHA256 校验通过: $displayName")
+                } else {
+                    Log.w(TAG, "manifest 未提供 $displayName 的 sha256，跳过校验")
+                }
+                break
+            } catch (e: Exception) {
+                archiveFile.delete()
+                if (attempt < MAX_DOWNLOAD_ATTEMPTS) {
+                    Log.w(TAG, "第 $attempt 次尝试失败: ${e.message}, 将重试", e)
+                    continue
+                }
+                throw e
+            }
+        }
+
+        emitProgress(scope, EngineProgress(EngineProgress.Phase.EXTRACTING))
+        extractor.extractIncremental(archiveFile, engineDir) { progress ->
+            val p = EngineProgress(
+                phase = EngineProgress.Phase.EXTRACTING,
+                extractProgress = progress,
+            )
+            _progress.value = p
+            scope.trySend(p)
+        }
+
+        // 清理临时文件
+        archiveFile.delete()
+    }
+
+    /** 设置 _progress 状态并推送给 flow 订阅者。 */
+    private fun emitProgress(scope: ProducerScope<EngineProgress>, p: EngineProgress) {
+        _progress.value = p
+        scope.trySend(p)
     }
 
     /**

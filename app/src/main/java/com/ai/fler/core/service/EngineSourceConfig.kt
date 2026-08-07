@@ -8,8 +8,10 @@ import javax.inject.Singleton
 /**
  * 引擎源下载地址配置。
  *
- * 使用 SharedPreferences 持久化用户自定义的下载源地址。
- * 未自定义时使用默认内置地址（GitHub myfler）。
+ * 引擎资产协议（v0.4.0 起）：
+ * - 远程清单 manifest.json（stable 地址，指向 fler-dart main 分支）为唯一来源；
+ * - 下载 URL / sha256 全部来自 manifest 每项，不再单独配置主/备/校验地址；
+ * - 仅需配置 manifest 地址与 GitHub 加速前缀。
  */
 @Singleton
 class EngineSourceConfig @Inject constructor(
@@ -17,48 +19,25 @@ class EngineSourceConfig @Inject constructor(
 ) {
     companion object {
         private const val PREFS_NAME = "engine_source"
-        private const val KEY_PRIMARY_URL = "primary_url"
-        private const val KEY_FALLBACK_URL = "fallback_url"
-        private const val KEY_CHECKSUM_URL = "checksum_url"
-        private const val KEY_VERSION_URL = "version_url"
+        private const val KEY_MANIFEST_URL = "manifest_url"
         private const val KEY_GITHUB_PROXY = "github_proxy"
 
-        // 默认地址（v0.3.10 起：引擎改为内存直导 DB（classes/methods/pp/strings），
-        // 修复产物页类/方法为空；PRODUCT 布局宏已含，分析成功）
-        const val DEFAULT_PRIMARY_URL = "https://github.com/myfler/fler-dart/releases/download/v0.3.10/fler-engines.7z"
-        const val DEFAULT_FALLBACK_URL = "https://github.com/myfler/fler-dart/releases/download/v0.3.10/fler-engines.7z"
-        const val DEFAULT_CHECKSUM_URL = "https://github.com/myfler/fler-dart/releases/download/v0.3.10/checksums.txt"
-        // 版本信息 JSON（稳定地址，永远指向 fler-dart main 分支的最新版本）
-        const val DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/myfler/fler-dart/main/version.json"
+        // 版本信息清单 JSON（稳定地址，永远指向 fler-dart main 分支的最新版本）
+        const val DEFAULT_MANIFEST_URL = "https://raw.githubusercontent.com/myfler/fler-dart/main/manifest.json"
 
         /** GitHub 加速默认前缀（可通过设置页修改/清空关闭）。 */
         const val DEFAULT_GITHUB_PROXY = "https://gh-proxy.com"
 
-        /** 引擎包版本标识（用于项目卡片 Engine 展示；随默认源升级时同步更新）。 */
-        const val ENGINE_PACKAGE_VERSION = "v0.3.10"
+        /** 引擎包版本标识（随默认源升级时同步更新；未安装时作为 installedPackVersion 缺省回退）。 */
+        const val ENGINE_PACKAGE_VERSION = "v0.4.0"
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    /** 主下载地址（GitHub myfler）。 */
-    var primaryUrl: String
-        get() = prefs.getString(KEY_PRIMARY_URL, DEFAULT_PRIMARY_URL) ?: DEFAULT_PRIMARY_URL
-        set(value) = prefs.edit().putString(KEY_PRIMARY_URL, value).apply()
-
-    /** 备用下载地址（GitHub myfler 回退）。 */
-    var fallbackUrl: String
-        get() = prefs.getString(KEY_FALLBACK_URL, DEFAULT_FALLBACK_URL) ?: DEFAULT_FALLBACK_URL
-        set(value) = prefs.edit().putString(KEY_FALLBACK_URL, value).apply()
-
-    /** SHA256 校验地址。 */
-    var checksumUrl: String
-        get() = prefs.getString(KEY_CHECKSUM_URL, DEFAULT_CHECKSUM_URL) ?: DEFAULT_CHECKSUM_URL
-        set(value) = prefs.edit().putString(KEY_CHECKSUM_URL, value).apply()
-
-    /** 版本信息 JSON 地址。 */
-    var versionUrl: String
-        get() = prefs.getString(KEY_VERSION_URL, DEFAULT_VERSION_URL) ?: DEFAULT_VERSION_URL
-        set(value) = prefs.edit().putString(KEY_VERSION_URL, value).apply()
+    /** 远程 manifest.json 地址。 */
+    var manifestUrl: String
+        get() = prefs.getString(KEY_MANIFEST_URL, DEFAULT_MANIFEST_URL) ?: DEFAULT_MANIFEST_URL
+        set(value) = prefs.edit().putString(KEY_MANIFEST_URL, value).apply()
 
     /** GitHub 加速前缀（如 https://gh-proxy.com），清空表示关闭。 */
     var githubProxy: String
@@ -67,10 +46,7 @@ class EngineSourceConfig @Inject constructor(
 
     /** 是否使用了自定义地址（含改过默认加速前缀/清空）。 */
     fun isCustom(): Boolean {
-        return primaryUrl != DEFAULT_PRIMARY_URL ||
-            fallbackUrl != DEFAULT_FALLBACK_URL ||
-            checksumUrl != DEFAULT_CHECKSUM_URL ||
-            versionUrl != DEFAULT_VERSION_URL ||
+        return manifestUrl != DEFAULT_MANIFEST_URL ||
             githubProxy != DEFAULT_GITHUB_PROXY
     }
 

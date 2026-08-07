@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ai.fler.core.analysis.DartCallGraphBuilder
 import com.ai.fler.core.jni.BlutterEngine
 import com.ai.fler.core.service.AddressTranslator
 import com.ai.fler.core.service.AnalysisImporter
@@ -66,7 +67,8 @@ class ProjectViewModel @Inject constructor(
     private val enginePackManager: EnginePackManager,
     private val engineLoader: EngineLoader,
     private val analysisImporter: AnalysisImporter,
-    private val addressTranslator: AddressTranslator
+    private val addressTranslator: AddressTranslator,
+    private val callGraphBuilder: DartCallGraphBuilder
 ) : ViewModel() {
 
     // ========== 项目列表状态 ==========
@@ -172,7 +174,9 @@ class ProjectViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 Log.i(TAG, "删除项目: id=${project.id}, name=${project.name}")
+                val deletedAnalyses = analysisDao.getByProjectIdList(project.id)
                 val deletedAnalysisCount = appDatabase.cascadeDeleteProject(project.id)
+                deletedAnalyses.forEach { callGraphBuilder.invalidate(it.id) }
                 Log.i(TAG, "项目 ${project.id} 已删除，级联清理 $deletedAnalysisCount 条分析记录")
 
                 // 清理从 APK 提取的 so 文件目录
@@ -327,7 +331,7 @@ class ProjectViewModel @Inject constructor(
                 Log.i(TAG, "阶段 3/5 完成: 引擎已加载")
             } catch (e: EngineNotReadyException) {
                 Log.e(TAG, "阶段 3/5 引擎未就绪: ${e.message}")
-                failAnalysis(analysisId, "引擎未就绪: ${e.message}。请在设置页下载包含 $dartVersion 的引擎包。")
+                failAnalysis(analysisId, "引擎未就绪: ${e.message}。请在设置页下载 Dart $dartVersion 引擎（需先安装运行库）。")
                 return@launch
             } catch (e: UnsatisfiedLinkError) {
                 Log.e(TAG, "阶段 3/5 引擎加载失败 (UnsatisfiedLinkError)", e)

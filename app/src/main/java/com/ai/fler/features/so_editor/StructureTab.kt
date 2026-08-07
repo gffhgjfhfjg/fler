@@ -116,18 +116,6 @@ fun StructureTab(
         showXrefSheet = true
     }
 
-    // 呼吸脉冲动画：用 Animatable 驱动 0→1→0→1→0（2 次呼吸）
-    val pulseAlpha = remember { Animatable(0f) }
-    LaunchedEffect(flashAddress, flashTrigger) {
-        if (flashAddress == null) return@LaunchedEffect
-        pulseAlpha.snapTo(0f)
-        // 改成 fast=200ms（总时长 800ms）而非 slow=500ms（2000ms），减少每帧重组时间
-        repeat(2) {
-            pulseAlpha.animateTo(1f, tween(AnimDuration.fast, easing = AnimEasing.entry))
-            pulseAlpha.animateTo(0f, tween(AnimDuration.fast, easing = AnimEasing.exit))
-        }
-    }
-
     // 每个子Tab的LazyListState（key=ordinal）
     val listStates: Map<Int, LazyListState> = remember {
         StructureSubTab.values().associate { it.ordinal to LazyListState(0, 0) }
@@ -293,7 +281,7 @@ fun StructureTab(
                     // 直接传 flashAddress，不再每帧切 null；ListItem 内部 item.addr == flashAddress 自己比较，
                     // 保证 flashAddress 参数稳定，LazyColumn 不会因为入参每帧变而重算所有可见行。
                     flashAddress = flashAddress,
-                    flashAlpha = pulseAlpha.value,
+                    flashTrigger = flashTrigger,
                     modifier = Modifier.fillMaxSize()
                 )
                 StructureSubTab.SYMBOLS -> SymbolsList(
@@ -302,7 +290,7 @@ fun StructureTab(
                     onSymbolXref = { openXrefs(it.address) },
                     listState = listStates[StructureSubTab.SYMBOLS.ordinal]!!,
                     flashAddress = flashAddress,
-                    flashAlpha = pulseAlpha.value,
+                    flashTrigger = flashTrigger,
                     isFiltered = currentQuery.isNotBlank(),
                     modifier = Modifier.fillMaxSize()
                 )
@@ -312,7 +300,7 @@ fun StructureTab(
                     onSymbolXref = { openXrefs(it.address) },
                     listState = listStates[StructureSubTab.DYNAMIC_SYMBOLS.ordinal]!!,
                     flashAddress = flashAddress,
-                    flashAlpha = pulseAlpha.value,
+                    flashTrigger = flashTrigger,
                     isFiltered = currentQuery.isNotBlank(),
                     modifier = Modifier.fillMaxSize()
                 )
@@ -322,7 +310,7 @@ fun StructureTab(
                     onFunctionXref = { openXrefs(it.vaddr) },
                     listState = listStates[StructureSubTab.FUNCTIONS.ordinal]!!,
                     flashAddress = flashAddress,
-                    flashAlpha = pulseAlpha.value,
+                    flashTrigger = flashTrigger,
                     isFiltered = currentQuery.isNotBlank(),
                     modifier = Modifier.fillMaxSize()
                 )
@@ -438,6 +426,27 @@ private fun flashColor(alpha: Float): Color =
 private fun flashScale(alpha: Float): Float =
     1f + alpha * 0.02f
 
+/**
+ * 行级呼吸脉冲：动画只在闪烁行本地驱动（其余行 isFlash=false 不参与重组）。
+ * flashKey 递增可对同一目标重新触发。
+ */
+@Composable
+private fun rememberFlashAlpha(isFlash: Boolean, flashKey: Int): Float {
+    val pulseAlpha = remember { Animatable(0f) }
+    LaunchedEffect(isFlash, flashKey) {
+        if (!isFlash) {
+            pulseAlpha.snapTo(0f)
+            return@LaunchedEffect
+        }
+        pulseAlpha.snapTo(0f)
+        repeat(2) {
+            pulseAlpha.animateTo(1f, tween(AnimDuration.fast, easing = AnimEasing.entry))
+            pulseAlpha.animateTo(0f, tween(AnimDuration.fast, easing = AnimEasing.exit))
+        }
+    }
+    return pulseAlpha.value
+}
+
 // ==================================================================
 // 节区列表
 // ==================================================================
@@ -448,7 +457,7 @@ private fun SectionsList(
     onSectionClick: (SectionInfo) -> Unit,
     listState: LazyListState,
     flashAddress: Long?,
-    flashAlpha: Float = 0f,
+    flashTrigger: Int = 0,
     modifier: Modifier = Modifier
 ) {
     if (sections.isEmpty()) {
@@ -469,7 +478,7 @@ private fun SectionsList(
     ) {
         items(items = sections, key = { it.name }) { section ->
             val isFlash = flashAddress != null && section.address == flashAddress
-            val a = if (isFlash) flashAlpha else 0f
+            val a = rememberFlashAlpha(isFlash, flashTrigger)
             SectionCard(
                 section = section,
                 onClick = { onSectionClick(section) },
@@ -655,7 +664,7 @@ private fun SymbolsList(
     onSymbolXref: (SymbolInfo) -> Unit = {},
     listState: LazyListState,
     flashAddress: Long?,
-    flashAlpha: Float = 0f,
+    flashTrigger: Int = 0,
     isFiltered: Boolean = false,
     modifier: Modifier = Modifier
 ) {
@@ -682,7 +691,7 @@ private fun SymbolsList(
             key = { index, _ -> index }
         ) { _, symbol ->
             val isFlash = flashAddress != null && symbol.address == flashAddress
-            val a = if (isFlash) flashAlpha else 0f
+            val a = rememberFlashAlpha(isFlash, flashTrigger)
             SymbolRow(
                 symbol = symbol,
                 flashBg = flashColor(a),
@@ -818,7 +827,7 @@ private fun FunctionsList(
     onFunctionXref: (FunctionInfo) -> Unit = {},
     listState: LazyListState,
     flashAddress: Long?,
-    flashAlpha: Float = 0f,
+    flashTrigger: Int = 0,
     isFiltered: Boolean = false,
     modifier: Modifier = Modifier
 ) {
@@ -844,7 +853,7 @@ private fun FunctionsList(
             key = { index, _ -> index }
         ) { _, func ->
             val isFlash = flashAddress != null && func.vaddr == flashAddress
-            val a = if (isFlash) flashAlpha else 0f
+            val a = rememberFlashAlpha(isFlash, flashTrigger)
             FunctionRow(
                 func = func,
                 flashBg = flashColor(a),

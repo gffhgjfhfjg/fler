@@ -6,7 +6,7 @@ import com.ai.fler.ui.animation.AnimEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -103,18 +104,6 @@ fun DisassemblyTab(
     val flashTrigger by viewModel.flashTrigger.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-
-    // 呼吸脉冲动画：用 Animatable 驱动 0→1→0→1→0（2 次呼吸）
-    val pulseAlpha = remember { Animatable(0f) }
-    LaunchedEffect(disassemblyData.highlightAddress, flashTrigger) {
-        if (disassemblyData.highlightAddress == null) return@LaunchedEffect
-        pulseAlpha.snapTo(0f)
-        val cycles = 2
-        for (i in 0 until cycles) {
-            pulseAlpha.animateTo(1f, tween(AnimDuration.slow, easing = AnimEasing.entry))
-            pulseAlpha.animateTo(0f, tween(AnimDuration.slow, easing = AnimEasing.entry))
-        }
-    }
 
     var inputAddress by remember { mutableStateOf("") }
     var searchQuery by remember { mutableStateOf("") }
@@ -213,7 +202,7 @@ fun DisassemblyTab(
                     highlightAddress = disassemblyData.highlightAddress,
                     patchedOffsets = patchedOffsets,
                     functionOverlay = functionOverlay,
-                    flashAlpha = pulseAlpha.value,
+                    flashTrigger = flashTrigger,
                     listState = listState,
                     onInstructionClick = { instruction ->
                         // 点击 = 编辑汇编指令
@@ -690,7 +679,7 @@ private fun DisassemblyListView(
     highlightAddress: Long?,
     patchedOffsets: Set<Long>,
     functionOverlay: Map<Long, String>,
-    flashAlpha: Float,
+    flashTrigger: Int,
     listState: LazyListState,
     onInstructionClick: (DisasmInstruction) -> Unit,
     onInstructionLongClick: (DisasmInstruction) -> Unit,
@@ -759,8 +748,8 @@ private fun DisassemblyListView(
             DisassemblyRow(
                 instruction = instruction,
                 isMatch = isMatch,
-                isFlash = flashAlpha > 0f && highlightAddress != null && instruction.address == highlightAddress,
-                flashAlpha = if (highlightAddress != null && instruction.address == highlightAddress) flashAlpha else 0f,
+                isFlash = highlightAddress != null && instruction.address == highlightAddress,
+                flashKey = flashTrigger,
                 isPatched = instruction.address in patchedOffsets,
                 onClick = { onInstructionClick(instruction) },
                 onLongClick = { onInstructionLongClick(instruction) }
@@ -1190,13 +1179,31 @@ private fun DisassemblyRow(
     instruction: DisasmInstruction,
     isMatch: Boolean,
     isFlash: Boolean,
-    flashAlpha: Float = 0f,
+    flashKey: Int,
     isPatched: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
-    // 呼吸脉冲：直接用 Animatable 输出值（Animatable 已产生平滑曲线）
-    val a = if (isFlash) flashAlpha else 0f
+    // 呼吸脉冲：只在闪烁行本地驱动动画（其余行 isFlash=false，不参与脉冲重组）
+    val pulseAlpha = remember { Animatable(0f) }
+    LaunchedEffect(isFlash, flashKey) {
+        if (!isFlash) {
+            pulseAlpha.snapTo(0f)
+            return@LaunchedEffect
+        }
+        pulseAlpha.snapTo(0f)
+        repeat(2) {
+            pulseAlpha.animateTo(1f, tween(AnimDuration.slow, easing = AnimEasing.entry))
+            pulseAlpha.animateTo(0f, tween(AnimDuration.slow, easing = AnimEasing.entry))
+        }
+    }
+    val a = pulseAlpha.value
+    // 显示字符串缓存：指令不可变，按对象缓存避免滚动/重组时重复格式化分配
+    val addressHex = remember(instruction) { "0x${instruction.address.toString(16).uppercase().padStart(8, '0')}" }
+    val bytesHex = remember(instruction) { instruction.bytes.joinToString(" ") { byte -> byte.toUByte().toString(16).uppercase().padStart(2, '0') } }
+    val mnemonicUpper = remember(instruction) { instruction.mnemonic.uppercase() }
+    val isBranch = remember(instruction) { instruction.mnemonic.startsWith("b") || instruction.mnemonic == "ret" }
+    val isCsel = remember(instruction) { instruction.mnemonic.startsWith("csel") }
     // 闪烁 > 未保存修改（红）> 搜索匹配
     val backgroundColor = when {
         isFlash -> Color(0xFFD32F2F).copy(alpha = (a * 0.85f).coerceIn(0f, 1f))
@@ -1205,80 +1212,77 @@ private fun DisassemblyRow(
         else -> Color.Transparent
     }
     val flashScale = 1f + a * 0.02f
+    // 放大效果仅作用于闪烁行，普通行不挂 graphicsLayer（省去每行图层开销）
+    val scaleModifier = if (isFlash) Modifier.graphicsLayer { scaleX = flashScale; scaleY = flashScale } else Modifier
+    // 指令行合并为单个 AnnotatedString（助记符加粗着色 + 操作数），省掉内层 Row+Spacer 的第二次测量
+    val scheme = MaterialTheme.colorScheme
+    val mnemColor = when {
+        isPatched -> scheme.error
+        isMatch -> scheme.primary
+        isBranch -> Color(0xFFFF9800)
+        isCsel -> Color(0xFF2196F3)
+        else -> scheme.onSurface
+    }
+    val opColor = when {
+        isPatched -> scheme.error
+        else -> scheme.onSurface.copy(alpha = if (isMatch) 1.0f else 0.8f)
+    }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .graphicsLayer { scaleX = flashScale; scaleY = flashScale }
+            .then(scaleModifier)
             .background(backgroundColor)
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            )
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = { onClick() },
+                    onLongPress = { onLongClick() }
+                )
+            }
             .padding(horizontal = 16.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // 地址列（8 位十六进制，紧凑）
         Text(
-            text = "0x${instruction.address.toString(16).uppercase().padStart(8, '0')}",
+            text = addressHex,
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
             color = when {
-                isPatched -> MaterialTheme.colorScheme.error
-                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                isPatched -> scheme.error
+                else -> scheme.onSurfaceVariant
             },
             modifier = Modifier.width(96.dp)
         )
 
         // 字节码列
         Text(
-            text = instruction.bytes.joinToString(" ") { byte ->
-                byte.toUByte().toString(16).uppercase().padStart(2, '0')
-            },
+            text = bytesHex,
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
-            color = when {
-                isPatched -> MaterialTheme.colorScheme.error
-                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-            },
+            color = if (isPatched) scheme.error else scheme.onSurfaceVariant.copy(alpha = 0.7f),
             modifier = Modifier.width(92.dp)
         )
 
-        // 指令列（占剩余宽度，操作数过长省略）
-        Row(
+        // 助记符列（固定通配宽度，扁平于外层 Row，省掉内层 Row 的第二次测量）
+        Text(
+            text = mnemonicUpper,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            color = mnemColor,
+            modifier = Modifier.padding(start = 12.dp)
+        )
+        // 操作数列（占剩余宽度，过长省略）
+        Text(
+            text = instruction.opStr,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = opColor,
             modifier = Modifier
-                .padding(start = 12.dp)
-                .weight(1f),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = instruction.mnemonic.uppercase(),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                color = when {
-                    isPatched -> MaterialTheme.colorScheme.error
-                    isMatch -> MaterialTheme.colorScheme.primary
-                    // 分支指令用不同颜色
-                    instruction.mnemonic.startsWith("b") || instruction.mnemonic == "ret" -> Color(0xFFFF9800)
-                    instruction.mnemonic.startsWith("csel") -> Color(0xFF2196F3)
-                    else -> MaterialTheme.colorScheme.onSurface
-                }
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = instruction.opStr,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = when {
-                    isPatched -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.onSurface.copy(
-                        alpha = if (isMatch) 1.0f else 0.8f
-                    )
-                }
-            )
-        }
+                .padding(start = 8.dp)
+                .weight(1f)
+        )
     }
 }

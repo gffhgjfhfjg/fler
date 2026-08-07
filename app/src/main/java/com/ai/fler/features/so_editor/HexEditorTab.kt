@@ -74,17 +74,6 @@ fun HexEditorTab(
     val flashOffset by viewModel.flashOffset.collectAsStateWithLifecycle()
     val flashTrigger by viewModel.flashTrigger.collectAsStateWithLifecycle()
 
-    // 呼吸脉冲动画：与汇编页一致的 2 次 0→1→0，跳转目标短暂高亮后恢复
-    val pulseAlpha = remember { Animatable(0f) }
-    LaunchedEffect(flashOffset, flashTrigger) {
-        if (flashOffset == null) return@LaunchedEffect
-        pulseAlpha.snapTo(0f)
-        repeat(2) {
-            pulseAlpha.animateTo(1f, tween(AnimDuration.fast, easing = AnimEasing.entry))
-            pulseAlpha.animateTo(0f, tween(AnimDuration.fast, easing = AnimEasing.exit))
-        }
-    }
-
     var inputOffset by remember { mutableStateOf("") }
     var selectedByteIndex by remember { mutableStateOf(-1) }
     var newByteValue by remember { mutableStateOf("") }
@@ -152,7 +141,6 @@ fun HexEditorTab(
                     patchedOffsets = patchedOffsets,
                     flashOffset = flashOffset,
                     flashTrigger = flashTrigger,
-                    flashAlpha = pulseAlpha.value,
                     onByteClick = { index ->
                         selectedByteIndex = index
                         newByteValue = ""
@@ -277,7 +265,6 @@ private fun HexDataView(
     patchedOffsets: Set<Long>,
     flashOffset: Long?,
     flashTrigger: Int,
-    flashAlpha: Float,
     onByteClick: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -303,14 +290,17 @@ private fun HexDataView(
             val endIndex = minOf(startIndex + bytesPerRow, data.size)
             val rowOffset = baseOffset + startIndex
 
+            // 切片数组缓存：data 只在翻页/补丁后替换引用，行重组时复用切片避免重复分配
+            val rowBytes = remember(data, startIndex, endIndex) { data.sliceArray(startIndex until endIndex) }
+
             HexRow(
                 rowOffset = rowOffset,
-                bytes = data.sliceArray(startIndex until endIndex),
+                bytes = rowBytes,
                 startIndex = startIndex,
                 selectedByteIndex = selectedByteIndex,
                 patchedOffsets = patchedOffsets,
                 flashOffset = flashOffset,
-                flashAlpha = flashAlpha,
+                flashTrigger = flashTrigger,
                 onByteClick = onByteClick
             )
         }
@@ -325,9 +315,32 @@ private fun HexRow(
     selectedByteIndex: Int,
     patchedOffsets: Set<Long>,
     flashOffset: Long?,
-    flashAlpha: Float,
+    flashTrigger: Int,
     onByteClick: (Int) -> Unit
 ) {
+    // 闪烁目标是否在本行：行级动画，只有命中行参与脉冲，避免全列表重组
+    val rowFlashActive = flashOffset != null &&
+        flashOffset >= rowOffset && flashOffset < rowOffset + bytes.size
+    val pulseAlpha = remember { Animatable(0f) }
+    LaunchedEffect(rowFlashActive, flashTrigger) {
+        if (!rowFlashActive) {
+            pulseAlpha.snapTo(0f)
+            return@LaunchedEffect
+        }
+        pulseAlpha.snapTo(0f)
+        repeat(2) {
+            pulseAlpha.animateTo(1f, tween(AnimDuration.fast, easing = AnimEasing.entry))
+            pulseAlpha.animateTo(0f, tween(AnimDuration.fast, easing = AnimEasing.exit))
+        }
+    }
+    val flashAlpha = pulseAlpha.value
+    // 显示字符串缓存：行重组时复用，避免重复格式化分配
+    val rowLabel = remember(rowOffset) { rowOffset.toString(16).uppercase().padStart(8, '0') }
+    val byteHexCache = remember(bytes) { bytes.map { it.toUByte().toString(16).uppercase().padStart(2, '0') } }
+    val asciiCache = remember(bytes) { bytes.map { if (it in 32..126) it.toChar().toString() else "." } }
+    val asciiJoined = remember(bytes) { asciiCache.joinToString("").padEnd(8, ' ') }
+    val scheme = MaterialTheme.colorScheme
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -336,10 +349,10 @@ private fun HexRow(
     ) {
         // 地址列 - 固定宽度，8 位十六进制 mono
         Text(
-            text = rowOffset.toString(16).uppercase().padStart(8, '0'),
+            text = rowLabel,
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.primary,
+            color = scheme.primary,
             modifier = Modifier.width(72.dp),
             maxLines = 1
         )
@@ -358,36 +371,29 @@ private fun HexRow(
                     val isPatched = rowOffset + i in patchedOffsets
                     val isFlash = rowOffset + i == flashOffset
 
+                    // 只有高亮/选中/补丁字节才需要底色与圆角裁剪，普通字节直接点击，省掉每格 clip+background
+                    val bgColor = when {
+                        isFlash -> Color(0xFFD32F2F).copy(alpha = flashAlpha)
+                        isSelected -> scheme.primary
+                        isPatched -> scheme.errorContainer.copy(alpha = 0.7f)
+                        else -> null
+                    }
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .height(22.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(
-                                when {
-                                    isFlash -> Color(0xFFD32F2F).copy(alpha = flashAlpha)
-                                    isSelected -> MaterialTheme.colorScheme.primary
-                                    isPatched -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
-                                    else -> Color.Transparent
-                                }
-                            )
+                            .then(if (bgColor != null) Modifier.clip(RoundedCornerShape(3.dp)).background(bgColor) else Modifier)
                             .clickable { onByteClick(byteIndex) },
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = byteValue.toUByte().toString(16).uppercase().padStart(2, '0'),
+                            text = byteHexCache[i],
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
                             maxLines = 1,
                             color = when {
-                                isSelected -> MaterialTheme.colorScheme.onPrimary
-                                else -> {
-                                    if (byteValue in 32..126) {
-                                        MaterialTheme.colorScheme.onSurface
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    }
-                                }
+                                isSelected -> scheme.onPrimary
+                                else -> if (byteValue in 32..126) scheme.onSurface else scheme.onSurfaceVariant
                             }
                         )
                     }
@@ -398,23 +404,16 @@ private fun HexRow(
         }
         Spacer(modifier = Modifier.width(6.dp))
 
-        // ASCII 列 - 固定宽度，每个字符与字节一一对齐
-        Row(modifier = Modifier.width(64.dp)) {
-            for (i in 0 until 8) {
-                Text(
-                    text = if (i < bytes.size) {
-                        val b = bytes[i]
-                        if (b in 32..126) b.toChar().toString() else "."
-                    } else " ",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                    textAlign = TextAlign.Center,
-                    maxLines = 1
-                )
-            }
-        }
+        // ASCII 列 - 固定宽度，单 Text 输出整行字符（省掉 8 个 Text 节点）
+        Text(
+            text = asciiJoined,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = scheme.onSurfaceVariant,
+            maxLines = 1,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.width(64.dp)
+        )
     }
 }
 

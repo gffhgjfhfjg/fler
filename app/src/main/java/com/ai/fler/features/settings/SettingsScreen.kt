@@ -31,11 +31,16 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -98,22 +103,25 @@ fun SettingsScreen(
             // 引擎包 + 引擎版本（合并为一个引擎卡片）
             item {
                 EngineVersionCard(
-                state = updateState,
-                installedVersions = installedVersions,
-                engineState = engineState,
-                onCheckForUpdates = { viewModel.checkForUpdates() },
-                onClearEngines = { viewModel.clearEngines() },
-                onStartDownload = { engineViewModel.startDownload() },
-                onDownloadUpdate = { engineViewModel.startDownload(force = true) },
-            )
-        }
+                    state = updateState,
+                    installedVersions = installedVersions,
+                    engineState = engineState,
+                    onRefreshManifest = { engineViewModel.loadManifest() },
+                    onCheckForUpdates = { viewModel.checkForUpdates() },
+                    onClearEngines = { viewModel.clearEngines() },
+                    onInstallRuntime = { engineViewModel.installRuntimeLibs() },
+                    onInstallSelected = { engineViewModel.installSelectedVersion() },
+                    onSelectVersion = { engineViewModel.selectVersion(it) },
+                    onDownloadUpdate = { engineViewModel.installRuntimeLibs(force = true) },
+                )
+            }
 
         // 下载源配置
         item {
             EngineSourceCard(
                 state = sourceState,
-                onSave = { primary, fallback, checksum, version, proxy ->
-                    viewModel.saveSourceConfig(primary, fallback, checksum, version, proxy)
+                onSave = { manifestUrl, proxy ->
+                    viewModel.saveSourceConfig(manifestUrl, proxy)
                 },
                 onReset = { viewModel.resetSourceConfig() }
             )
@@ -169,9 +177,12 @@ private fun EngineVersionCard(
     state: com.ai.fler.feature.settings.UpdateCheckState,
     installedVersions: List<String>,
     engineState: com.ai.fler.features.engine.EngineViewModel.EngineUiState,
+    onRefreshManifest: () -> Unit,
     onCheckForUpdates: () -> Unit,
     onClearEngines: () -> Unit,
-    onStartDownload: () -> Unit,
+    onInstallRuntime: () -> Unit,
+    onInstallSelected: () -> Unit,
+    onSelectVersion: (String) -> Unit,
     onDownloadUpdate: () -> Unit,
 ) {
     Card(
@@ -194,16 +205,16 @@ private fun EngineVersionCard(
                     modifier = Modifier.weight(1f)
                 )
 
-                if (state.isChecking) {
+                if (engineState.loadingManifest) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(20.dp),
                         strokeWidth = 2.dp
                     )
                 } else {
-                    IconButton(onClick = onCheckForUpdates) {
+                    IconButton(onClick = onRefreshManifest) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
-                            contentDescription = "检查更新"
+                            contentDescription = "刷新引擎清单"
                         )
                     }
                 }
@@ -268,12 +279,86 @@ private fun EngineVersionCard(
                 }
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 必装运行库状态行
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "运行库（必装）",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = if (engineState.isRuntimeReady) "已安装 libc++_shared.so" else "未安装",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (engineState.isRuntimeReady) {
+                            MaterialTheme.colorScheme.tertiary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        }
+                    )
+                }
+                if (!engineState.isRuntimeReady) {
+                    OutlinedButton(
+                        onClick = onInstallRuntime,
+                        enabled = !engineState.isDownloading,
+                    ) {
+                        Text("安装运行库")
+                    }
+                }
+            }
+
             // 自定义下载源提示
             if (engineState.isCustomSource) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = "⚠️ 当前使用自定义下载源，可能不是最新版本",
                     color = MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+
+            // 远程版本下拉
+            val manifest = engineState.manifest
+            if (manifest != null && manifest.engines.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                EngineVersionDropdown(
+                    engines = manifest.engines,
+                    installedVersions = installedVersions,
+                    selectedVersion = engineState.selectedVersion,
+                    enabled = !engineState.isDownloading,
+                    onSelect = onSelectVersion,
+                )
+
+                val selectedInstalled = engineState.selectedVersion?.let { installedVersions.contains(it) } == true
+                val canInstall = engineState.selectedVersion != null && !selectedInstalled
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = onInstallSelected,
+                    enabled = canInstall && !engineState.isDownloading,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        when {
+                            engineState.isDownloading -> "下载中..."
+                            selectedInstalled -> "已安装 Dart ${engineState.selectedVersion}"
+                            engineState.selectedVersion != null -> "下载 Dart ${engineState.selectedVersion}"
+                            else -> "请选择版本"
+                        }
+                    )
+                }
+            }
+
+            // manifest 加载失败提示
+            engineState.manifestError?.let { error ->
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "❌ 清单获取失败: $error",
+                    color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -322,18 +407,6 @@ private fun EngineVersionCard(
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
-            }
-
-            // 下载引擎包按钮
-            if (!engineState.isReady || engineState.isDownloading) {
-                Spacer(modifier = Modifier.height(12.dp))
-                Button(
-                    onClick = onStartDownload,
-                    enabled = !engineState.isDownloading,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (engineState.isDownloading) "下载中..." else "下载引擎包")
-                }
             }
 
             // 清除引擎按钮
@@ -409,7 +482,7 @@ private fun EngineVersionCard(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.size(4.dp))
-                        Text("下载更新")
+                        Text("下载更新运行库")
                     }
                 }
 
@@ -446,12 +519,115 @@ private fun EngineVersionCard(
 
             // 说明
             Text(
-                text = "引擎包包含多个Dart版本的分析引擎 + Capstone 反汇编库，约 10-14 MB。" +
-                        "首次使用需下载，后续启动自动检测就绪状态。",
+                text = "引擎包由「必装运行库 + 各 Dart 版本引擎」组成，按需下载。" +
+                        "运行库仅需安装一次；引擎按分析需要的 Dart 版本逐个下载。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EngineVersionDropdown(
+    engines: List<com.ai.fler.core.service.EngineEntry>,
+    installedVersions: List<String>,
+    selectedVersion: String?,
+    enabled: Boolean,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedInstalled = selectedVersion?.let { installedVersions.contains(it) } == true
+    val selectedEntry = engines.firstOrNull { it.dartVersion == selectedVersion }
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { if (enabled) expanded = it }
+    ) {
+        OutlinedTextField(
+            value = selectedVersion?.let { "Dart $it" } ?: "",
+            onValueChange = {},
+            readOnly = true,
+            enabled = enabled,
+            label = { Text("Dart 版本") },
+            placeholder = { Text("选择要下载的版本") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                .fillMaxWidth()
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            engines.forEach { entry ->
+                val isInstalled = installedVersions.contains(entry.dartVersion)
+                val isSelected = entry.dartVersion == selectedVersion
+                DropdownMenuItem(
+                    text = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "Dart ${entry.dartVersion}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            when {
+                                isInstalled -> {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "已安装",
+                                        tint = MaterialTheme.colorScheme.tertiary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "已安装",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.tertiary
+                                    )
+                                }
+
+                                else -> {
+                                    val mb = entry.sizeBytes / (1024.0 * 1024.0)
+                                    Text(
+                                        text = "%.1f MB".format(mb),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    onClick = {
+                        onSelect(entry.dartVersion)
+                        expanded = false
+                    }
+                )
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(4.dp))
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = when {
+                selectedInstalled -> "Dart $selectedVersion 已安装，无需下载"
+                selectedEntry != null -> "Dart $selectedVersion 尚未安装，可下载"
+                else -> "选择版本后即可下载"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = when {
+                selectedInstalled -> MaterialTheme.colorScheme.tertiary
+                selectedEntry != null -> MaterialTheme.colorScheme.onSurfaceVariant
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            }
+        )
     }
 }
 
@@ -484,15 +660,11 @@ private fun progressDetail(progress: com.ai.fler.core.service.EnginePackManager.
 @Composable
 private fun EngineSourceCard(
     state: com.ai.fler.feature.settings.EngineSourceState,
-    onSave: (String, String, String, String, String) -> Unit,
+    onSave: (String, String) -> Unit,
     onReset: () -> Unit
 ) {
     var isEditing by remember { mutableStateOf(false) }
-    var showAdvanced by remember { mutableStateOf(false) }
-    var primaryUrl by remember(state) { mutableStateOf(state.primaryUrl) }
-    var fallbackUrl by remember(state) { mutableStateOf(state.fallbackUrl) }
-    var checksumUrl by remember(state) { mutableStateOf(state.checksumUrl) }
-    var versionUrl by remember(state) { mutableStateOf(state.versionUrl) }
+    var manifestUrl by remember(state) { mutableStateOf(state.manifestUrl) }
     var githubProxy by remember(state) { mutableStateOf(state.githubProxy) }
 
     Card(
@@ -529,9 +701,9 @@ private fun EngineSourceCard(
                 // 编辑模式
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
-                        value = versionUrl,
-                        onValueChange = { versionUrl = it },
-                        label = { Text("版本信息地址 (version.json)") },
+                        value = manifestUrl,
+                        onValueChange = { manifestUrl = it },
+                        label = { Text("引擎清单地址 (manifest.json)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -543,37 +715,6 @@ private fun EngineSourceCard(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-
-                    // 高级选项（自建源用）
-                    OutlinedButton(
-                        onClick = { showAdvanced = !showAdvanced },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (showAdvanced) "隐藏高级选项" else "高级选项")
-                    }
-                    if (showAdvanced) {
-                        OutlinedTextField(
-                            value = primaryUrl,
-                            onValueChange = { primaryUrl = it },
-                            label = { Text("主下载地址 (GitHub)") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        OutlinedTextField(
-                            value = fallbackUrl,
-                            onValueChange = { fallbackUrl = it },
-                            label = { Text("备用地址 (GitHub)") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        OutlinedTextField(
-                            value = checksumUrl,
-                            onValueChange = { checksumUrl = it },
-                            label = { Text("校验地址") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -587,7 +728,7 @@ private fun EngineSourceCard(
                         }
                         Button(
                             onClick = {
-                                onSave(primaryUrl, fallbackUrl, checksumUrl, versionUrl, githubProxy)
+                                onSave(manifestUrl, githubProxy)
                                 isEditing = false
                             },
                             modifier = Modifier.weight(1f)
@@ -599,14 +740,11 @@ private fun EngineSourceCard(
             } else {
                 // 展示模式
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    SourceItem(label = "版本信息", url = state.versionUrl)
+                    SourceItem(label = "引擎清单", url = state.manifestUrl)
                     SourceItem(
                         label = "GitHub 加速",
                         url = if (state.githubProxy.isBlank()) "未启用" else state.githubProxy
                     )
-                    SourceItem(label = "主下载", url = state.primaryUrl)
-                    SourceItem(label = "备用", url = state.fallbackUrl)
-                    SourceItem(label = "校验", url = state.checksumUrl)
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
