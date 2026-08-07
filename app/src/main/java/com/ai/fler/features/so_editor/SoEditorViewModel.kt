@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ai.fler.core.analysis.AnalysisSession
 import com.ai.fler.core.analysis.AnalysisCapability
+import com.ai.fler.core.analysis.DartCallGraphBuilder
 import com.ai.fler.core.analysis.DisasmInstruction
 import com.ai.fler.core.analysis.FileInfo
 import com.ai.fler.core.analysis.FunctionInfo
@@ -15,9 +16,12 @@ import com.ai.fler.core.editor.SoEditorSessionHolder
 import com.ai.fler.core.log.AppLogger
 import com.ai.fler.core.analysis.SymbolInfo
 import com.ai.fler.core.analysis.Xref
+import com.ai.fler.core.analysis.XrefType
 import com.ai.fler.core.analysis.assembler.KeystoneAssembler
 import com.ai.fler.core.service.BackupManager
 import com.ai.fler.core.service.PatchExporter
+import com.ai.fler.data.dao.AnalysisDao
+import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.MethodLight
 import com.ai.fler.data.dao.MethodWithClass
@@ -49,6 +53,9 @@ class SoEditorViewModel @Inject constructor(
     private val soEditorCache: SoEditorCache,
     private val sessionHolder: SoEditorSessionHolder,
     private val appLogger: AppLogger,
+    private val analysisDao: AnalysisDao,
+    private val dartCallGraphDao: DartCallGraphDao,
+    private val callGraphBuilder: DartCallGraphBuilder,
 ) : ViewModel() {
 
     companion object {
@@ -125,6 +132,12 @@ class SoEditorViewModel @Inject constructor(
     // 必须声明在 init 之前：init 里 loadRecentFiles 会用到它，
     // 若放在类后面，init 执行时字段还是 null → NPE 静默吞掉，历史恢复失效
     private val recentJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
+    /** 当前 SO 对应分析 id（Dart 调用图按 analysis_id 查询）。0 = 未确定。 */
+    private var _graphAnalysisId: Long = 0L
+
+    /** Dart 方法索引（按 functionOffset 排序），供 xref 面板定位"该地址属于哪个方法"。 */
+    private var dartMethodIndex: List<MethodLight>? = null
 
     init {
         // 会话恢复：只恢复与导航参数一致的会话。
@@ -662,8 +675,10 @@ class SoEditorViewModel @Inject constructor(
         _xrefData.value = _xrefData.value.copy(address = address, isLoading = true)
         viewModelScope.launch {
             try {
-                val to = session.xrefsTo(address)
-                val from = session.xrefsFrom(address)
+                val to = session.xrefsTo(address).toMutableList()
+                val from = session.xrefsFrom(address).toMutableList()
+                // 补充 Dart 调用图（真实方法级交叉引用），只作用于 libapp 且有图数据的分析
+                supplementDartCallGraph(address, to, from)
                 // 为所有 xref 地址计算函数名（优先 Dart 标签，再查 FunctionInfo 包含关系）
                 val allXrefAddrs = mutableSetOf<Long>()
                 to.forEach { allXrefAddrs.add(it.from) }
@@ -681,6 +696,59 @@ class SoEditorViewModel @Inject constructor(
                 _xrefData.value = XrefDataState(address = address, isLoading = false)
             }
         }
+    }
+
+    /**
+     * 用 Dart 调用图（dart_call_edges）补充方法级交叉引用。
+     *
+     * 语义：仅在当前 SO 是 libapp（有 Dart 方法标签）且相应分析已建图时生效。
+     * - xrefsTo（谁引用我）：该地址所属方法的所有真实调用方（callersOfMethod）→ Xref(from=调用方函数vaddr, to=当前地址, CALL)
+     * - xrefsFrom（我引用谁）：该地址所属方法真实调用的子方法（calleesOf） → Xref(from=当前地址, to=被调vaddr, CALL)
+     * 非 Flutter / 无图数据时为空操作（不影响原生 Rizin xref）。
+     */
+    private suspend fun supplementDartCallGraph(
+        address: Long,
+        to: MutableList<Xref>,
+        from: MutableList<Xref>
+    ) {
+        val analysisId = _graphAnalysisId
+        if (analysisId <= 0 || !callGraphBuilder.isBuilt(analysisId)) return
+        val methodId = findDartMethodContaining(address)?.id ?: return
+
+        val callers = runCatching { dartCallGraphDao.callersOfMethod(analysisId, methodId, 64) }.getOrNull()
+        callers?.forEach { c ->
+            if (to.none { it.from == c.vaddr && it.to == address }) {
+                to += Xref(from = c.vaddr, to = address, type = XrefType.CALL)
+            }
+        }
+        val callees = runCatching { dartCallGraphDao.calleesOf(analysisId, methodId, 64) }.getOrNull()
+        callees?.forEach { c ->
+            if (from.none { it.from == address && it.to == c.vaddr }) {
+                from += Xref(from = address, to = c.vaddr, type = XrefType.CALL)
+            }
+        }
+    }
+
+    /** 二分查找包含指定 vaddr 的 Dart 方法；无则返回 null。索引在加载 Dart 标签时构建。 */
+    private fun findDartMethodContaining(vaddr: Long): MethodLight? {
+        val idx = dartMethodIndex ?: return null
+        if (idx.isEmpty() || vaddr <= 0) return null
+        var lo = 0
+        var hi = idx.size - 1
+        var found = -1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (idx[mid].functionOffset!! <= vaddr) { found = mid; lo = mid + 1 } else hi = mid - 1
+        }
+        if (found < 0) return null
+        for (i in found downTo 0) {
+            val m = idx[i]
+            val size = m.functionSize ?: 0
+            if (size > 0 && vaddr <= m.functionOffset!! + size) return m
+            if (size <= 0 && m.functionOffset == vaddr) return m
+            if (size > 0 && vaddr > m.functionOffset!! + size) break
+        }
+        return null
     }
 
     /**
@@ -829,6 +897,25 @@ class SoEditorViewModel @Inject constructor(
                 soEditorCache.invalidateDartLabels(soPath)
                 return
             }
+            // 记录该 SO 对应分析 id（Dart 调用图按 analysis_id 查询）并后台触发生成调用图。
+            // 非 Flutter 库上面已 return，这里只可能命中 libapp。
+            runCatching {
+                if (_graphAnalysisId <= 0) {
+                    _graphAnalysisId = analysisDao.getByLibappPath(soPath)?.id ?: 0L
+                }
+                if (_graphAnalysisId > 0) {
+                    if (dartMethodIndex == null) {
+                        dartMethodIndex = dartMethodDao.getByAnalysisIdLight(_graphAnalysisId)
+                            .sortedBy { it.functionOffset ?: 0 }
+                    }
+                    if (!callGraphBuilder.isBuilt(_graphAnalysisId)) {
+                        viewModelScope.launch {
+                            val n = callGraphBuilder.build(_graphAnalysisId)
+                            Log.i(TAG, "Dart 调用图构建完成: analysis=$_graphAnalysisId 边=$n")
+                        }
+                    }
+                }
+            }.getOrElse { Log.w(TAG, "Dart 调用图初始化失败（非关键）", it) }
             // 1) 先看跨 ViewModel 的 DartLabels 缓存（命中则跳过 DAO 查询 + 标签构建）
             val cachedLabels = soEditorCache.getDartLabels(soPath)
             // 空标签缓存视为未命中：早期 bug（functionOffset 映射失败）会缓存空结果并标记已注入，

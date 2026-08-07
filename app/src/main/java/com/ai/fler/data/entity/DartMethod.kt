@@ -30,7 +30,8 @@ import androidx.room.PrimaryKey
         Index(value = ["class_id"]),
         Index(value = ["analysis_id"]),
         Index(value = ["method_name"]),
-        Index(value = ["selector"])
+        Index(value = ["selector"]),
+        Index(value = ["analysis_id", "function_offset"])
     ]
 )
 data class DartMethod(

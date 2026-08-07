@@ -26,6 +26,10 @@ interface AnalysisDao {
     @Query("SELECT * FROM analyses WHERE id = :id")
     suspend fun getById(id: Long): Analysis?
 
+    /** 按 libapp.so 路径反查所属分析（SO 编辑器 / 调用图查询定位 analysisId）。 */
+    @Query("SELECT * FROM analyses WHERE libapp_path = :libappPath LIMIT 1")
+    suspend fun getByLibappPath(libappPath: String): Analysis?
+
     @Query("SELECT * FROM analyses WHERE project_id = :projectId ORDER BY started_at DESC")
     fun getByProjectId(projectId: Long): Flow<List<Analysis>>
 

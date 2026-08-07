@@ -157,6 +157,19 @@ interface DartMethodDao {
             "ORDER BY dm.function_offset"
     )
     suspend fun getMethodsBySoPath(soPath: String): List<MethodWithClass>
+
+    /** 分页取方法体（functionOffset + src_code），供 DartCallGraphBuilder 解析调用边。
+     * 一次只取一页避免把数万条大文本 src_code 全载入内存。 */
+    @Query(
+        "SELECT function_offset AS functionOffset, function_size AS functionSize, src_code AS srcCode " +
+            "FROM dart_methods WHERE analysis_id = :analysisId AND function_offset > 0 " +
+            "ORDER BY function_offset LIMIT :pageSize OFFSET :offset"
+    )
+    suspend fun getSrcPage(
+        analysisId: Long,
+        offset: Int,
+        pageSize: Int
+    ): List<MethodSrcRow>
 }
 
 /** 方法 + 所属类名投影。 */
@@ -180,4 +193,11 @@ data class MethodLight(
 data class ClassMethodCount(
     val classId: Long,
     val methodCount: Int,
+)
+
+/** 方法体行投影（functionOffset + src_code），供调用图构建分页拉取。 */
+data class MethodSrcRow(
+    val functionOffset: Long,
+    val functionSize: Long,
+    val srcCode: String?,
 )

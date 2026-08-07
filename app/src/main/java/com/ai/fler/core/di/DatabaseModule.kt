@@ -2,9 +2,12 @@ package com.ai.fler.core.di
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.ai.fler.data.AppDatabase
 import com.ai.fler.data.dao.AddressMappingDao
 import com.ai.fler.data.dao.AnalysisDao
+import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.LibraryDao
@@ -36,8 +39,62 @@ object DatabaseModule {
             AppDatabase::class.java,
             AppDatabase.DATABASE_NAME
         )
+            .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .fallbackToDestructiveMigration()
             .build()
+    }
+
+    /** dart_call_edges 完整建表 SQL（含外键，Room 校验要求与实体一致）。 */
+    private val CREATE_DART_CALL_EDGES =
+        "CREATE TABLE IF NOT EXISTS `dart_call_edges` (" +
+            "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+            "`analysis_id` INTEGER NOT NULL, " +
+            "`caller_method_id` INTEGER NOT NULL, " +
+            "`caller_name` TEXT NOT NULL, " +
+            "`caller_vaddr` INTEGER NOT NULL, " +
+            "`callee_method_id` INTEGER, " +
+            "`callee_name` TEXT NOT NULL, " +
+            "`callee_vaddr` INTEGER NOT NULL, " +
+            "`callee_kind` TEXT NOT NULL, " +
+            "`site_vaddr` INTEGER NOT NULL, " +
+            "FOREIGN KEY(`caller_method_id`) REFERENCES `dart_methods`(`id`) " +
+            "ON UPDATE NO ACTION ON DELETE CASCADE, " +
+            "FOREIGN KEY(`analysis_id`) REFERENCES `analyses`(`id`) " +
+            "ON UPDATE NO ACTION ON DELETE CASCADE" +
+            ")"
+
+    private val CREATE_INDEXES = listOf(
+        "CREATE INDEX IF NOT EXISTS `index_dart_call_edges_analysis_id` ON `dart_call_edges` (`analysis_id`)",
+        "CREATE INDEX IF NOT EXISTS `index_dart_call_edges_caller_method_id` ON `dart_call_edges` (`caller_method_id`)",
+        "CREATE INDEX IF NOT EXISTS `index_dart_call_edges_callee_method_id` ON `dart_call_edges` (`callee_method_id`)",
+        "CREATE INDEX IF NOT EXISTS `index_dart_call_edges_callee_vaddr` ON `dart_call_edges` (`callee_vaddr`)"
+    )
+
+    /** 3 → 4：新增 dart_edges 表（Dart 方法调用图边，真实交叉引用）。 */
+    private val MIGRATION_3_4 = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(CREATE_DART_CALL_EDGES)
+            CREATE_INDEXES.forEach { db.execSQL(it) }
+        }
+    }
+
+    /** 4 → 5：重建 dart_call_edges（早期迁移缺外键导致 Room 校验失败）。 */
+    private val MIGRATION_4_5 = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("DROP TABLE IF EXISTS `dart_call_edges`")
+            db.execSQL(CREATE_DART_CALL_EDGES)
+            CREATE_INDEXES.forEach { db.execSQL(it) }
+        }
+    }
+
+    /** 5 → 6：dart_methods 增加 (analysis_id, function_offset) 复合索引，加速调用图构建分页扫描。 */
+    private val MIGRATION_5_6 = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_dart_methods_analysis_id_function_offset` " +
+                    "ON `dart_methods` (`analysis_id`, `function_offset`)"
+            )
+        }
     }
 
     @Provides
@@ -60,4 +117,7 @@ object DatabaseModule {
 
     @Provides
     fun provideAddressMappingDao(db: AppDatabase): AddressMappingDao = db.addressMappingDao()
+
+    @Provides
+    fun provideDartCallGraphDao(db: AppDatabase): DartCallGraphDao = db.dartCallGraphDao()
 }

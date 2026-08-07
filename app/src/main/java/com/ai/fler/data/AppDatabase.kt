@@ -5,6 +5,7 @@ import androidx.room.RoomDatabase
 import androidx.room.Transaction
 import com.ai.fler.data.dao.AddressMappingDao
 import com.ai.fler.data.dao.AnalysisDao
+import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.LibraryDao
@@ -12,6 +13,7 @@ import com.ai.fler.data.dao.PpEntryDao
 import com.ai.fler.data.dao.ProjectDao
 import com.ai.fler.data.entity.AddressMapping
 import com.ai.fler.data.entity.Analysis
+import com.ai.fler.data.entity.DartCallEdge
 import com.ai.fler.data.entity.DartClass
 import com.ai.fler.data.entity.DartMethod
 import com.ai.fler.data.entity.Library
@@ -32,9 +34,10 @@ import com.ai.fler.data.entity.Project
         DartMethod::class,
         PpEntry::class,
         Library::class,
-        AddressMapping::class
+        AddressMapping::class,
+        DartCallEdge::class
     ],
-    version = 3,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -46,6 +49,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun ppEntryDao(): PpEntryDao
     abstract fun libraryDao(): LibraryDao
     abstract fun addressMappingDao(): AddressMappingDao
+
+    /** Dart 调用图边 DAO（真实交叉引用）。 */
+    abstract fun dartCallGraphDao(): DartCallGraphDao
 
     /**
      * 级联删除项目及其所有关联数据。
@@ -71,6 +77,7 @@ abstract class AppDatabase : RoomDatabase() {
 
         // 1. 删子表（按 analysis_id）
         for (analysis in analyses) {
+            dartCallGraphDao().deleteByAnalysisId(analysis.id)
             ppEntryDao().deleteByAnalysisId(analysis.id)
             dartMethodDao().deleteByAnalysisId(analysis.id)
             dartClassDao().deleteByAnalysisId(analysis.id)
@@ -106,6 +113,7 @@ abstract class AppDatabase : RoomDatabase() {
      */
     @Transaction
     open suspend fun cascadeDeleteAnalysis(analysisId: Long) {
+        dartCallGraphDao().deleteByAnalysisId(analysisId)
         ppEntryDao().deleteByAnalysisId(analysisId)
         dartMethodDao().deleteByAnalysisId(analysisId)
         dartClassDao().deleteByAnalysisId(analysisId)
