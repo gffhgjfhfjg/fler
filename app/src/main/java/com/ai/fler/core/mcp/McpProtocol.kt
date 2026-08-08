@@ -25,6 +25,7 @@ class McpProtocol(
     private val handlers: McpToolHandlers,
     private val logger: McpLogger,
     private val sessions: McpSessions,
+    private val stats: McpCallStats,
     private val resourceProvider: McpResourceProvider? = null,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -128,7 +129,8 @@ private suspend fun toolsCall(id: JsonElement?, params: JsonObject, sessionId: S
                 tool.handler(arguments)
             }
             val elapsed = System.currentTimeMillis() - start
-            logger.info("工具完成: $name 耗时=${elapsed}ms")
+            logger.logToolResult(name, "完成", elapsed, isError = false, paramsJson = arguments.toString().take(120))
+            stats.record(name, isError = false, elapsed)
             // 把工具返回的 JSON 作为 text content 回传给客户端
             val text = json.encodeToString(data)
             buildJsonObject {
@@ -145,7 +147,9 @@ private suspend fun toolsCall(id: JsonElement?, params: JsonObject, sessionId: S
                 }
             }
         } catch (e: McpToolException) {
-            logger.warn("工具调用失败: $name - ${e.message}")
+            val elapsed = System.currentTimeMillis() - start
+            logger.logToolResult(name, "失败: ${e.message}", elapsed, isError = true, paramsJson = arguments.toString().take(120))
+            stats.record(name, isError = true, elapsed)
             buildJsonObject {
                 put("jsonrpc", "2.0")
                 put("id", id ?: JsonPrimitive(0))
@@ -160,7 +164,9 @@ private suspend fun toolsCall(id: JsonElement?, params: JsonObject, sessionId: S
                 }
             }
         } catch (e: Exception) {
+            val elapsed = System.currentTimeMillis() - start
             logger.error("工具调用异常: $name - ${e.message}")
+            stats.record(name, isError = true, elapsed)
             McpErrors.errorJson(id, McpErrors.SERVER_ERROR, "工具执行异常: ${e.message}")
         }
     }

@@ -1,6 +1,7 @@
 package com.ai.fler.features.mcp
 
 import android.content.Context
+import com.ai.fler.core.mcp.McpCallStats
 import com.ai.fler.core.mcp.McpConfig
 import com.ai.fler.core.mcp.McpHttpServer
 import com.ai.fler.core.mcp.McpLogger
@@ -36,10 +37,13 @@ class McpServerManager @Inject constructor(
     private val toolHandlers: McpToolHandlers,
     private val logger: McpLogger,
     private val appLogger: AppLogger,
+    private val stats: McpCallStats,
     @ApplicationContext private val context: Context,
 ) {
     private val sessions = McpSessions()
-    private val protocol by lazy { McpProtocol(toolHandlers, logger, sessions, toolHandlers) }
+    private val protocol by lazy {
+        McpProtocol(toolHandlers, logger, sessions, stats, toolHandlers)
+    }
     private val httpServer by lazy {
         McpHttpServer(protocol, config, sessions, logger, java.io.File(context.cacheDir, "so_export"))
     }

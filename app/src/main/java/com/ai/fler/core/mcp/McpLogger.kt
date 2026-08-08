@@ -62,6 +62,34 @@ class McpLogger @Inject constructor() {
         }
     }
 
+    /**
+     * 记录一条工具调用的结果（含耗时与是否出错），供日志页展示。
+     * 与 [logRequest] 分开：前者是 HTTP 层出入请求，后者是协议层工具执行结果。
+     */
+    fun logToolResult(
+        method: String,
+        message: String,
+        durationMs: Long? = null,
+        isError: Boolean = false,
+        paramsJson: String? = null,
+        remote: String? = null,
+    ) {
+        synchronized(lock) {
+            val entry = McpLogEntry(
+                seq = seqCounter++,
+                timestamp = System.currentTimeMillis(),
+                level = if (isError) "E" else "I",
+                message = message,
+                method = method,
+                paramsJson = paramsJson,
+                remote = remote,
+                durationMs = durationMs,
+                isError = isError,
+            )
+            _entries.value = (_entries.value + entry).takeLast(MAX_ENTRIES)
+        }
+    }
+
     fun clear() {
         synchronized(lock) { _entries.value = emptyList() }
     }
@@ -83,4 +111,8 @@ data class McpLogEntry(
     val paramsJson: String? = null,
     /** 客户端地址，非请求日志为 null。 */
     val remote: String? = null,
+    /** 工具执行耗时（ms），非工具结果日志为 null。 */
+    val durationMs: Long? = null,
+    /** 工具调用是否出错（isError），非工具结果日志为 null。 */
+    val isError: Boolean? = null,
 )

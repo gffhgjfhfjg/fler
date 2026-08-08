@@ -361,14 +361,14 @@ class EngineMcpToolRegistry @Inject constructor(
         // 函数分析
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "list_functions",
-            description = "列出当前 so 的函数。Dart AOT 库（libapp.so）自动合并 Blutter 恢复的 Dart 方法（数万条，名称=ClassName.methodName，offset/vaddr/size 齐全）；普通 so 返回 Rizin aflj 结果。query 按名称子串过滤，limit 限返回条数。Dart 库上结果可能以 Dart 方法为主，Rizin 函数极少",
+            description = "列出当前 so 的函数。Dart AOT 库（libapp.so）自动合并 Blutter 恢复的 Dart 方法（数万条，名称=ClassName.methodName，offset/vaddr/size 齐全）；普通 so 返回 Rizin aflj 结果。query 按名称子串过滤，limit 限返回条数（默认 1000，防上下文爆炸）。Dart 库上结果可能以 Dart 方法为主，Rizin 函数极少",
             inputSchema = objProps(
                 "query" to strType(false, "名字模糊匹配"),
-                "limit" to intType(false, def = 5000, "返回条目上限")
+                "limit" to intType(false, def = 1000, "返回条目上限")
             )
         ) { p ->
             val q = p.str("query")?.lowercase()
-            val limit = (p.int("limit") ?: 5000).coerceAtLeast(1)
+            val limit = (p.int("limit") ?: 1000).coerceAtLeast(1)
             val rizin = session.listFunctions()
             val seen = HashSet<Long>(rizin.size + 16)
             rizin.forEach { seen.add(it.vaddr) }
@@ -493,15 +493,17 @@ class EngineMcpToolRegistry @Inject constructor(
         // 反汇编
         list += McpToolHandlers.McpTool(
             name = TOOL_PREFIX + "disassemble",
-            description = "从指定地址反汇编 N 字节（默认 4096，上限 65536）。offset 可传 vaddr 或文件偏移，自动识别（歧义时按当前引擎坐标轴归一）。返回 baseAddress/inputAddress/count/instructions，每条含 address/size/mnemonic/opStr/bytes，vaddr≠文件偏移时附 fileOffset。建议先用 find_function_at 定位函数起点再反汇编",
+            description = "从指定地址反汇编 N 字节（默认 1024，上限 65536）。offset 可传 vaddr 或文件偏移，自动识别（歧义时按当前引擎坐标轴归一）。compact=true 时省略 bytes 只回 address/mnemonic/opStr（省 token）。返回 baseAddress/inputAddress/count/instructions，每条含 address/size/mnemonic/opStr/bytes，vaddr≠文件偏移时附 fileOffset。建议先用 find_function_at 定位函数起点再反汇编",
             inputSchema = objProps(
                 "offset" to strOrLongType(true, "文件偏移或 vaddr（hex/dec），自动识别"),
-                "size" to intType(false, def = 4096, "反汇编字节数，上限 65536")
+                "size" to intType(false, def = 1024, "反汇编字节数，上限 65536"),
+                "compact" to boolType(false, def = false, "true=省略 bytes 只回 address/mnemonic/opStr（省 token）")
             )
         ) { p ->
             val raw = p.parseHexOrDec("offset") ?: throw McpToolException("offset 非法")
             val offset = normalizeForDisasm(raw)
-            val size = (p.int("size") ?: 4096).coerceIn(4, 65536)
+            val size = (p.int("size") ?: 1024).coerceIn(4, 65536)
+            val compact = p.boolean("compact") ?: false
             val soPath = session.currentFilePath()
             val insns = session.disassemble(offset, size.toLong())
             buildJsonObject {
@@ -521,9 +523,11 @@ class EngineMcpToolRegistry @Inject constructor(
                             put("size", i.size)
                             put("mnemonic", i.mnemonic)
                             put("opStr", i.opStr)
-                            put("bytes", i.bytes.joinToString(" ") { b ->
-                                b.toUByte().toString(16).padStart(2, '0')
-                            })
+                            if (!compact) {
+                                put("bytes", i.bytes.joinToString(" ") { b ->
+                                    b.toUByte().toString(16).padStart(2, '0')
+                                })
+                            }
                         }
                     }
                 }
@@ -599,7 +603,7 @@ class EngineMcpToolRegistry @Inject constructor(
             inputSchema = objProps(
                 "minLen" to intType(false, def = 4, "最小长度"),
                 "maxLen" to intType(false, def = 512, "最大长度"),
-                "limit" to intType(false, def = 2000, "返回上限"),
+                "limit" to intType(false, def = 200, "返回上限（默认 200，防上下文爆炸）"),
                 "query" to strType(false, "字符串内容过滤")
             )
         ) { p ->
@@ -609,7 +613,7 @@ class EngineMcpToolRegistry @Inject constructor(
                     maxLen = (p.int("maxLen") ?: 512).coerceAtLeast(1)
                 )
             )
-            val limit = p.int("limit") ?: 2000
+            val limit = p.int("limit") ?: 200
             val q = p.str("query")?.lowercase()
             val out = res.asSequence()
                 .filter { q == null || it.string.lowercase().contains(q) }

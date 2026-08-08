@@ -38,7 +38,7 @@ class McpProtocolTest {
         every { handlers.tools } returns tools
         coEvery { handlers.listResources() } returns emptyList()
         coEvery { handlers.readResource(any()) } returns null
-        return McpProtocol(handlers, mockk(relaxed = true), mockk(relaxed = true))
+        return McpProtocol(handlers, mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true))
     }
 
     @Test

@@ -1,0 +1,83 @@
+{
+  "name": "FLER 逆向分析速查",
+  "entries": [
+    {
+      "keys": [
+        "vaddr",
+        "虚拟地址",
+        "坐标",
+        "文件偏移",
+        "fileOffset",
+        "paddr"
+      ],
+      "content": "fler 地址有两套坐标系：vaddr（虚拟地址，方法工具的 functionOffset 恒为 vaddr）与文件偏移 fileOffset（即 paddr）。要改 so 前必须用 translate_address(soPath, address) 把 vaddr 换算成 fileOffset；歧义地址（同一数值既是某段 vaddr 又是另一段文件偏移）不能用 read_so_bytes/write_bytes，需先用 translate_address 消歧。",
+      "comment": "坐标换算",
+      "constant": false,
+      "position": 0,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "analysisId",
+        "use_analysis",
+        "分析记录",
+        "当前分析"
+      ],
+      "content": "分析对象是「分析记录」analysisId。工作流：list_analyses 拿到 id → use_analysis(analysisId) 设定当前会话 → 之后 list_classes/list_methods/get_method/search_strings/get_class/list_strings/get_method_callers/get_method_callees/get_pp_references 均可省略 analysisId 参数，大幅节省上下文。",
+      "comment": "会话粘性",
+      "constant": false,
+      "position": 1,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "analyze_method",
+        "分析方法",
+        "一站式"
+      ],
+      "content": "analyze_method 是分析单个 Dart 方法的一站式工具（替代 get_method + callers + callees + pp 四连调用），一次返回 src_code(截断) + callers + callees + ppRefs。调用图未建好时 graphBuilt=false 且 callers/callees 为空数组，可稍后重查或看 dart_call_graph_status。",
+      "comment": "聚合工具",
+      "constant": false,
+      "position": 2,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "compact",
+        "反汇编爆炸",
+        "输出超限",
+        "上下文爆"
+      ],
+      "content": "上下文保护：反汇编默认 size 已调小（disassemble_range=512，engine_disassemble=1024），只要看指令结构就开 compact=true 去掉 bytes 列。找方法用 list_methods(name=关键词) 而非 list_functions（默认 1000 条）。字符串优先 search_strings(query=…) 而非 engine_scan_strings（整文件扫描）。",
+      "comment": "上下文保护",
+      "constant": false,
+      "position": 3,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "patch",
+        "补丁",
+        "修改字节",
+        "undo_patch"
+      ],
+      "content": "补丁类工具默认关闭且破坏性。正确顺序：read_so_bytes 或 disassemble_range 确认原值 → assemble_instruction 预览机器码并获用户同意 → patch_bytes / patch_instruction 写入（可 undo_patch 回滚）→ export_patched_so 导出，从 http://<host>:<port>/export/<fileName> 下载。",
+      "comment": "补丁纪律",
+      "constant": false,
+      "position": 4,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "src_code",
+        "srcTruncated",
+        "截断"
+      ],
+      "content": "get_method / analyze_method 的 src_code 大字段默认截断（MAX_SRC 约 100k 字符）。想看全文需要 includeSrc=true（很费 token），非必要不展开。",
+      "comment": "src 截断",
+      "constant": false,
+      "position": 5,
+      "enabled": true
+    }
+  ]
+}

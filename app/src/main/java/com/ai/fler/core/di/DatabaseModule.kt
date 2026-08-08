@@ -11,6 +11,7 @@ import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.LibraryDao
+import com.ai.fler.data.dao.McpToolStatDao
 import com.ai.fler.data.dao.PpEntryDao
 import com.ai.fler.data.dao.ProjectDao
 import dagger.Module
@@ -39,7 +40,7 @@ object DatabaseModule {
             AppDatabase::class.java,
             AppDatabase.DATABASE_NAME
         )
-            .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+            .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
             .fallbackToDestructiveMigration()
             .build()
     }
@@ -111,6 +112,23 @@ object DatabaseModule {
         }
     }
 
+    /** 7 → 8：新增 mcp_tool_stats 表（MCP 工具调用统计）。 */
+    private val MIGRATION_7_8 = object : Migration(7, 8) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `mcp_tool_stats` (" +
+                    "`tool` TEXT NOT NULL, " +
+                    "`calls` INTEGER NOT NULL, " +
+                    "`errors` INTEGER NOT NULL, " +
+                    "`total_ms` INTEGER NOT NULL, " +
+                    "`max_ms` INTEGER NOT NULL, " +
+                    "`last_at` INTEGER NOT NULL, " +
+                    "PRIMARY KEY(`tool`)" +
+                    ")"
+            )
+        }
+    }
+
     @Provides
     fun provideProjectDao(db: AppDatabase): ProjectDao = db.projectDao()
 
@@ -134,4 +152,7 @@ object DatabaseModule {
 
     @Provides
     fun provideDartCallGraphDao(db: AppDatabase): DartCallGraphDao = db.dartCallGraphDao()
+
+    @Provides
+    fun provideMcpToolStatDao(db: AppDatabase): McpToolStatDao = db.mcpToolStatDao()
 }

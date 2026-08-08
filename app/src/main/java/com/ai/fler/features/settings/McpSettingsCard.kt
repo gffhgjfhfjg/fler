@@ -215,22 +215,29 @@ fun McpSettingsCard(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // 启停按钮
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // 启停按钮（等宽铺满一行，避免窄屏被挤到换行）
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 OutlinedButton(
                     onClick = onStart,
-                    enabled = !state.isRunning
-                ) { Text("启动") }
+                    enabled = !state.isRunning,
+                    modifier = Modifier.weight(1f)
+                ) { Text("启动", maxLines = 1) }
                 OutlinedButton(
                     onClick = onStop,
-                    enabled = state.isRunning
-                ) { Text("停止") }
+                    enabled = state.isRunning,
+                    modifier = Modifier.weight(1f)
+                ) { Text("停止", maxLines = 1) }
                 OutlinedButton(
-                    onClick = onOpenLog
-                ) { Text("查看日志") }
+                    onClick = onOpenLog,
+                    modifier = Modifier.weight(1f)
+                ) { Text("查看日志", maxLines = 1) }
                 OutlinedButton(
-                    onClick = onOpenTools
-                ) { Text("工具列表") }
+                    onClick = onOpenTools,
+                    modifier = Modifier.weight(1f)
+                ) { Text("工具列表", maxLines = 1) }
             }
         }
     }

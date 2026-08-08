@@ -34,6 +34,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ai.fler.core.mcp.McpToolHandlers
 import com.ai.fler.feature.settings.SettingsViewModel
+import com.ai.fler.ui.components.CardListTile
 
 /**
  * MCP 服务器配置页（二级 Screen，从设置页进入）。
@@ -45,6 +46,7 @@ import com.ai.fler.feature.settings.SettingsViewModel
 fun McpSettingsScreen(
     onBack: () -> Unit = {},
     onOpenLog: () -> Unit = {},
+    onOpenStats: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val mcpState by viewModel.mcpState.collectAsStateWithLifecycle()
@@ -98,6 +100,14 @@ fun McpSettingsScreen(
                     onStop = { viewModel.mcpStopServer() },
                     onOpenLog = onOpenLog,
                     onOpenTools = { showToolsDialog = true },
+                )
+            }
+
+            item {
+                CardListTile(
+                    title = "MCP 调用统计",
+                    subtitle = "工具调用次数 · 错误 · 耗时（本地持久化）",
+                    onClick = onOpenStats,
                 )
             }
         }

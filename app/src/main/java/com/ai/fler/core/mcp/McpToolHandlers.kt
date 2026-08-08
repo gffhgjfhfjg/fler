@@ -122,6 +122,34 @@ class McpToolHandlers @Inject constructor(
         callGraphBuilder.ensureAsync(analysisId)
     }
 
+    // ========== 会话级「当前分析」（use_analysis 设定的默认 analysisId） ==========
+
+    /** 每个 MCP 会话记住其当前分析；无会话头（原子 HTTP POST）用 _default。 */
+    private val sessionDefaultAnalysis = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private suspend fun sessionKey(): String =
+        McpRequestContext.current()?.sessionId ?: "_default"
+
+    /** 当前会话设定的默认 analysisId（未设置返回 null）。 */
+    private suspend fun currentDefaultAnalysis(): Long? {
+        val id = sessionDefaultAnalysis[sessionKey()] ?: return null
+        // 行可能已被删除：失效兜底
+        return if (cachedAnalysis(id) != null) id else null
+    }
+
+    /**
+     * 统一解析 analysisId：显式参数优先，其次回退会话当前分析（use_analysis 设定）。
+     * 都没有则抛清晰错误，引导先 use_analysis。
+     */
+    private suspend fun resolveAnalysisId(p: JsonObject, toolName: String): Long {
+        p.long("analysisId")?.let { return it }
+        currentDefaultAnalysis()?.let { return it }
+        throw McpToolException(
+            "$toolName: 缺少 analysisId。请先调用 use_analysis(analysisId) 设置当前会话的分析，" +
+                "或在参数里显式传 analysisId"
+        )
+    }
+
     val tools: Map<String, McpTool> = buildMap {
         buildList {
             addAll(buildAnalysisTools())
@@ -176,7 +204,7 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID，来自 list_analyses") }
                 }
                 putJsonArray("required") { add("analysisId") }
             }
@@ -207,6 +235,33 @@ class McpToolHandlers @Inject constructor(
             }
         },
         McpTool(
+            name = "use_analysis",
+            description = "把某次分析设为当前会话的默认分析（use_analysis(analysisId)）。设置后，后续 list_classes/list_methods/get_method/get_pp_entry/search_strings/get_method_callers/callees/get_pp_references 等工具可省略 analysisId，自动回退到当前分析。反复调用可切换。返回已选分析概要",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID，来自 list_analyses") }
+                }
+                putJsonArray("required") { add("analysisId") }
+            }
+        ) { p ->
+            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失或非法")
+            val a = cachedAnalysis(id) ?: return@McpTool buildJsonObject {
+                put("ok", false)
+                put("analysisId", id)
+                put("reason", "分析不存在，请用 list_analyses 获取有效 id")
+            }
+            sessionDefaultAnalysis[sessionKey()] = id
+            buildJsonObject {
+                put("ok", true)
+                put("analysisId", id)
+                put("libappPath", a.libappPath ?: "")
+                put("classesCount", a.classesCount)
+                put("methodsCount", a.methodsCount)
+                put("ppEntriesCount", a.ppEntriesCount)
+            }
+        },
+        McpTool(
             name = "list_projects",
             description = "列出所有被分析的项目：id/名称/apk 路径/dartVersion/引擎版本/状态/更新时间。项目是分析的容器，每次 Blutter 分析属于某个项目",
             inputSchema = buildJsonObject { put("type", "object"); put("properties", buildJsonObject {}) }
@@ -234,7 +289,7 @@ class McpToolHandlers @Inject constructor(
             description = "获取项目详情与该项目下的全部分析记录（含各分析 id/计数/状态）。项目 id 来自 list_projects",
             inputSchema = buildJsonObject {
                 put("type", "object")
-                putJsonObject("properties") { putJsonObject("projectId") { put("type", "integer") } }
+                putJsonObject("properties") { putJsonObject("projectId") { put("type", "integer"); put("description", "项目 ID，来自 list_projects") } }
                 putJsonArray("required") { add("projectId") }
             }
         ) { p ->
@@ -274,14 +329,13 @@ class McpToolHandlers @Inject constructor(
     private fun buildBrowseTools(): List<McpTool> = listOf(
         McpTool(
             name = "list_classes",
-            description = "列出某次分析（analysisId 必填）的全部 Dart 类：id/className/superClass/方法数。Dart 类层级是 Blutter 恢复的 Dart 语义结构（区别于 ELF 符号）",
+            description = "列出某次分析的全部 Dart 类：id/className/superClass/方法数。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。Dart 类层级是 Blutter 恢复的 Dart 语义结构（区别于 ELF 符号）",
             inputSchema = buildJsonObject {
                 put("type", "object")
-                putJsonObject("properties") { putJsonObject("analysisId") { put("type", "integer") } }
-                putJsonArray("required") { add("analysisId") }
+                putJsonObject("properties") { putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") } }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失或非法")
+            val id = resolveAnalysisId(p, "list_classes")
             val classes = dartClassDao.getByAnalysisIdList(id)
             // SQL 下推：方法数在 DB 侧 GROUP BY 统计，避免全量载入方法表
             val methodCounts = dartMethodDao.countMethodsGroupedByClass(id)
@@ -299,20 +353,19 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_methods",
-            description = "分页列出某次分析（analysisId 必填）的 Dart 方法；可按 classId/名称过滤。返回方法 id/className/methodName/functionOffset（vaddr）/fileOffset（若 vaddr≠文件偏移则换算）/functionSize。functionOffset 恒为 vaddr，作反汇编偏移时需经 translate_address 或 fileOffset 字段。分页默认 page=1 / pageSize=200（上限 1000）",
+            description = "分页列出某次分析的 Dart 方法；可按 classId/名称过滤。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。返回方法 id/className/methodName/functionOffset（vaddr）/fileOffset（若 vaddr≠文件偏移则换算）/functionSize。functionOffset 恒为 vaddr，作反汇编偏移时需经 translate_address 或 fileOffset 字段。分页默认 page=1 / pageSize=200（上限 1000）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("classId") { put("type", "integer") }
-                    putJsonObject("name") { put("type", "string") }
-                    putJsonObject("page") { put("type", "integer") }
-                    putJsonObject("pageSize") { put("type", "integer") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("classId") { put("type", "integer"); put("description", "类 ID（可选），只列出该类的方法") }
+                    putJsonObject("name") { put("type", "string"); put("description", "方法名子串（可选），模糊过滤") }
+                    putJsonObject("page") { put("type", "integer"); put("description", "页码，从 1 开始（默认 1）") }
+                    putJsonObject("pageSize") { put("type", "integer"); put("description", "每页条数 1..1000（默认 200）") }
                 }
-                putJsonArray("required") { add("analysisId") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失或非法")
+            val id = resolveAnalysisId(p, "list_methods")
             val classId = p.long("classId")
             val name = p.str("name")
             val page = (p.int("page") ?: 1).coerceAtLeast(1)
@@ -346,19 +399,18 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_method",
-            description = "获取单个 Dart 方法详情与 Blutter 反汇编伪代码（src_code 大字段默认截断，includeSrc=true 返回完整）。用 methodId 或 name 定位；methodId 来自 list_methods。src_code 为 Blutter 恢复的反汇编，适合读业务逻辑/关键算法",
+            description = "获取单个 Dart 方法详情与 Blutter 反汇编伪代码（src_code 大字段默认截断，includeSrc=true 返回完整）。用 methodId 或 name 定位；methodId 来自 list_methods。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。src_code 为 Blutter 恢复的反汇编，适合读业务逻辑/关键算法",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("methodId") { put("type", "integer") }
-                    putJsonObject("name") { put("type", "string") }
-                    putJsonObject("includeSrc") { put("type", "boolean") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("methodId") { put("type", "integer"); put("description", "方法 ID（来自 list_methods）；与 name 二选一") }
+                    putJsonObject("name") { put("type", "string"); put("description", "方法名精确匹配（如 UserHome._fetchList）；与 methodId 二选一") }
+                    putJsonObject("includeSrc") { put("type", "boolean"); put("description", "true=返回完整 src_code（默认截断）") }
                 }
-                putJsonArray("required") { add("analysisId") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失或非法")
+            val id = resolveAnalysisId(p, "get_method")
             val methodId = p.long("methodId")
             val name = p.str("name")
             val full = p.str("includeSrc") == "true"
@@ -388,18 +440,18 @@ class McpToolHandlers @Inject constructor(
             }
         },
         McpTool(
-            name = "get_pp_entry",
-            description = "按 pp 偏移（vmOffset）查 Dart 对象池条目：type/description（可读描述）/fileOffset/引用它的方法数。pp 对象池是 Dart AOT 的数据区，ppOffset 常出现在 get_pp_references 或方法 src_code 的 [pp+0x..] 中。ppOffset 支持十进制或 0x 十六进制",
+name = "get_pp_entry",
+            description = "按 pp 偏移（vmOffset）查 Dart 对象池条目：type/description（可读描述）/fileOffset/引用它的方法数。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。pp 对象池是 Dart AOT 的数据区，ppOffset 常出现在 get_pp_references 或方法 src_code 的 [pp+0x..] 中。ppOffset 支持十进制或 0x 十六进制",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("ppOffset") { put("type", "integer") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("ppOffset") { put("type", "integer"); put("description", "对象池偏移 vmOffset，hex（0x..）或十进制") }
                 }
-                putJsonArray("required") { add("analysisId"); add("ppOffset") }
+                putJsonArray("required") { add("ppOffset") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
+            val id = resolveAnalysisId(p, "get_pp_entry")
             val off = p.long("ppOffset") ?: throw McpToolException("ppOffset 缺失")
             val rows = ppEntryDao.getPpByVmOffset(id, off)
             buildJsonObject {
@@ -419,18 +471,18 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "search_strings",
-            description = "在某次分析的字符串常量中搜索子串（query 必填，不区分大小写）。返回 ppOffset/description/fileOffset。用于按关键词定位 Dart 字符串及其文件位置（如渠道、URL、错误提示）。注意：部分大 Flutter 包的对象池未含 String 类型条目，此时返回 0 属正常，可改查 engine_scan_strings",
+            description = "在某次分析的字符串常量中搜索子串（query 必填，不区分大小写）。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。返回 ppOffset/description/fileOffset。用于按关键词定位 Dart 字符串及其文件位置（如渠道、URL、错误提示）。注意：部分大 Flutter 包的对象池未含 String 类型条目，此时返回 0 属正常，可改查 engine_scan_strings",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("query") { put("type", "string") }
-                    putJsonObject("limit") { put("type", "integer") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("query") { put("type", "string"); put("description", "搜索关键词，不区分大小写") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "返回上限 1..500（默认 100）") }
                 }
-                putJsonArray("required") { add("analysisId"); add("query") }
+                putJsonArray("required") { add("query") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
+            val id = resolveAnalysisId(p, "search_strings")
             val q = p.str("query") ?: throw McpToolException("query 缺失")
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
             val rows = ppEntryDao.searchStrings(id, q, limit)
@@ -450,18 +502,17 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_class",
-            description = "获取某个 Dart 类详情（classId 或 className 二选一，分析 id 必填）：superClass + 该类全部方法（methodName/functionOffset/fileOffset/size）。用于按类梳理业务方法面",
+            description = "获取某个 Dart 类详情（classId 或 className 二选一）：superClass + 该类全部方法（methodName/functionOffset/fileOffset/size）。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。用于按类梳理业务方法面",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("classId") { put("type", "integer") }
-                    putJsonObject("className") { put("type", "string") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("classId") { put("type", "integer"); put("description", "类 ID（与 className 二选一）") }
+                    putJsonObject("className") { put("type", "string"); put("description", "类名（与 classId 二选一，如 UserHome）") }
                 }
-                putJsonArray("required") { add("analysisId") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失或非法")
+            val id = resolveAnalysisId(p, "get_class")
             val classId = p.long("classId")
             val className = p.str("className")
             val cls = dartClassDao.getByAnalysisIdList(id).firstOrNull {
@@ -491,18 +542,17 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "list_strings",
-            description = "分页列出某次分析的全部字符串常量（SQL 下推）：ppOffset/description/fileOffset。数据量大（数万条）请用 search_strings 按关键词定位，或用本工具分页浏览。分页默认 page=1 / pageSize=200（上限 1000）。注意：部分大 Flutter 包无 String 类型条目时 total=0 属正常",
+            description = "分页列出某次分析的全部字符串常量（SQL 下推）：ppOffset/description/fileOffset。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。数据量大（数万条）请用 search_strings 按关键词定位，或用本工具分页浏览。分页默认 page=1 / pageSize=200（上限 1000）。注意：部分大 Flutter 包无 String 类型条目时 total=0 属正常",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("page") { put("type", "integer") }
-                    putJsonObject("pageSize") { put("type", "integer") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("page") { put("type", "integer"); put("description", "页码，从 1 开始（默认 1）") }
+                    putJsonObject("pageSize") { put("type", "integer"); put("description", "每页条数 1..1000（默认 200）") }
                 }
-                putJsonArray("required") { add("analysisId") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
+            val id = resolveAnalysisId(p, "list_strings")
             val page = (p.int("page") ?: 1).coerceAtLeast(1)
             val pageSize = (p.int("pageSize") ?: 200).coerceIn(1, 1000)
             // SQL 下推：只取当前页数据，避免全表载入内存（大 SO 的字符串可达数万条）
@@ -527,18 +577,18 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_method_callers",
-            description = "反查哪些 Dart 方法调用了目标方法（methodName 为被调方法名子串，不区分大小写，基于真实调用图 dart_call_edges）。返回调用方 name=类.方法 / callerVaddr / callTargetVaddr / siteVaddr，附 graphBuilt/edgeCount/isBuilding。适合从被调方法向上找真实调用链。analysisId 无效时返回 analysisExists=false；图未就绪时返回 graphBuilt=false + isBuilding，请稍后重查",
+            description = "反查哪些 Dart 方法调用了目标方法（methodName 为被调方法名子串，不区分大小写，基于真实调用图 dart_call_edges）。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。返回调用方 name=类.方法 / callerVaddr / callTargetVaddr / siteVaddr，附 graphBuilt/edgeCount/isBuilding。适合从被调方法向上找真实调用链。analysisId 无效时返回 analysisExists=false；图未就绪时返回 graphBuilt=false + isBuilding，请稍后重查",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("methodName") { put("type", "string") }
-                    putJsonObject("limit") { put("type", "integer") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("methodName") { put("type", "string"); put("description", "被调方法名子串，不区分大小写（如 _fetchList）") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "返回上限 1..500（默认 100）") }
                 }
-                putJsonArray("required") { add("analysisId"); add("methodName") }
+                putJsonArray("required") { add("methodName") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
+            val id = resolveAnalysisId(p, "get_method_callers")
             val name = p.str("methodName") ?: throw McpToolException("methodName 缺失")
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
             ensureGraph(id)
@@ -585,19 +635,18 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_method_callees",
-            description = "列出某 Dart 方法内部真实调用的子方法（基于调用图 dart_call_edges）。methodId 或 methodName 二选一（methodName 为精确匹配，如 UserHome._fetchList）。返回被调 name/类名/calleeVaddr/调用类型（DIRECT_CALL/DIRECT_BRANCH），附 graphBuilt/edgeCount/isBuilding。analysisId 无效时返回 analysisExists=false；图未就绪时返回 graphBuilt=false + isBuilding，请稍后重查",
+            description = "列出某 Dart 方法内部真实调用的子方法（基于调用图 dart_call_edges）。methodId 或 methodName 二选一（methodName 为精确匹配，如 UserHome._fetchList）。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。返回被调 name/类名/calleeVaddr/调用类型（DIRECT_CALL/DIRECT_BRANCH），附 graphBuilt/edgeCount/isBuilding。analysisId 无效时返回 analysisExists=false；图未就绪时返回 graphBuilt=false + isBuilding，请稍后重查",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("methodId") { put("type", "integer") }
-                    putJsonObject("methodName") { put("type", "string") }
-                    putJsonObject("limit") { put("type", "integer") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("methodId") { put("type", "integer"); put("description", "方法 ID（来自 list_methods）；与 methodName 二选一") }
+                    putJsonObject("methodName") { put("type", "string"); put("description", "方法名精确匹配（如 UserHome._fetchList）；与 methodId 二选一") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "返回上限 1..500（默认 100）") }
                 }
-                putJsonArray("required") { add("analysisId") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
+            val id = resolveAnalysisId(p, "get_method_callees")
             val methodId = p.long("methodId")
             val methodName = p.str("methodName")
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
@@ -649,16 +698,15 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "dart_call_graph_status",
-            description = "查询某次分析 Dart 调用图（真实交叉引用）的构建状态：built=是否已建完（含 0 边情形）、edgeCount=边数、building=是否正在后台构建。用于确认建图是否完成 / 何时可查 get_method_callers/get_method_callees",
+            description = "查询某次分析 Dart 调用图（真实交叉引用）的构建状态：built=是否已建完（含 0 边情形）、edgeCount=边数、building=是否正在后台构建。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。用于确认建图是否完成 / 何时可查 get_method_callers/get_method_callees",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
                 }
-                putJsonArray("required") { add("analysisId") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
+            val id = resolveAnalysisId(p, "dart_call_graph_status")
             currentProgress().report(0.2f, "查询调用图构建状态")
             val count = dartCallGraphDao.countByAnalysisId(id)
             buildJsonObject {
@@ -671,18 +719,18 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "get_pp_references",
-            description = "反查哪些 Dart 方法在 src_code 中引用了指定 pp 偏移（自动拼 [pp+0x..] 匹配）。返回引用方法 id/className/methodName/functionOffset/fileOffset + target 串。用于从对象池数据追到使用方",
+            description = "反查哪些 Dart 方法在 src_code 中引用了指定 pp 偏移（自动拼 [pp+0x..] 匹配）。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。返回引用方法 id/className/methodName/functionOffset/fileOffset + target 串。用于从对象池数据追到使用方",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("analysisId") { put("type", "integer") }
-                    putJsonObject("ppOffset") { put("type", "integer") }
-                    putJsonObject("limit") { put("type", "integer") }
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("ppOffset") { put("type", "integer"); put("description", "对象池偏移 vmOffset，hex（0x..）或十进制") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "返回上限 1..500（默认 100）") }
                 }
-                putJsonArray("required") { add("analysisId"); add("ppOffset") }
+                putJsonArray("required") { add("ppOffset") }
             }
         ) { p ->
-            val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
+            val id = resolveAnalysisId(p, "get_pp_references")
             val off = p.long("ppOffset") ?: throw McpToolException("ppOffset 缺失")
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
             val target = "[pp+0x" + off.toString(16) + "]"
@@ -705,6 +753,109 @@ class McpToolHandlers @Inject constructor(
                 }
             }
         },
+        McpTool(
+            name = "analyze_method",
+            description = "一站式分析单个 Dart 方法：一次返回方法详情（src_code 截断）+ 调用方 callers + 被调 callees + PP 引用 + 关键字符串，替代 get_method + get_method_callers + get_method_callees + get_pp_references 多连调用。用 methodId 或 methodName 定位（methodName 为精确匹配，如 UserHome._fetchList）。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。图未就绪时 graphBuilt=false 且 callers/callees 为空数组，请稍后重查",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("methodId") { put("type", "integer"); put("description", "方法 ID（来自 list_methods）；与 methodName 二选一") }
+                    putJsonObject("methodName") { put("type", "string"); put("description", "方法名精确匹配（如 UserHome._fetchList）；与 methodId 二选一") }
+                    putJsonObject("includeSrc") { put("type", "boolean"); put("description", "true=返回完整 src_code（默认截断）") }
+                    putJsonObject("callerLimit") { put("type", "integer"); put("description", "callers/callees 返回上限 1..50（默认 10）") }
+                }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "analyze_method")
+            val methodId = p.long("methodId")
+            val name = p.str("methodName")
+            val full = p.str("includeSrc") == "true"
+            val edgeLimit = (p.int("callerLimit") ?: 10).coerceIn(1, 50)
+
+            val match = when {
+                methodId != null -> dartMethodDao.getMethodWithClassById(methodId)
+                name != null -> dartMethodDao.getMethodWithClassByName(id, name)
+                    ?: dartMethodDao.searchMethodsWithClass(id, name, null, 1, 0).firstOrNull()
+                else -> null
+            } ?: return@McpTool buildJsonObject { put("found", false) }
+
+            val m = match.method
+            val src = m.srcCode ?: ""
+            val capped = if (!full && src.length > MAX_SRC) src.take(MAX_SRC) else src
+            val soPath = libAppPath(id)
+            val graphBuilt = callGraphBuilder.isBuilt(id)
+            val edgeCount = callGraphBuilder.edgeCount(id)
+            val isBuilding = callGraphBuilder.isBuilding(id)
+
+            // 图未就绪时静默触发建图，但本次不阻塞等待
+            if (!graphBuilt) ensureGraph(id)
+
+            // 只取 src 中确实出现的 [pp+0x..] 偏移，避免全库模糊匹配
+            val ppOffsets = Regex("\\[pp\\+0x([0-9a-fA-F]+)\\]")
+                .findAll(capped)
+                .mapNotNull { it.groupValues[1].toLongOrNull(16) }
+                .distinct()
+                .take(10)
+                .toList()
+            val ppRefs = ArrayList<Pair<String, String>>(ppOffsets.size)
+            for (off in ppOffsets) {
+                val e = ppEntryDao.getPpByVmOffset(id, off).firstOrNull()
+                ppRefs.add(off.toString(16) to (e?.description?.take(80) ?: ""))
+            }
+
+            // callers/callees 在挂起点计算，避免在 lambda 内调 suspend
+            val callerList = if (graphBuilt) {
+                callGraphBuilder.findCallersByName(id, m.methodName, edgeLimit)
+                    ?.callers?.take(edgeLimit).orEmpty()
+            } else emptyList()
+            val calleeList = if (graphBuilt) dartCallGraphDao.calleesOf(id, m.id, edgeLimit) else emptyList()
+
+            buildJsonObject {
+                put("found", true)
+                put("id", m.id)
+                put("classId", m.classId)
+                put("className", match._className)
+                put("methodName", m.methodName)
+                put("functionOffset", m.functionOffset ?: 0)
+                fileOffsetOf(soPath, m.functionOffset ?: 0)?.let { put("fileOffset", it) }
+                put("functionSize", m.functionSize ?: 0)
+                put("srcTruncated", !full && src.length > MAX_SRC)
+                put("srcCode", capped)
+                put("graphSource", "DART_CALL_GRAPH")
+                put("graphBuilt", graphBuilt)
+                put("edgeCount", edgeCount)
+                put("isBuilding", isBuilding)
+                if (graphBuilt) {
+                    putJsonArray("callers") {
+                        callerList.forEach { c ->
+                            addJsonObject {
+                                put("caller", c.name)
+                                put("callerVaddr", c.vaddr)
+                                put("siteVaddr", c.siteVaddr)
+                            }
+                        }
+                    }
+                    putJsonArray("callees") {
+                        calleeList.forEach { c ->
+                            addJsonObject {
+                                put("callee", c.name)
+                                put("calleeVaddr", c.vaddr)
+                                put("kind", c.kind)
+                            }
+                        }
+                    }
+                }
+                putJsonArray("ppRefs") {
+                    ppRefs.forEach { (off, desc) ->
+                        addJsonObject {
+                            put("ppOffset", "0x$off")
+                            put("description", desc)
+                        }
+                    }
+                }
+            }
+        },
     )
 
     // ========== 反汇编 / ELF / 地址工具 ==========
@@ -712,20 +863,22 @@ class McpToolHandlers @Inject constructor(
     private fun buildDisasmTools(): List<McpTool> = listOf(
         McpTool(
             name = "disassemble_range",
-            description = "用 Capstone 反汇编 so 文件指定【文件偏移】范围的 ARM64 代码（独立于分析会话，给定 soPath 即可）。offset 为文件偏移（非 vaddr）；不可解码字显示为 .word，结果不截断。返回 baseAddress/count/instructions（address/size/mnemonic/opStr/bytes）",
+            description = "用 Capstone 反汇编 so 文件指定【文件偏移】范围的 ARM64 代码（独立于分析会话，给定 soPath 即可）。offset 为文件偏移（非 vaddr）；不可解码字显示为 .word。默认 size=512（防上下文爆炸）；compact=true 时省略 bytes 只回 address/mnemonic/opStr。返回 baseAddress/count/instructions（address/size/mnemonic/opStr/bytes）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("soPath") { put("type", "string") }
-                    putJsonObject("offset") { put("type", "integer") }
-                    putJsonObject("size") { put("type", "integer") }
+                    putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") }
+                    putJsonObject("offset") { put("type", "integer"); put("description", "文件偏移（非 vaddr）") }
+                    putJsonObject("size") { put("type", "integer"); put("description", "反汇编字节数 4..65536（默认 512）") }
+                    putJsonObject("compact") { put("type", "boolean"); put("description", "true=省略 bytes 只回 address/mnemonic/opStr（省 token）") }
                 }
                 putJsonArray("required") { add("soPath"); add("offset") }
             }
         ) { p ->
             val so = p.str("soPath") ?: throw McpToolException("soPath 缺失")
             val offset = p.long("offset") ?: throw McpToolException("offset 缺失")
-            val size = (p.long("size") ?: 4096L).coerceIn(4, 65536)
+            val size = (p.long("size") ?: 512L).coerceIn(4, 65536)
+            val compact = p.str("compact") == "true"
             val bytes = readFileBytes(so, offset, size)
             if (bytes.isEmpty()) return@McpTool buildJsonObject { put("empty", true); put("reason", "偏移越界或文件不可读") }
             val insns = CapstoneBindings.disassembleWithCapstone(bytes, offset)
@@ -740,7 +893,9 @@ class McpToolHandlers @Inject constructor(
                             put("size", it.size)
                             put("mnemonic", it.mnemonic)
                             put("opStr", it.opStr)
-                            put("bytes", it.bytes.joinToString(" ") { b -> b.toUByte().toString(16).uppercase().padStart(2, '0') })
+                            if (!compact) {
+                                put("bytes", it.bytes.joinToString(" ") { b -> b.toUByte().toString(16).uppercase().padStart(2, '0') })
+                            }
                         }
                     }
                 }
@@ -751,7 +906,7 @@ class McpToolHandlers @Inject constructor(
             description = "列出 so 文件的 ELF 节头（独立于会话，给定 soPath 即可）：name/type/address(vaddr)/offset(文件偏移)/size/flags。address 与 offset 的差即该节的 vaddr 偏差",
             inputSchema = buildJsonObject {
                 put("type", "object")
-                putJsonObject("properties") { putJsonObject("soPath") { put("type", "string") } }
+                putJsonObject("properties") { putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") } }
                 putJsonArray("required") { add("soPath") }
             }
         ) { p ->
@@ -779,8 +934,8 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("soPath") { put("type", "string") }
-                    putJsonObject("dynamic") { put("type", "boolean") }
+                    putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") }
+                    putJsonObject("dynamic") { put("type", "boolean"); put("description", "true=动态符号表（默认）；false=取 .symtab") }
                 }
                 putJsonArray("required") { add("soPath") }
             }
@@ -809,8 +964,8 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("soPath") { put("type", "string") }
-                    putJsonObject("name") { put("type", "string") }
+                    putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") }
+                    putJsonObject("name") { put("type", "string"); put("description", "符号名（精确匹配）") }
                 }
                 putJsonArray("required") { add("soPath"); add("name") }
             }
@@ -833,8 +988,8 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("soPath") { put("type", "string") }
-                    putJsonObject("address") { put("type", "integer") }
+                    putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") }
+                    putJsonObject("address") { put("type", "integer"); put("description", "十进制或 0x 十六进制地址值") }
                 }
                 putJsonArray("required") { add("soPath"); add("address") }
             }
@@ -864,8 +1019,8 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("assembly") { put("type", "string") }
-                    putJsonObject("address") { put("type", "integer") }
+                    putJsonObject("assembly") { put("type", "string"); put("description", "ARM64 指令，如 MOV W0, #1 / BL #0x4000") }
+                    putJsonObject("address") { put("type", "integer"); put("description", "指令所在地址（PC 相对分支需要，可选）") }
                 }
                 putJsonArray("required") { add("assembly") }
             }
@@ -892,9 +1047,9 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("soPath") { put("type", "string") }
-                    putJsonObject("offset") { put("type", "integer") }
-                    putJsonObject("size") { put("type", "integer") }
+                    putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") }
+                    putJsonObject("offset") { put("type", "integer"); put("description", "文件偏移（非 vaddr）") }
+                    putJsonObject("size") { put("type", "integer"); put("description", "字节数 1..65536（默认 256）") }
                 }
                 putJsonArray("required") { add("soPath"); add("offset") }
             }
@@ -918,9 +1073,9 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("soPath") { put("type", "string") }
-                    putJsonObject("query") { put("type", "string") }
-                    putJsonObject("limit") { put("type", "integer") }
+                    putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") }
+                    putJsonObject("query") { put("type", "string"); put("description", "符号名子串，不区分大小写") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "返回上限 1..1000（默认 100）") }
                 }
                 putJsonArray("required") { add("soPath"); add("query") }
             }
@@ -957,9 +1112,9 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("soPath") { put("type", "string" ) }
-                    putJsonObject("offset") { put("type", "integer") }
-                    putJsonObject("assembly") { put("type", "string") }
+                    putJsonObject("soPath") { put("type", "string" ); put("description", "so 文件绝对路径") }
+                    putJsonObject("offset") { put("type", "integer"); put("description", "文件偏移") }
+                    putJsonObject("assembly") { put("type", "string"); put("description", "ARM64 指令，如 NOP / MOV X0, #0") }
                 }
                 putJsonArray("required") { add("soPath"); add("offset"); add("assembly") }
             }
@@ -984,7 +1139,7 @@ class McpToolHandlers @Inject constructor(
             description = "撤销该 so 最近一次补丁，恢复原字节（默认关闭；需先启用补丁）",
             inputSchema = buildJsonObject {
                 put("type", "object")
-                putJsonObject("properties") { putJsonObject("soPath") { put("type", "string") } }
+                putJsonObject("properties") { putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") } }
                 putJsonArray("required") { add("soPath") }
             }
         ) { p ->
@@ -1001,7 +1156,7 @@ class McpToolHandlers @Inject constructor(
             description = "列出指定 so 的全部补丁记录（offset/oldBytes/newBytes/timestamp，默认关闭；需先启用补丁）",
             inputSchema = buildJsonObject {
                 put("type", "object")
-                putJsonObject("properties") { putJsonObject("soPath") { put("type", "string") } }
+                putJsonObject("properties") { putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") } }
                 putJsonArray("required") { add("soPath") }
             }
         ) { p ->
@@ -1028,9 +1183,9 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("soPath") { put("type", "string") }
-                    putJsonObject("offset") { put("type", "integer") }
-                    putJsonObject("hex") { put("type", "string") }
+                    putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") }
+                    putJsonObject("offset") { put("type", "integer"); put("description", "文件偏移") }
+                    putJsonObject("hex") { put("type", "string"); put("description", "空格分隔十六进制，如 '1F 20 03 D5'") }
                 }
                 putJsonArray("required") { add("soPath"); add("offset"); add("hex") }
             }
@@ -1055,9 +1210,9 @@ class McpToolHandlers @Inject constructor(
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
-                    putJsonObject("soPath") { put("type", "string") }
-                    putJsonObject("destDir") { put("type", "string") }
-                    putJsonObject("destName") { put("type", "string") }
+                    putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径") }
+                    putJsonObject("destDir") { put("type", "string"); put("description", "目标目录绝对路径（可选，覆盖默认导出位置）") }
+                    putJsonObject("destName") { put("type", "string"); put("description", "导出文件名（可选，默认用源文件名）") }
                 }
                 putJsonArray("required") { add("soPath") }
             }

@@ -9,6 +9,7 @@ import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.LibraryDao
+import com.ai.fler.data.dao.McpToolStatDao
 import com.ai.fler.data.dao.PpEntryDao
 import com.ai.fler.data.dao.ProjectDao
 import com.ai.fler.data.entity.AddressMapping
@@ -17,6 +18,7 @@ import com.ai.fler.data.entity.DartCallEdge
 import com.ai.fler.data.entity.DartClass
 import com.ai.fler.data.entity.DartMethod
 import com.ai.fler.data.entity.Library
+import com.ai.fler.data.entity.McpToolStat
 import com.ai.fler.data.entity.PpEntry
 import com.ai.fler.data.entity.Project
 
@@ -35,9 +37,10 @@ import com.ai.fler.data.entity.Project
         PpEntry::class,
         Library::class,
         AddressMapping::class,
-        DartCallEdge::class
+        DartCallEdge::class,
+        McpToolStat::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -52,6 +55,9 @@ abstract class AppDatabase : RoomDatabase() {
 
     /** Dart 调用图边 DAO（真实交叉引用）。 */
     abstract fun dartCallGraphDao(): DartCallGraphDao
+
+    /** MCP 工具调用统计 DAO。 */
+    abstract fun mcpToolStatDao(): McpToolStatDao
 
     /**
      * 级联删除项目及其所有关联数据。

@@ -51,6 +51,9 @@ sealed class Screen(val route: String) {
     /** MCP 服务器配置页（二级 Screen，从设置页进入）。 */
     data object McpSettings : Screen("mcp_settings")
 
+    /** MCP 调用统计页（二级 Screen，从 MCP 配置页进入）。 */
+    data object McpStats : Screen("mcp_stats")
+
     /** 关于页（开源项目与第三方库说明）。 */
     data object About : Screen("about")
 

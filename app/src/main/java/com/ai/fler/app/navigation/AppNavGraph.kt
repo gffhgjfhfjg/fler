@@ -39,6 +39,7 @@ import com.ai.fler.features.output.AsmBrowserScreen
 import com.ai.fler.features.output.AsmListScreen
 import com.ai.fler.features.output.PpBrowserScreen
 import com.ai.fler.features.mcp.McpLogScreen
+import com.ai.fler.features.mcp.McpStatsScreen
 import com.ai.fler.features.project.ProjectDetailScreen
 import com.ai.fler.features.project.ProjectScreen
 import com.ai.fler.features.settings.AboutScreen
@@ -225,7 +226,13 @@ fun AppNavGraph() {
                 McpSettingsScreen(
                     onBack = { navController.popBackStack() },
                     onOpenLog = { navController.navigate(Screen.McpLog.route) },
+                    onOpenStats = { navController.navigate(Screen.McpStats.route) },
                 )
+            }
+
+            // ========== MCP 调用统计（二级 Screen）==========
+            composable(Screen.McpStats.route) {
+                McpStatsScreen(onBack = { navController.popBackStack() })
             }
 
             // ========== 关于（二级 Screen）==========
