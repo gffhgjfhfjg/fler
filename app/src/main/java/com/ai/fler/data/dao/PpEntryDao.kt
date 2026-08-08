@@ -62,6 +62,12 @@ interface PpEntryDao {
     @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND vm_offset = :vmOffset")
     suspend fun getPpByVmOffset(analysisId: Long, vmOffset: Long): List<PpEntry>
 
+    /** 批量按 vm_offset 查 PP 条目（反混淆扫描用：目标 pp_offset 集合 → 条目）。 */
+    @Query(
+        "SELECT * FROM pp_entries WHERE analysis_id = :analysisId AND vm_offset IN (:vmOffsets)"
+    )
+    suspend fun getPpByVmOffsets(analysisId: Long, vmOffsets: List<Long>): List<PpEntry>
+
     @Query("SELECT * FROM pp_entries WHERE analysis_id = :analysisId ORDER BY caller_count DESC LIMIT :limit")
     fun getTopCallersByAnalysisId(analysisId: Long, limit: Int = 50): Flow<List<PpEntry>>
 

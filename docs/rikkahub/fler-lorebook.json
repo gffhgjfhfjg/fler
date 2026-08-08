@@ -78,6 +78,72 @@
       "constant": false,
       "position": 5,
       "enabled": true
+    },
+    {
+      "keys": [
+        "字符串 fallback",
+        "无 String 条目",
+        "type=String 为空",
+        "pp_entries 引号"
+      ],
+      "content": "部分 APK 的 Blutter 分析未建 strings 表，type='String' 条目为空，但字符串文本仍在 pp_entries 的 description 里（形如 `[pp+0x2328] \"Amd\"`）。list_strings / string_xrefs / find_bool_getters / infer_class_fields / scan_pool_refs 会自动回退为「全量 pp 里挑 description 含引号字符串」的条目。list_strings 在该包上能看到几万条（如 Image Search 50464 条）就说明 fallback 生效，不要误判为无字符串。",
+      "comment": "字符串 fallback",
+      "constant": false,
+      "position": 6,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "calibrate_pool_sig",
+        "pool 基址",
+        "poolRegs",
+        "x27"
+      ],
+      "content": "calibrate_pool_sig(soPath, vaddr, size) 反汇编指定方法的常量加载形态，返回 poolBaseRegisters（Dart 对象池基址寄存器，本目标实测 x27、可能还有 x26）和 poolLoads（reg+imm+address 示例）。扫描类工具（scan_pool_refs 等）默认用 x27，若其它 APK 池寄存器不同，先校准再传。",
+      "comment": "池基址校准",
+      "constant": false,
+      "position": 7,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "ppOffsets",
+        "scan_pool_refs",
+        "直传槽偏移",
+        "无字符串定位"
+      ],
+      "content": "scan_pool_refs 新增 ppOffsets 参数：逗号分隔的 hex/dec 池槽偏移列表（如 0x2328,0x2c50），绕过 String 槽查找，直接全 .text 扫描哪些方法以 ldr [x27,#imm] 引用这些槽。无字符串槽时，先 calibrate_pool_sig 或 get_pp_entry 拿到已知槽偏移再传。返回 methods（含 siteVaddr 补丁坐标）与 ppOffset。",
+      "comment": "ppOffsets 直传",
+      "constant": false,
+      "position": 8,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "反混淆",
+        "infer_class_fields",
+        "find_bool_getters",
+        "getter_return_shape",
+        "deobf"
+      ],
+      "content": "类名/方法名被混淆时用结构扫描反混淆：infer_class_fields(className) 聚合类内方法引用的字符串槽恢复字段面；find_bool_getters(query) 找短体布尔 getter 候选；getter_return_shape(methodId) 定位每条返回路径最后一次写 w0 的指令（补丁位+建议汇编）。链路：string_xrefs/scan_pool_refs 定位字符串→infer_class_fields 聚合→find_bool_getters 出候选→getter_return_shape 落补丁位→patch_instruction 打补丁。",
+      "comment": "反混淆工具链",
+      "constant": false,
+      "position": 9,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "纯数据字符串",
+        "字符串槽无引用",
+        "订阅 ID",
+        "imagesearch_premium"
+      ],
+      "content": "Dart AOT 的纯数据字符串槽（如订阅 ID imagesearch_*_premium_subscription、路由名 /PremiumProScreen、UI 文案）在 .text 里往往没有直接 ldr [x27,#imm] 引用，string_xrefs/scan_pool_refs 对它们扫 0 属正常（运行时经间接路径加载）。只有被代码真正以常量加载的字符串（如标识符 \"Amd\"、\"isLowRamDevice\"）才能命中。遇到扫 0 先确认是数据槽而非工具失效。",
+      "comment": "数据字符串无 xref",
+      "constant": false,
+      "position": 10,
+      "enabled": true
     }
   ]
 }

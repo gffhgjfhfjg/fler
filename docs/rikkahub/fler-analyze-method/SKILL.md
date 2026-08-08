@@ -27,6 +27,12 @@ description: 分析目标 App 的单个 Dart 方法（逻辑、调用关系、�
    - 关心被谁调用：`get_method_callers(methodName=方法名)`（图未建好时 `dart_call_graph_status` 看进度）。
    - 关心 PP 数据：`get_pp_entry(ppOffset=…)` 查对象池条目描述。
    - 关心字符串：`search_strings(query=关键词)`。
+   - 若方法名/类名被混淆（`<unknown>`/`<anonymous closure>`），改用结构扫描反混淆：
+     - 确认池基址寄存器：`calibrate_pool_sig(soPath=…, vaddr=functionOffset, size=256)`（本目标为 x27）。
+     - 看类引用了哪些字符串：`infer_class_fields(className=…)`。
+     - 按字符串反查引用方法：`string_xrefs(query=…)` 或 `scan_pool_refs(ppOffsets=0x…)`（无字符串槽时直传已知槽偏移，来自 calibrate 的 poolLoads）。
+     - 找布尔 getter 候选：`find_bool_getters(query=…)`；候选落补丁位用 `getter_return_shape(methodId=…)`。
+   - 字符串可能走 fallback：`list_strings` 返回非 0（甚至几万条）就是 fallback 生效（Blutter 未建 strings 表时从 pp_entries 挑引号字符串），别误判无字符串。
 5. **如需反汇编原始字节/确认指令**：`disassemble_range(soPath=…, offset=fileOffset, size=…, compact=true)`。
 6. **改补丁**（用户明确要求才做）：`read_so_bytes` → `assemble_instruction` 预览 → 向用户确认 → `patch_bytes`/`patch_instruction` → `export_patched_so`，并给出下载地址。
 
