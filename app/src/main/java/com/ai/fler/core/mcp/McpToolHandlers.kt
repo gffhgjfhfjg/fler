@@ -1,5 +1,8 @@
 package com.ai.fler.core.mcp
 
+import android.annotation.SuppressLint
+import android.content.Context
+import dagger.hilt.android.qualifiers.ApplicationContext
 import com.ai.fler.core.analysis.DartCallGraphBuilder
 import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
@@ -51,6 +54,8 @@ class McpToolHandlers @Inject constructor(
     private val axisResolver: AddressAxisResolver,
     private val dartCallGraphDao: DartCallGraphDao,
     private val callGraphBuilder: DartCallGraphBuilder,
+    @SuppressLint("StaticFieldLeak")
+    @ApplicationContext private val context: Context,
 ) : McpResourceProvider {
 
     class McpTool(
@@ -1003,7 +1008,84 @@ class McpToolHandlers @Inject constructor(
                 put("message", result.message)
             }
         },
+        McpTool(
+            name = "export_patched_so",
+            description = "把（已补丁的）so 文件复制/导出到指定目录，供用户获取。目标目录缺省用设置里用户选定的 SAF 导出文件夹；若无则落到 App 缓存 cacheDir/so_export。可传 destDir 绝对路径覆盖（需 App 有写入权限，否则报错）。destName 缺省用源文件名",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("soPath") { put("type", "string") }
+                    putJsonObject("destDir") { put("type", "string") }
+                    putJsonObject("destName") { put("type", "string") }
+                }
+                putJsonArray("required") { add("soPath") }
+            }
+        ) { p ->
+            val so = p.str("soPath") ?: throw McpToolException("soPath 缺失")
+            val destDir = p.str("destDir").orEmpty()
+            val src = java.io.File(so)
+            if (!src.exists() || !src.isFile) throw McpToolException("源 so 不存在: $so")
+            val destName = p.str("destName")?.takeIf { it.isNotBlank() } ?: src.name
+
+            val result = exportPatchedSo(src, destName, destDir)
+            buildJsonObject {
+                put("ok", result.ok)
+                put("fileName", destName)
+                put("size", result.size)
+                put("destPath", result.path)
+                put("message", result.message)
+            }
+        },
     )
+
+    private data class ExportResult(val ok: Boolean, val path: String, val size: Long = 0L, val message: String = "")
+
+    /** 把补丁后的 so 复制到目标。优先 destDir（绝对路径），否则用户选定的 SAF 目录，兜底 cacheDir/so_export。 */
+    private fun exportPatchedSo(src: java.io.File, destName: String, destDir: String): ExportResult {
+        return try {
+            if (destDir.isNotBlank()) {
+                val dir = java.io.File(destDir)
+                if (!dir.isDirectory && !dir.mkdirs()) {
+                    return ExportResult(false, "", 0, "目标目录无法创建: $destDir")
+                }
+                val out = java.io.File(dir, destName)
+                val size = copyFile(src, out)
+                return ExportResult(true, out.absolutePath, size, "已复制到 $out")
+            }
+
+            val treeUri = config.exportTreeUri.value
+            if (treeUri.isNotBlank()) {
+                val name = destName
+                val uri = android.net.Uri.parse(treeUri)
+                val doc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, uri)
+                if (doc != null && doc.canWrite()) {
+                    val child = doc.createFile("application/octet-stream", name)
+                    if (child != null) {
+                        context.contentResolver.openOutputStream(child.uri)?.use { os ->
+                            src.inputStream().use { it.copyTo(os) }
+                            os.flush()
+                        } ?: return ExportResult(false, "", 0, "无法打开 SAF 输出流")
+                        return ExportResult(true, child.uri.toString(), src.length(), "已导出到 SAF 目录")
+                    }
+                }
+            }
+
+            val fallbackDir = java.io.File(context.cacheDir, "so_export").apply { mkdirs() }
+            val out = java.io.File(fallbackDir, destName)
+            val size = copyFile(src, out)
+            ExportResult(true, out.absolutePath, size, "已复制到 App 缓存目录")
+        } catch (e: Exception) {
+            ExportResult(false, "", 0, "导出失败: ${e.message}")
+        }
+    }
+
+    private fun copyFile(src: java.io.File, out: java.io.File): Long {
+        out.outputStream().use { o ->
+            src.inputStream().use { it.copyTo(o) }
+            o.flush()
+        }
+        return src.length()
+    }
 
     private fun requirePatchEnabled() {
         if (!config.patchEnabled.value) {

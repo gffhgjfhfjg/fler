@@ -41,6 +41,7 @@ fun McpSettingsCard(
     onSetPort: (Int) -> Unit,
     onSetToken: (String) -> Unit,
     onSetPatchEnabled: (Boolean) -> Unit,
+    onPickExportFolder: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onOpenLog: () -> Unit,
@@ -177,6 +178,29 @@ fun McpSettingsCard(
                     )
                 }
                 Switch(checked = state.patchEnabled, onCheckedChange = onSetPatchEnabled)
+            }
+
+            // 导出文件夹
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("导出文件夹", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = if (state.exportTreeUri.isBlank())
+                            "未设置（默认 App 缓存 cacheDir/so_export）"
+                        else
+                            "patch 后的 so 将导出到此目录",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2
+                    )
+                }
+                OutlinedButton(onClick = onPickExportFolder) {
+                    Text(if (state.exportTreeUri.isBlank()) "选择" else "更换")
+                }
             }
 
             // 应用端口

@@ -82,7 +82,9 @@ class SettingsViewModel @Inject constructor(
             mcpConfig.token,
             mcpConfig.patchEnabled,
         ) { enabled, bindMode, port, token, patchEnabled ->
-            McpConfigSnapshot(enabled, bindMode, port, token, patchEnabled)
+            McpConfigSnapshot(enabled, bindMode, port, token, patchEnabled, "")
+        }.combine(mcpConfig.exportTreeUri) { cfg, exportTreeUri ->
+            cfg.copy(exportTreeUri = exportTreeUri)
         }.combine(mcpServerManager.status) { cfg, status ->
             McpUiState(
                 enabled = cfg.enabled,
@@ -90,6 +92,7 @@ class SettingsViewModel @Inject constructor(
                 port = cfg.port,
                 token = cfg.token,
                 patchEnabled = cfg.patchEnabled,
+                exportTreeUri = cfg.exportTreeUri,
                 isRunning = status.isRunning,
                 activeSessions = status.activeSessions,
                 localUrl = status.localUrl,
@@ -133,6 +136,10 @@ class SettingsViewModel @Inject constructor(
 
     fun mcpSetPatchEnabled(value: Boolean) {
         mcpConfig.setPatchEnabled(value)
+    }
+
+    fun mcpSetExportTreeUri(value: String) {
+        mcpConfig.setExportTreeUri(value)
     }
 
     /**
@@ -271,6 +278,7 @@ data class McpUiState(
     val port: Int = com.ai.fler.core.mcp.McpConfig.DEFAULT_PORT,
     val token: String = "",
     val patchEnabled: Boolean = false,
+    val exportTreeUri: String = "",
     val isRunning: Boolean = false,
     val activeSessions: Int = 0,
     val localUrl: String = "",
@@ -287,4 +295,5 @@ private data class McpConfigSnapshot(
     val port: Int,
     val token: String,
     val patchEnabled: Boolean,
+    val exportTreeUri: String = "",
 )
