@@ -96,13 +96,15 @@ fun McpSettingsCard(
                 if (state.localUrl.isNotBlank()) {
                     UrlLine("本机 /mcp", state.localUrl)
                     UrlLine("本机 /sse", state.sseLocalUrl)
+                    UrlLine("本机 /export", "http://127.0.0.1:${state.port}/export")
                 }
                 if (state.lanUrl.isNotBlank()) {
                     UrlLine("局域网 /mcp", state.lanUrl)
                     UrlLine("局域网 /sse", state.sseLanUrl)
+                    UrlLine("局域网 /export", exportUrlFrom(state.lanUrl))
                 }
                 Text(
-                    text = "/mcp: MCP Inspector/通用客户端 · /sse: Claude Desktop",
+                    text = "/mcp: MCP Inspector/通用客户端 · /sse: Claude Desktop · /export: 下载导出目录内的 so",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -250,6 +252,12 @@ private fun UrlLine(label: String, url: String) {
             fontFamily = FontFamily.Monospace
         )
     }
+}
+
+/** 由 /mcp 地址推导 /export 下载地址（保留 host:port）。 */
+private fun exportUrlFrom(mcpUrl: String): String {
+    val host = mcpUrl.removePrefix("http://").substringBefore('/')
+    return "http://$host/export"
 }
 
 @Composable

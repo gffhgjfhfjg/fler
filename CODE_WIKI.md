@@ -648,6 +648,7 @@ class McpHttpServer(
     private val config: McpConfig,
     private val sessions: McpSessions,
     private val logger: McpLogger,
+    private val fileRoot: File,
 )
 ```
 
@@ -657,7 +658,11 @@ class McpHttpServer(
   - `POST /message` — legacy 消息端点
   - `POST /mcp` — MCP Streamable HTTP JSON-RPC
   - `GET /mcp` — 服务器→客户端事件流
-- 支持 Bearer Token 认证
+  - `GET /export` — 列出 `so_export` 导出目录内的文件
+  - `GET /export/<file>` — 流式下载导出目录内的文件（attachment）
+- `fileRoot` 由 `McpServerManager` 注入，默认为 `context.cacheDir/so_export`，与 `export_patched_so` 的兜底导出目录一致
+- 下载路由防路径穿越：拒绝 `../`、`/`、`\`，并校验 canonical 路径限定在导出目录内
+- 支持 Bearer Token 认证（下载路由同样受 token 保护）
 
 #### McpToolHandlers.kt — MCP 工具处理器
 

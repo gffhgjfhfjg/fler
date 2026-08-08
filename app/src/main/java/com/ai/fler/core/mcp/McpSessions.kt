@@ -49,6 +49,21 @@ class McpSessions {
         }
     }
 
+    /** 向会话写一条 `event: notification` 事件（服务端→客户端 Notification）。返回是否成功。 */
+    fun writeNotification(id: String, jsonText: String): Boolean {
+        val session = sessions[id] ?: return false
+        return synchronized(session) {
+            try {
+                session.output.write("event: notification\ndata: $jsonText\n\n".toByteArray(Charsets.UTF_8))
+                session.output.flush()
+                true
+            } catch (e: Exception) {
+                remove(id)
+                false
+            }
+        }
+    }
+
     /** 向会话写一条 `event: endpoint` 事件（legacy SSE 握手）。 */
     fun writeEndpoint(id: String, endpointPath: String): Boolean {
         val session = sessions[id] ?: return false

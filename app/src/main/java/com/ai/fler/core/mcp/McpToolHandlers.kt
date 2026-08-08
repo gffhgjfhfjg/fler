@@ -9,6 +9,7 @@ import com.ai.fler.core.jni.ElfParserBindings
 import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.AddressTranslator
 import com.ai.fler.data.dao.AnalysisDao
+import com.ai.fler.data.entity.Analysis
 import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
@@ -17,6 +18,8 @@ import com.ai.fler.data.dao.PpEntryDao
 import com.ai.fler.data.dao.ProjectDao
 import com.ai.fler.features.mcp.McpPatchService
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonArrayBuilder
 import kotlinx.serialization.json.JsonObject
@@ -67,9 +70,43 @@ class McpToolHandlers @Inject constructor(
 
     // ========== 坐标换算辅助 ==========
 
+    /** 请求级 DB 缓存：避免单个工具内重复 getById（Analysis 行数据无热点变化）。 */
+    private class AnalysisCache(private val dao: AnalysisDao) {
+        private val map = java.util.concurrent.ConcurrentHashMap<Long, Cached>()
+        private class Cached(val analysis: Analysis, val ts: Long)
+
+        suspend fun get(id: Long): Analysis? {
+            map[id]?.let { c -> if (System.currentTimeMillis() - c.ts < TTL_MS) return c.analysis }
+            val a = dao.getById(id)
+            if (a != null) map[id] = Cached(a, System.currentTimeMillis())
+            trim()
+            return a
+        }
+
+        private fun trim() {
+            val now = System.currentTimeMillis()
+            val it = map.entries.iterator()
+            while (it.hasNext()) if (now - it.next().value.ts >= TTL_MS) it.remove()
+            while (map.size > MAX_SIZE) {
+                val oldest = map.entries.minByOrNull { it.value.ts }?.key ?: break
+                map.remove(oldest)
+            }
+        }
+
+        companion object {
+            private const val TTL_MS = 60_000L
+            private const val MAX_SIZE = 64
+        }
+    }
+
+    private val analysisCache = AnalysisCache(analysisDao)
+
+    /** 缓存版 getById。 */
+    private suspend fun cachedAnalysis(id: Long): Analysis? = analysisCache.get(id)
+
     /** 分析对应的 libapp.so 路径（坐标换算用）。 */
     private suspend fun libAppPath(analysisId: Long): String? =
-        analysisDao.getById(analysisId)?.libappPath
+        cachedAnalysis(analysisId)?.libappPath
 
     /** functionOffset(vaddr) → 文件偏移；so 不可用或地址无效时返回 null。
      *  歧义（同节偏差≠0，数字同时是文件偏移与 vaddr）时按 vaddr 解读取 altFileOffset，
@@ -145,7 +182,7 @@ class McpToolHandlers @Inject constructor(
             }
         ) { p ->
             val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失或非法")
-            val a = analysisDao.getById(id) ?: return@McpTool buildJsonObject { put("found", false) }
+            val a = cachedAnalysis(id) ?: return@McpTool buildJsonObject { put("found", false) }
             val libs = libraryDao.getByAnalysisIdList(id)
             buildJsonObject {
                 put("found", true)
@@ -505,7 +542,9 @@ class McpToolHandlers @Inject constructor(
             val name = p.str("methodName") ?: throw McpToolException("methodName 缺失")
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
             ensureGraph(id)
-            val analysisExists = analysisDao.getById(id) != null
+            val progress = currentProgress()
+            progress.report(0.1f, "开始查询调用方: $name")
+            val analysisExists = cachedAnalysis(id) != null
             val res = callGraphBuilder.findCallersByName(id, name, limit)
             if (!analysisExists) {
                 return@McpTool buildJsonObject {
@@ -569,7 +608,8 @@ class McpToolHandlers @Inject constructor(
                 else -> throw McpToolException("需提供 methodId 或 methodName")
             }
             ensureGraph(id)
-            if (analysisDao.getById(id) == null) {
+            currentProgress().report(0.1f, "开始查询被调方法")
+            if (cachedAnalysis(id) == null) {
                 return@McpTool buildJsonObject {
                     put("count", 0)
                     put("graphBuilt", false)
@@ -619,10 +659,11 @@ class McpToolHandlers @Inject constructor(
             }
         ) { p ->
             val id = p.long("analysisId") ?: throw McpToolException("analysisId 缺失")
+            currentProgress().report(0.2f, "查询调用图构建状态")
             val count = dartCallGraphDao.countByAnalysisId(id)
             buildJsonObject {
                 put("analysisId", id)
-                put("analysisExists", analysisDao.getById(id) != null)
+                put("analysisExists", cachedAnalysis(id) != null)
                 put("built", callGraphBuilder.hasCompleted(id) || count > 0)
                 put("edgeCount", count)
                 put("building", callGraphBuilder.isBuilding(id))
@@ -1010,7 +1051,7 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
             name = "export_patched_so",
-            description = "把（已补丁的）so 文件复制/导出到指定目录，供用户获取。目标目录缺省用设置里用户选定的 SAF 导出文件夹；若无则落到 App 缓存 cacheDir/so_export。可传 destDir 绝对路径覆盖（需 App 有写入权限，否则报错）。destName 缺省用源文件名",
+            description = "把（已补丁的）so 文件复制/导出到指定目录，供用户获取。目标目录缺省用设置里用户选定的 SAF 导出文件夹；若无则落到 App 缓存 cacheDir/so_export——该目录会经 MCP 服务器暴露为 GET /export/<文件名>，可用 curl http://<手机IP>:<端口>/export/<destName> 直接下载。可传 destDir 绝对路径覆盖（需 App 有写入权限，否则报错）。destName 缺省用源文件名",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -1027,7 +1068,9 @@ class McpToolHandlers @Inject constructor(
             if (!src.exists() || !src.isFile) throw McpToolException("源 so 不存在: $so")
             val destName = p.str("destName")?.takeIf { it.isNotBlank() } ?: src.name
 
-            val result = exportPatchedSo(src, destName, destDir)
+            val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                exportPatchedSo(src, destName, destDir)
+            }
             buildJsonObject {
                 put("ok", result.ok)
                 put("fileName", destName)
@@ -1040,31 +1083,39 @@ class McpToolHandlers @Inject constructor(
 
     private data class ExportResult(val ok: Boolean, val path: String, val size: Long = 0L, val message: String = "")
 
+    /** 从当前协程上下文读取请求级进度通道（无则返回空实现）。 */
+    private suspend fun currentProgress(): ProgressSink =
+        kotlinx.coroutines.currentCoroutineContext()[McpRequestContext]?.progress ?: NoopProgressSink
+
     /** 把补丁后的 so 复制到目标。优先 destDir（绝对路径），否则用户选定的 SAF 目录，兜底 cacheDir/so_export。 */
-    private fun exportPatchedSo(src: java.io.File, destName: String, destDir: String): ExportResult {
+    private suspend fun exportPatchedSo(src: java.io.File, destName: String, destDir: String): ExportResult {
         return try {
+            val progress = currentProgress()
+            // 各分支进度百分比在 10%~95% 之间按复制进度推进，最后置 100%
+            progress.report(0.1f, "准备导出 $destName")
             if (destDir.isNotBlank()) {
                 val dir = java.io.File(destDir)
                 if (!dir.isDirectory && !dir.mkdirs()) {
                     return ExportResult(false, "", 0, "目标目录无法创建: $destDir")
                 }
                 val out = java.io.File(dir, destName)
-                val size = copyFile(src, out)
+                val size = copyFile(src, out) { p -> progress.report(rangeProgress(p, 0.1f, 0.95f), "复制 $destName ${(p * 100).toInt()}%") }
+                progress.report(1f, "已复制到 $out")
                 return ExportResult(true, out.absolutePath, size, "已复制到 $out")
             }
 
             val treeUri = config.exportTreeUri.value
             if (treeUri.isNotBlank()) {
-                val name = destName
                 val uri = android.net.Uri.parse(treeUri)
                 val doc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, uri)
                 if (doc != null && doc.canWrite()) {
-                    val child = doc.createFile("application/octet-stream", name)
+                    val child = doc.createFile("application/octet-stream", destName)
                     if (child != null) {
                         context.contentResolver.openOutputStream(child.uri)?.use { os ->
-                            src.inputStream().use { it.copyTo(os) }
+                            copyStream(src, os) { p -> progress.report(rangeProgress(p, 0.1f, 0.95f), "复制 $destName ${(p * 100).toInt()}%") }
                             os.flush()
                         } ?: return ExportResult(false, "", 0, "无法打开 SAF 输出流")
+                        progress.report(1f, "已导出到 SAF 目录")
                         return ExportResult(true, child.uri.toString(), src.length(), "已导出到 SAF 目录")
                     }
                 }
@@ -1072,19 +1123,48 @@ class McpToolHandlers @Inject constructor(
 
             val fallbackDir = java.io.File(context.cacheDir, "so_export").apply { mkdirs() }
             val out = java.io.File(fallbackDir, destName)
-            val size = copyFile(src, out)
+            val size = copyFile(src, out) { p -> progress.report(rangeProgress(p, 0.1f, 0.95f), "复制 $destName ${(p * 100).toInt()}%") }
+            progress.report(1f, "已复制到 App 缓存目录")
             ExportResult(true, out.absolutePath, size, "已复制到 App 缓存目录")
         } catch (e: Exception) {
             ExportResult(false, "", 0, "导出失败: ${e.message}")
         }
     }
 
-    private fun copyFile(src: java.io.File, out: java.io.File): Long {
+    /** 把 [0,1] 相对进度映射到 [min,max] 区间（避免与大阶段百分比重叠）。 */
+    private fun rangeProgress(p: Float, min: Float, max: Float): Float = min + (max - min) * p.coerceIn(0f, 1f)
+
+    /** 分块复制文件，以块完成比回调 inProgress(0..1)。 */
+    private fun copyFile(src: java.io.File, out: java.io.File, onProgress: (Float) -> Unit): Long {
         out.outputStream().use { o ->
-            src.inputStream().use { it.copyTo(o) }
+            copyStream(src, o, onProgress)
             o.flush()
         }
         return src.length()
+    }
+
+    /** 分块复制流，每 ≥5% 间距回调一次相对进度（0..1）。 */
+    private fun copyStream(src: java.io.File, o: java.io.OutputStream, onProgress: (Float) -> Unit) {
+        val buf = ByteArray(64 * 1024)
+        val total = src.length()
+        var copied = 0L
+        var lastBucket = -1
+        src.inputStream().use { input ->
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                o.write(buf, 0, n)
+                copied += n
+                if (total > 0) {
+                    val bucket = (copied * 20 / total).toInt() // 0..19（每 5% 一档）
+                    if (bucket != lastBucket) {
+                        lastBucket = bucket
+                        onProgress(bucket / 20f)
+                    }
+                }
+            }
+        }
+        if (total <= 0) onProgress(1f)
     }
 
     private fun requirePatchEnabled() {
@@ -1142,7 +1222,7 @@ class McpToolHandlers @Inject constructor(
         return when {
             analysisMatch != null -> {
                 val id = analysisMatch.groupValues[1].toLongOrNull() ?: return null
-                val a = analysisDao.getById(id) ?: return null
+                val a = cachedAnalysis(id) ?: return null
                 "analysis $id\nprojectId=${a.projectId}\nlibapp=${a.libappPath ?: ""}\n" +
                     "resultCode=${a.resultCode}\nclasses=${a.classesCount} methods=${a.methodsCount} pp=${a.ppEntriesCount}"
             }

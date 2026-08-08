@@ -39,8 +39,10 @@ class McpServerManager @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     private val sessions = McpSessions()
-    private val protocol by lazy { McpProtocol(toolHandlers, logger, toolHandlers) }
-    private val httpServer by lazy { McpHttpServer(protocol, config, sessions, logger) }
+    private val protocol by lazy { McpProtocol(toolHandlers, logger, sessions, toolHandlers) }
+    private val httpServer by lazy {
+        McpHttpServer(protocol, config, sessions, logger, java.io.File(context.cacheDir, "so_export"))
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 

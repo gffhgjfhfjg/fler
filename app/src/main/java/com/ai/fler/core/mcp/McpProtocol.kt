@@ -1,5 +1,6 @@
 package com.ai.fler.core.mcp
 
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -23,15 +24,17 @@ import kotlinx.serialization.json.addJsonObject
 class McpProtocol(
     private val handlers: McpToolHandlers,
     private val logger: McpLogger,
+    private val sessions: McpSessions,
     private val resourceProvider: McpResourceProvider? = null,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
      * 处理一条 JSON-RPC 消息。
+     * @param sessionId 当前 MCP 会话 ID（Streamable `Mcp-Session-Id` 或 legacy 会话），用于推送进度通知；内联请求可省略。
      * @return 需要回发的响应；通知类（无 id）返回 null。
      */
-    suspend fun handle(request: JsonObject): JsonObject? {
+    suspend fun handle(request: JsonObject, sessionId: String? = null): JsonObject? {
         val id = request["id"]
         val method = request["method"]?.jsonPrimitive?.contentOrNull
             ?: return McpErrors.errorJson(id, McpErrors.INVALID_REQUEST, "缺少 method")
@@ -43,7 +46,7 @@ class McpProtocol(
             method == "initialize" -> result(id, initializeResult(params))
             method == "ping" -> result(id, buildJsonObject {})
             method == "tools/list" -> result(id, toolsList())
-            method == "tools/call" -> toolsCall(id, params)
+            method == "tools/call" -> toolsCall(id, params, sessionId)
             method == "resources/list" -> resourcesList(id)
             method == "resources/read" -> resourcesRead(id, params)
             method == "prompts/list" -> result(id, promptsList())
@@ -67,6 +70,8 @@ class McpProtocol(
                 putJsonObject("tools") { put("listChanged", false) }
                 putJsonObject("resources") { put("subscribe", false) }
                 putJsonObject("prompts") { put("listChanged", false) }
+                // 声明支持服务端→客户端 notifications（Progress）。
+                putJsonObject("notifications") { }
             }
             putJsonObject("serverInfo") {
                 put("name", "fler-mcp")
@@ -89,17 +94,39 @@ class McpProtocol(
         }
     }
 
-    private suspend fun toolsCall(id: JsonElement?, params: JsonObject): JsonObject {
+private suspend fun toolsCall(id: JsonElement?, params: JsonObject, sessionId: String?): JsonObject {
         val name = params["name"]?.jsonPrimitive?.contentOrNull
             ?: return McpErrors.errorJson(id, McpErrors.INVALID_PARAMS, "缺少工具名")
         val tool = handlers.tools[name]
             ?: return McpErrors.errorJson(id, McpErrors.TOOL_NOT_FOUND, "工具不存在: $name")
         val arguments = params["arguments"]?.jsonObject ?: JsonObject(emptyMap())
         val start = System.currentTimeMillis()
-        logger.info("工具调用: $name args=${arguments.toString().take(500)}")
+
+        // 解析客户端请求进度：_meta.progressToken（MCP 规范：位于 params 顶层，与 arguments 平级；
+        // 部分实现也放 arguments 内，二者都兼容读）。
+        // progressToken 可为数字或字符串，保留原始 Primitive 用于回传。
+        val progressToken: JsonPrimitive? =
+            params["_meta"]?.jsonObject?.get("progressToken")?.jsonPrimitive
+                ?: arguments["_meta"]?.jsonObject?.get("progressToken")?.jsonPrimitive
+        val hasProgress = progressToken != null && sessionId != null
+        val progressSink: ProgressSink = if (hasProgress) {
+            object : ProgressSink {
+                override fun report(progress: Float?, message: String?) {
+                    sendProgressNotification(sessionId!!, progressToken!!, progress, message)
+                }
+            }
+        } else {
+            NoopProgressSink
+        }
+
+        logger.info("工具调用: $name args=${arguments.toString().take(500)}" + if (hasProgress) " [progress]" else "")
 
         return try {
-            val data = tool.handler(arguments)
+            // 把请求上下文（sessionId + progressToken + sink）放进协程 context，
+            // 长任务工具可经 McpRequestContext.current() 上报进度。
+            val data = withContext(McpRequestContext(sessionId, progressToken, progressSink)) {
+                tool.handler(arguments)
+            }
             val elapsed = System.currentTimeMillis() - start
             logger.info("工具完成: $name 耗时=${elapsed}ms")
             // 把工具返回的 JSON 作为 text content 回传给客户端
@@ -136,6 +163,22 @@ class McpProtocol(
             logger.error("工具调用异常: $name - ${e.message}")
             McpErrors.errorJson(id, McpErrors.SERVER_ERROR, "工具执行异常: ${e.message}")
         }
+    }
+
+    /** 向指定会话推送 `notifications/progress`。 */
+    private fun sendProgressNotification(sessionId: String, token: JsonPrimitive, progress: Float?, message: String?) {
+        val notification = buildJsonObject {
+            put("jsonrpc", "2.0")
+            put("method", "notifications/progress")
+            putJsonObject("params") {
+                put("progressToken", token)
+                progress?.let { put("progress", it) }
+                message?.let { put("message", it) }
+            }
+        }
+        val sent = sessions.writeNotification(sessionId, notification.toString())
+        val pct = progress?.let { ((it * 100).toInt()) } ?: -1
+        logger.debug("进度: ${message ?: "n/a"} (${if (pct >= 0) "$pct%" else "阶段"})" + if (sent) "" else " [会话已断开，丢弃]")
     }
 
     // ========== resources ==========
