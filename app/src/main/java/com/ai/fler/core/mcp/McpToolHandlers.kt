@@ -1123,7 +1123,7 @@ name = "get_pp_entry",
     private fun buildDeobfTools(): List<McpTool> = listOf(
         McpTool(
             name = "calibrate_pool_sig",
-            description = "校准 Dart pool 常量加载签名：反汇编 so 指定 vaddr（推荐用 guwenda 等未混淆包的非混淆方法，如 User.isVIP），返回实际命中的 ldr/ldur 池基址寄存器与立即数形态。用于确认 scan_pool_refs 的 poolRegs 参数（默认 x27）",
+            description = "校准 Dart pool 常量加载签名：反汇编 so 指定 vaddr（推荐用未混淆包的非混淆方法，如 User.isVIP），返回实际命中的 ldr/ldur 池基址寄存器与立即数形态。用于确认 scan_pool_refs 的 poolRegs 参数（默认 x27）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {

@@ -14,7 +14,7 @@ import javax.inject.Singleton
  * 槽」的指令，并把命中地址归属到具体 Dart 方法。
  *
  * ## 原理
- * Dart AOT 的 pool 常量加载形态（已用 guwenda/libapp 校准）：
+ * Dart AOT 的 pool 常量加载形态（已用libapp 校准）：
  * `ldr {reg}, [x27, #imm]` —— x27 是 PP 池基址寄存器，imm 即 pp 的 vm_offset
  * （与 `pp_entries.vm_offset` 一致）。混淆只剥离符号名，不改变该机器码结构。
  *
@@ -166,7 +166,7 @@ class StringXrefScanner @Inject constructor(
     }
 
     companion object {
-        /** 默认池基址寄存器（guwenda 校准实证：x27=PP）。 */
+        /** 默认池基址寄存器（校准实证：x27=PP）。 */
         val DEFAULT_POOL_REGS: List<String> = listOf("x27")
 
         /** .text 分块大小（同 RizinEngine.scanStrings 的 256KB 流式）。 */

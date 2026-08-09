@@ -34,7 +34,8 @@ class ProjectDetailViewModel @Inject constructor(
     private val projectDao: ProjectDao,
     private val analysisDao: AnalysisDao,
     private val appDatabase: AppDatabase,
-    private val callGraphBuilder: DartCallGraphBuilder
+    private val callGraphBuilder: DartCallGraphBuilder,
+    private val analysisRunner: AnalysisRunner
 ) : ViewModel() {
 
     val projectId: Long = savedStateHandle["projectId"] ?: 0L
@@ -101,6 +102,8 @@ class ProjectDetailViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 Log.i(TAG, "删除分析记录: id=${analysis.id}, projectId=$projectId")
+                // 若该分析正在后台执行，先取消，避免删库后导入写入已删除记录
+                analysisRunner.cancelAnalysisIfActive(analysis.id)
                 appDatabase.cascadeDeleteAnalysis(analysis.id)
                 callGraphBuilder.invalidate(analysis.id)
                 Log.i(TAG, "分析记录 ${analysis.id} 已删除")

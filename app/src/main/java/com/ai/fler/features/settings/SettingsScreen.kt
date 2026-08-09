@@ -664,7 +664,6 @@ private fun EngineSourceCard(
     onReset: () -> Unit
 ) {
     var isEditing by remember { mutableStateOf(false) }
-    var manifestUrl by remember(state) { mutableStateOf(state.manifestUrl) }
     var githubProxy by remember(state) { mutableStateOf(state.githubProxy) }
 
     Card(
@@ -701,13 +700,6 @@ private fun EngineSourceCard(
                 // 编辑模式
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
-                        value = manifestUrl,
-                        onValueChange = { manifestUrl = it },
-                        label = { Text("引擎清单地址 (manifest.json)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
                         value = githubProxy,
                         onValueChange = { githubProxy = it },
                         label = { Text("GitHub 加速前缀") },
@@ -728,7 +720,7 @@ private fun EngineSourceCard(
                         }
                         Button(
                             onClick = {
-                                onSave(manifestUrl, githubProxy)
+                                onSave(state.manifestUrl, githubProxy)
                                 isEditing = false
                             },
                             modifier = Modifier.weight(1f)
@@ -740,7 +732,6 @@ private fun EngineSourceCard(
             } else {
                 // 展示模式
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    SourceItem(label = "引擎清单", url = state.manifestUrl)
                     SourceItem(
                         label = "GitHub 加速",
                         url = if (state.githubProxy.isBlank()) "未启用" else state.githubProxy
