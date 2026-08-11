@@ -48,12 +48,16 @@ class McpConfig @Inject constructor(
     private val _exportTreeUri = MutableStateFlow(prefs.getString(KEY_EXPORT_TREE_URI, "") ?: "")
     val exportTreeUri: StateFlow<String> = _exportTreeUri.asStateFlow()
 
+    private val _emuToolsEnabled = MutableStateFlow(prefs.getBoolean(KEY_EMU_TOOLS_ENABLED, false))
+    val emuToolsEnabled: StateFlow<Boolean> = _emuToolsEnabled.asStateFlow()
+
     fun setEnabled(value: Boolean) { _enabled.value = value; prefs.edit().putBoolean(KEY_ENABLED, value).apply() }
     fun setBindMode(value: BindMode) { _bindMode.value = value; prefs.edit().putString(KEY_BIND_MODE, if (value == BindMode.LAN) "lan" else "local").apply() }
     fun setPort(value: Int) { _port.value = value; prefs.edit().putInt(KEY_PORT, value).apply() }
     fun setToken(value: String) { _token.value = value; prefs.edit().putString(KEY_TOKEN, value).apply() }
     fun setPatchEnabled(value: Boolean) { _patchEnabled.value = value; prefs.edit().putBoolean(KEY_PATCH_ENABLED, value).apply() }
     fun setExportTreeUri(value: String) { _exportTreeUri.value = value; prefs.edit().putString(KEY_EXPORT_TREE_URI, value).apply() }
+    fun setEmuToolsEnabled(value: Boolean) { _emuToolsEnabled.value = value; prefs.edit().putBoolean(KEY_EMU_TOOLS_ENABLED, value).apply() }
 
     companion object {
         const val DEFAULT_PORT = 8765
@@ -63,5 +67,6 @@ class McpConfig @Inject constructor(
         private const val KEY_TOKEN = "token"
         private const val KEY_PATCH_ENABLED = "patch_enabled"
         private const val KEY_EXPORT_TREE_URI = "export_tree_uri"
+        private const val KEY_EMU_TOOLS_ENABLED = "emu_tools_enabled"
     }
 }

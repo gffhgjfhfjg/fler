@@ -95,6 +95,7 @@ fun McpSettingsScreen(
                     onSetPort = { viewModel.mcpSetPort(it) },
                     onSetToken = { viewModel.mcpSetToken(it) },
                     onSetPatchEnabled = { viewModel.mcpSetPatchEnabled(it) },
+                    onSetEmuToolsEnabled = { viewModel.mcpSetEmuToolsEnabled(it) },
                     onPickExportFolder = { folderPicker.launch(null) },
                     onStart = { viewModel.mcpStartServer() },
                     onStop = { viewModel.mcpStopServer() },

@@ -88,7 +88,9 @@ class SettingsViewModel @Inject constructor(
             mcpConfig.token,
             mcpConfig.patchEnabled,
         ) { enabled, bindMode, port, token, patchEnabled ->
-            McpConfigSnapshot(enabled, bindMode, port, token, patchEnabled, "")
+            McpConfigSnapshot(enabled, bindMode, port, token, patchEnabled, false, "")
+        }.combine(mcpConfig.emuToolsEnabled) { cfg, emu ->
+            cfg.copy(emuToolsEnabled = emu)
         }.combine(mcpConfig.exportTreeUri) { cfg, exportTreeUri ->
             cfg.copy(exportTreeUri = exportTreeUri)
         }.combine(mcpServerManager.status) { cfg, status ->
@@ -98,6 +100,7 @@ class SettingsViewModel @Inject constructor(
                 port = cfg.port,
                 token = cfg.token,
                 patchEnabled = cfg.patchEnabled,
+                emuToolsEnabled = cfg.emuToolsEnabled,
                 exportTreeUri = cfg.exportTreeUri,
                 isRunning = status.isRunning,
                 activeSessions = status.activeSessions,
@@ -142,6 +145,10 @@ class SettingsViewModel @Inject constructor(
 
     fun mcpSetPatchEnabled(value: Boolean) {
         mcpConfig.setPatchEnabled(value)
+    }
+
+    fun mcpSetEmuToolsEnabled(value: Boolean) {
+        mcpConfig.setEmuToolsEnabled(value)
     }
 
     fun mcpSetExportTreeUri(value: String) {
@@ -309,6 +316,7 @@ data class McpUiState(
     val port: Int = com.ai.fler.core.mcp.McpConfig.DEFAULT_PORT,
     val token: String = "",
     val patchEnabled: Boolean = false,
+    val emuToolsEnabled: Boolean = false,
     val exportTreeUri: String = "",
     val isRunning: Boolean = false,
     val activeSessions: Int = 0,
@@ -326,6 +334,7 @@ private data class McpConfigSnapshot(
     val port: Int,
     val token: String,
     val patchEnabled: Boolean,
+    val emuToolsEnabled: Boolean,
     val exportTreeUri: String = "",
 )
 

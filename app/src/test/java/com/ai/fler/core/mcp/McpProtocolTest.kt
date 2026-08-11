@@ -33,9 +33,13 @@ class McpProtocolTest {
             if (params != null) put("params", params)
         }
 
-    private fun makeProtocol(tools: Map<String, McpToolHandlers.McpTool> = emptyMap()): McpProtocol {
+    private fun makeProtocol(
+        tools: Map<String, McpToolHandlers.McpTool> = emptyMap(),
+        exposed: (String) -> Boolean = { true },
+    ): McpProtocol {
         val handlers = mockk<McpToolHandlers>()
         every { handlers.tools } returns tools
+        every { handlers.isToolExposed(any()) } answers { firstArg<String>().let(exposed) }
         coEvery { handlers.listResources() } returns emptyList()
         coEvery { handlers.readResource(any()) } returns null
         return McpProtocol(handlers, mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true))
@@ -85,6 +89,30 @@ class McpProtocolTest {
         val resp = makeProtocol(mapOf("echo" to echo)).handle(request("tools/list"))!!
         val tools = resp["result"]!!.jsonObject["tools"]!!.jsonArray
         assertTrue(tools.any { it.jsonObject["name"]!!.jsonPrimitive.contentOrNull == "echo" })
+    }
+
+    @Test
+    fun `tools-list 隐藏未暴露的 emu 工具`() = runBlocking {
+        val echo = McpToolHandlers.McpTool("echo", "回显", buildJsonObject {}) { JsonPrimitive("") }
+        val emu = McpToolHandlers.McpTool("emu_open", "仿真打开", buildJsonObject {}) { JsonPrimitive("") }
+        val resp = makeProtocol(
+            tools = mapOf("echo" to echo, "emu_open" to emu),
+            exposed = { it != "emu_open" },
+        ).handle(request("tools/list"))!!
+        val tools = resp["result"]!!.jsonObject["tools"]!!.jsonArray
+        assertTrue(tools.any { it.jsonObject["name"]!!.jsonPrimitive.contentOrNull == "echo" })
+        assertFalse(tools.any { it.jsonObject["name"]!!.jsonPrimitive.contentOrNull == "emu_open" })
+    }
+
+    @Test
+    fun `tools-call 未暴露工具返回 TOOL_NOT_FOUND`() = runBlocking {
+        val emu = McpToolHandlers.McpTool("emu_open", "仿真打开", buildJsonObject {}) { JsonPrimitive("") }
+        val resp = makeProtocol(
+            tools = mapOf("emu_open" to emu),
+            exposed = { it != "emu_open" },
+        ).handle(request("tools/call", buildJsonObject { put("name", "emu_open") }))!!
+        val err = resp["error"]!!.jsonObject
+        assertEquals(McpErrors.TOOL_NOT_FOUND, err["code"]!!.jsonPrimitive.content.toInt())
     }
 
     @Test

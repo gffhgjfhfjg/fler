@@ -86,6 +86,7 @@ class McpProtocol(
     private fun toolsList(): JsonObject = buildJsonObject {
         putJsonArray("tools") {
             handlers.tools.values.forEach { t ->
+                if (!handlers.isToolExposed(t.name)) return@forEach
                 addJsonObject {
                     put("name", t.name)
                     put("description", t.description)
@@ -100,6 +101,9 @@ private suspend fun toolsCall(id: JsonElement?, params: JsonObject, sessionId: S
             ?: return McpErrors.errorJson(id, McpErrors.INVALID_PARAMS, "缺少工具名")
         val tool = handlers.tools[name]
             ?: return McpErrors.errorJson(id, McpErrors.TOOL_NOT_FOUND, "工具不存在: $name")
+        if (!handlers.isToolExposed(name)) {
+            return McpErrors.errorJson(id, McpErrors.TOOL_NOT_FOUND, "工具已隐藏: $name")
+        }
         val arguments = params["arguments"]?.jsonObject ?: JsonObject(emptyMap())
         val start = System.currentTimeMillis()
 

@@ -171,6 +171,12 @@ class McpToolHandlers @Inject constructor(
         fridaTools.buildTools().forEach { this[it.name] = it }
     }
 
+    /** 工具是否对外暴露：emu_* 仿真工具默认隐藏，由 [McpConfig.emuToolsEnabled] 实时控制。 */
+    fun isToolExposed(name: String): Boolean {
+        if (name.startsWith("emu_")) return config.emuToolsEnabled.value
+        return true
+    }
+
     // ========== 参数读取辅助 ==========
 
     private fun JsonObject.long(key: String): Long? =

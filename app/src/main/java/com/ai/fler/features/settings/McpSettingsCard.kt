@@ -41,6 +41,7 @@ fun McpSettingsCard(
     onSetPort: (Int) -> Unit,
     onSetToken: (String) -> Unit,
     onSetPatchEnabled: (Boolean) -> Unit,
+    onSetEmuToolsEnabled: (Boolean) -> Unit,
     onPickExportFolder: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
@@ -180,6 +181,22 @@ fun McpSettingsCard(
                     )
                 }
                 Switch(checked = state.patchEnabled, onCheckedChange = onSetPatchEnabled)
+            }
+
+            // 仿真工具开关
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("仿真工具 (emu_*)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "默认关闭；开启后 MCP 暴露 Unicorn 仿真工具集（对 Flutter/Dart 场景通常用不到，关闭可减少工具面）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = state.emuToolsEnabled, onCheckedChange = onSetEmuToolsEnabled)
             }
 
             // 导出文件夹
