@@ -43,6 +43,8 @@ import com.ai.fler.features.mcp.McpStatsScreen
 import com.ai.fler.features.project.ProjectDetailScreen
 import com.ai.fler.features.project.ProjectScreen
 import com.ai.fler.features.settings.AboutScreen
+import com.ai.fler.features.settings.HookScriptEditScreen
+import com.ai.fler.features.settings.HookScriptsScreen
 import com.ai.fler.features.settings.McpSettingsScreen
 import com.ai.fler.features.settings.SettingsScreen
 import com.ai.fler.features.so_editor.SoEditorScreen
@@ -213,6 +215,26 @@ fun AppNavGraph() {
                 SettingsScreen(
                     onOpenMcpSettings = { navController.navigate(Screen.McpSettings.route) },
                     onOpenAbout = { navController.navigate(Screen.About.route) },
+                    onOpenHookScripts = { navController.navigate(Screen.HookScripts.route) },
+                )
+            }
+
+            // ========== Hook 脚本管理（二级 Screen）==========
+            composable(Screen.HookScripts.route) {
+                HookScriptsScreen(
+                    onBack = { navController.popBackStack() },
+                    onEdit = { scriptId ->
+                        navController.navigate(Screen.HookScriptEdit.createRoute(scriptId))
+                    },
+                )
+            }
+            composable(
+                route = Screen.HookScriptEdit.route,
+                arguments = listOf(navArgument("scriptId") { type = NavType.LongType; defaultValue = 0L })
+            ) { entry ->
+                HookScriptEditScreen(
+                    scriptId = entry.arguments?.getLong("scriptId") ?: 0L,
+                    onBack = { navController.popBackStack() },
                 )
             }
 

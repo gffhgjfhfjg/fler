@@ -61,6 +61,7 @@ class McpToolHandlers @Inject constructor(
     private val callGraphBuilder: DartCallGraphBuilder,
     private val functionIndex: FunctionIndex,
     private val stringXrefScanner: StringXrefScanner,
+    private val fridaTools: FridaMcpToolRegistry,
     @SuppressLint("StaticFieldLeak")
     @ApplicationContext private val context: Context,
 ) : McpResourceProvider {
@@ -166,6 +167,8 @@ class McpToolHandlers @Inject constructor(
         engineMcp.buildTools().forEach { (k, v) -> this[k] = v }
         // 仿真工具（带 emu_ 前缀，Unicorn 会话/调用/寄存器/内存/断点）
         emulationMcp.buildTools().forEach { (k, v) -> this[k] = v }
+        // Frida 动态调试工具（带 frida_ 前缀，root 方案 App 内闭环）
+        fridaTools.buildTools().forEach { this[it.name] = it }
     }
 
     // ========== 参数读取辅助 ==========
@@ -709,6 +712,25 @@ name = "get_pp_entry",
                         }
                     }
                 }
+            }
+        },
+        McpTool(
+            name = "dart_rebuild_call_graph",
+            description = "强制全量重建某次分析的 Dart 调用图（先清空旧边再重建，供修复/升级建图逻辑后刷新边表）。同步等待完成返回边数。analysisId 可省略（缺省用 use_analysis 设定的当前分析）",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "dart_rebuild_call_graph")
+            currentProgress().report(0.2f, "重建调用图 analysis=$id")
+            val n = callGraphBuilder.build(id)
+            buildJsonObject {
+                put("analysisId", id)
+                put("edgeCount", n)
+                put("built", true)
             }
         },
         McpTool(

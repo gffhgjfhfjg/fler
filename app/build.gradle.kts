@@ -148,6 +148,32 @@ val fetchKeystone = tasks.register("fetchKeystone") {
     }
 }
 
+// Frida-core 静态库：frida-core-devkit-<ver>-android-arm64.tar.xz 的
+// libfrida-core.a + frida-core.h（Frida 官网 release assets，随版本固定）。
+// 同 fetchKeystone：文件由本地脚本 prepare（scripts/fetch-frida-devkit.*）
+// 放置到工程内，本任务仅做存在性校验，配置缓存安全。
+val fetchFridaDevkit = tasks.register("fetchFridaDevkit") {
+    val libDest = file("libs/arm64-v8a/libfrida-core.a")
+    val headerDest = file("src/main/cpp/include/frida/frida-core.h")
+    doLast {
+        if (!libDest.exists() || libDest.length() == 0L) {
+            throw GradleException(
+                "libfrida-core.a 不存在: ${libDest.absolutePath}\n" +
+                    "请先运行 scripts/fetch-frida-devkit.ps1（或 .sh）下载 frida-core-devkit-<ver>-android-arm64\n" +
+                    "并解压 libfrida-core.a 到 app/libs/arm64-v8a/、frida-core.h 到 app/src/main/cpp/include/frida/"
+            )
+        }
+        if (!headerDest.exists() || headerDest.length() == 0L) {
+            throw GradleException(
+                "frida-core.h 不存在: ${headerDest.absolutePath}\n" +
+                    "请从 frida 官方 devkit 解压该头文件到 app/src/main/cpp/include/frida/"
+            )
+        }
+        logger.lifecycle("frida: 使用 frida-core devkit ${libDest.absolutePath}（${libDest.length()} 字节）")
+    }
+}
+
 tasks.named("preBuild") {
     dependsOn(fetchKeystone)
+    dependsOn(fetchFridaDevkit)
 }

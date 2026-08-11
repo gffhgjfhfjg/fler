@@ -272,8 +272,10 @@ class DartCallGraphBuilder @Inject constructor(
             val target = op.substring(hexStart, hexEnd).toLongOrNull(16) ?: continue
             if (target <= 0) continue
 
-            // 函数内跳转不算调用边（不含自递归）
-            if (target in lo..hi) continue
+            // 函数内跳转不算调用边（不含自递归）。
+            // 注意用半开区间 [lo, hi)：下一条方法恰接在 caller 结束地址（hi）时，
+            // 闭区间 `in lo..hi` 会把 tail-call 到紧邻下一方法的 bl 误判为函数内跳转而漏边。
+            if (target >= lo && target < hi) continue
             val callee = findContaining(funcs, target) ?: continue
             if (callee.id == caller.id) continue
 
@@ -319,11 +321,13 @@ class DartCallGraphBuilder @Inject constructor(
             if (funcs[mid].offset <= target) { idx = mid; lo = mid + 1 } else hi = mid - 1
         }
         if (idx < 0) return null
-        // 从最近的起点向前找一个 size 覆盖 target 的方法
+        // 从最近的起点向前找一个 size 覆盖 target 的方法。
+        // 用半开区间 [f.offset, f.offset+size)：target 恰等于方法结束地址时
+        // 不算包含（应归属下一个紧邻方法），与 collectEdges 保持一致。
         for (i in idx downTo 0) {
             val f = funcs[i]
-            if (f.size > 0 && target <= f.offset + f.size) return f
-            if (f.size > 0 && target > f.offset + f.size) break
+            if (f.size > 0 && target < f.offset + f.size) return f
+            if (f.size > 0 && target >= f.offset + f.size) break
         }
         return null
     }

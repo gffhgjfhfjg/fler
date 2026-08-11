@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -61,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ai.fler.core.service.EnginePackManager
+import com.ai.fler.feature.settings.FridaStatusUiState
 import com.ai.fler.feature.settings.McpUiState
 import com.ai.fler.feature.settings.SettingsViewModel
 import com.ai.fler.features.engine.EngineViewModel
@@ -77,6 +79,7 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
     onOpenMcpSettings: () -> Unit = {},
     onOpenAbout: () -> Unit = {},
+    onOpenHookScripts: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
     engineViewModel: EngineViewModel = hiltViewModel(),
 ) {
@@ -85,6 +88,7 @@ fun SettingsScreen(
     val sourceState by viewModel.sourceState.collectAsStateWithLifecycle()
     val cacheCleanResult by viewModel.cacheCleanResult.collectAsStateWithLifecycle()
     val mcpState by viewModel.mcpState.collectAsStateWithLifecycle()
+    val fridaStatus by viewModel.fridaStatus.collectAsStateWithLifecycle()
     val engineState by engineViewModel.uiState.collectAsStateWithLifecycle()
     var showCacheCleanConfirm by remember { mutableStateOf(false) }
 
@@ -132,6 +136,20 @@ fun SettingsScreen(
             McpEntryCard(
                 state = mcpState,
                 onClick = onOpenMcpSettings
+            )
+        }
+
+        // Hook 脚本管理（Frida 落地脚本增删改查）
+        item {
+            HookScriptsEntryCard(onClick = onOpenHookScripts)
+        }
+
+        // Frida 动态插桩状态（客户端/root/server 探测）
+        item {
+            FridaStatusCard(
+                state = fridaStatus,
+                onProbe = { viewModel.refreshFridaStatus(ensureReady = false) },
+                onPrepare = { viewModel.refreshFridaStatus(ensureReady = true) },
             )
         }
 
@@ -798,6 +816,105 @@ private fun AboutCard(
         subtitle = "Fler ${com.ai.fler.BuildConfig.VERSION_NAME} · 开源项目与第三方库",
         onClick = onClick,
     )
+}
+
+@Composable
+private fun HookScriptsEntryCard(onClick: () -> Unit) {
+    CardListTile(
+        title = "Hook 脚本",
+        subtitle = "Frida JS 落地管理：内置预设与自定义脚本增删改查",
+        leadingIcon = Icons.Outlined.Code,
+        onClick = onClick,
+    )
+}
+
+@Composable
+private fun FridaStatusCard(
+    state: FridaStatusUiState,
+    onProbe: () -> Unit,
+    onPrepare: () -> Unit,
+) {
+    val statusColor = when {
+        state.errorMessage != null -> MaterialTheme.colorScheme.error
+        state.available && state.serverRunning -> MaterialTheme.colorScheme.tertiary
+        state.available -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val statusText = when {
+        state.loading -> "探测中..."
+        state.errorMessage != null -> "探测失败：${state.errorMessage}"
+        state.available && state.serverRunning && state.initialized -> "就绪（frida ${state.version}）"
+        state.available && state.serverRunning -> "server 已运行，客户端未初始化"
+        state.available -> "客户端可用，需部署/启动 server"
+        else -> "frida-core 未启用（编译禁用或库缺失）"
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Frida 动态插桩",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (state.loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = statusColor,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = statusColor,
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "root:${if (state.root) "✓" else "✗"} · server:${if (state.serverRunning) "✓" else "✗"} · client:${if (state.available) "✓" else "✗"} · initialized:${if (state.initialized) "✓" else "✗"}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onProbe,
+                    enabled = !state.loading,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("状态探测")
+                }
+                Button(
+                    onClick = onPrepare,
+                    enabled = !state.loading,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("就绪检查")
+                }
+            }
+        }
+    }
 }
 
 @Composable

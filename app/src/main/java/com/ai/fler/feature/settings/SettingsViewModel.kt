@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ai.fler.core.frida.FridaEngine
 import com.ai.fler.core.mcp.McpConfig
 import com.ai.fler.core.mcp.McpToolHandlers
 import com.ai.fler.core.service.EnginePackManager
@@ -37,6 +38,7 @@ class SettingsViewModel @Inject constructor(
     private val mcpConfig: McpConfig,
     private val mcpServerManager: McpServerManager,
     private val toolHandlers: McpToolHandlers,
+    private val fridaEngine: FridaEngine,
 ) : ViewModel() {
 
     private val _updateState = MutableStateFlow(UpdateCheckState())
@@ -55,6 +57,10 @@ class SettingsViewModel @Inject constructor(
     /** MCP 服务器状态（配置 + 运行状态聚合）。 */
     private val _mcpState = MutableStateFlow(McpUiState())
     val mcpState: StateFlow<McpUiState> = _mcpState.asStateFlow()
+
+    /** Frida 动态插桩状态（客户端可用性/root/server/初始化）。 */
+    private val _fridaStatus = MutableStateFlow(FridaStatusUiState())
+    val fridaStatus: StateFlow<FridaStatusUiState> = _fridaStatus.asStateFlow()
 
     /** MCP 工具列表（名称 + 解释）。 */
     val mcpTools: List<McpToolHandlers.McpTool>
@@ -168,6 +174,31 @@ class SettingsViewModel @Inject constructor(
 
     fun clearCacheCleanResult() {
         _cacheCleanResult.value = null
+    }
+
+    // ========== Frida 状态 ==========
+
+    /** 探测 Frida 状态（ensureReady=true 时会先部署/拉起 frida-server）。 */
+    fun refreshFridaStatus(ensureReady: Boolean) {
+        viewModelScope.launch {
+            _fridaStatus.value = _fridaStatus.value.copy(loading = true, errorMessage = null)
+            try {
+                val s = withContext(Dispatchers.IO) {
+                    if (ensureReady) fridaEngine.ensureReady() else fridaEngine.status()
+                }
+                _fridaStatus.value = FridaStatusUiState(
+                    available = s.available,
+                    version = s.version,
+                    root = s.root,
+                    serverRunning = s.serverRunning,
+                    initialized = s.initialized,
+                )
+            } catch (e: Exception) {
+                _fridaStatus.value = FridaStatusUiState(
+                    errorMessage = e.message ?: "Frida 探测失败",
+                )
+            }
+        }
     }
 
     /**
@@ -296,4 +327,15 @@ private data class McpConfigSnapshot(
     val token: String,
     val patchEnabled: Boolean,
     val exportTreeUri: String = "",
+)
+
+/** Frida 动态插桩状态（设置页状态卡片用）。 */
+data class FridaStatusUiState(
+    val available: Boolean = false,
+    val version: String = "",
+    val root: Boolean = false,
+    val serverRunning: Boolean = false,
+    val initialized: Boolean = false,
+    val loading: Boolean = false,
+    val errorMessage: String? = null,
 )

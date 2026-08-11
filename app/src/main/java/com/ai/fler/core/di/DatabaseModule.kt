@@ -10,6 +10,7 @@ import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
+import com.ai.fler.data.dao.HookScriptDao
 import com.ai.fler.data.dao.LibraryDao
 import com.ai.fler.data.dao.McpToolStatDao
 import com.ai.fler.data.dao.PpEntryDao
@@ -40,7 +41,10 @@ object DatabaseModule {
             AppDatabase::class.java,
             AppDatabase.DATABASE_NAME
         )
-            .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+            .addMigrations(
+                MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+                MIGRATION_7_8, MIGRATION_8_9
+            )
             .fallbackToDestructiveMigration()
             .build()
     }
@@ -129,6 +133,22 @@ object DatabaseModule {
         }
     }
 
+    /** 8 → 9：新增 hook_scripts 表（Frida Hook 脚本落地管理）。 */
+    private val MIGRATION_8_9 = object : Migration(8, 9) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `hook_scripts` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`name` TEXT NOT NULL, " +
+                    "`description` TEXT NOT NULL, " +
+                    "`source` TEXT NOT NULL, " +
+                    "`is_preset` INTEGER NOT NULL, " +
+                    "`updated_at` INTEGER NOT NULL" +
+                    ")"
+            )
+        }
+    }
+
     @Provides
     fun provideProjectDao(db: AppDatabase): ProjectDao = db.projectDao()
 
@@ -155,4 +175,7 @@ object DatabaseModule {
 
     @Provides
     fun provideMcpToolStatDao(db: AppDatabase): McpToolStatDao = db.mcpToolStatDao()
+
+    @Provides
+    fun provideHookScriptDao(db: AppDatabase): HookScriptDao = db.hookScriptDao()
 }

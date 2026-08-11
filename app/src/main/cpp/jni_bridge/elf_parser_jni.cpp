@@ -215,7 +215,10 @@ Java_com_ai_fler_core_jni_ElfParserBindings_nativeWriteBytes(
 // Android 上 .so 卸载时 JNI_OnUnload 不保证被调用（classloader 时机不确定），
 // 因此不依赖卸载钩子释放：全局 ref 随进程退出自动回收，App 生命周期内
 // .so 常驻不卸载，泄漏可控。
+extern "C" void fridaCacheJavaVm(JavaVM* vm);
+
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+    fridaCacheJavaVm(vm);
     JNIEnv* env = nullptr;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
         return JNI_ERR;

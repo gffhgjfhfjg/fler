@@ -76,6 +76,14 @@ sealed class Screen(val route: String) {
     data object AsmBrowser : Screen("asm_browser/{analysisId}/{methodId}") {
         fun createRoute(analysisId: Long, methodId: Long): String = "asm_browser/$analysisId/$methodId"
     }
+
+    /** Hook 脚本管理页（二级 Screen，从设置页进入）。 */
+    data object HookScripts : Screen("hook_scripts")
+
+    /** Hook 脚本编辑页（新建 id=0 / 编辑 id>0）。 */
+    data object HookScriptEdit : Screen("hook_script_edit/{scriptId}") {
+        fun createRoute(scriptId: Long): String = "hook_script_edit/$scriptId"
+    }
 }
 
 /** 顶层 Tab 列表（顺序决定显示顺序）。 */

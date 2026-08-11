@@ -23,6 +23,7 @@ include_directories(
     .
     keystone_include
     include                # include/capstone、include/rizin（workflow 产物解压至此）
+    include/frida          # include/frida/frida-core.h（frida-core-devkit 产物）
     include/rizin          # Rizin 内部 #include <rz_types.h> 不带前缀，需直接暴露 rizin/ 目录
     include/rizin/rz_util  # rz_util 内部子头文件
     include/rizin/sdb      # sdb 头文件
@@ -66,6 +67,24 @@ elseif(ENABLE_UNICORN)
         "运行 build-unicorn workflow 并把产物放入 app/libs/arm64-v8a/")
 endif()
 
+# Frida 动态插桩静态库：frida-core-devkit 产物（libfrida-core.a + include/frida/frida-core.h），
+# 由 app/build.gradle.kts 的 fetchFridaDevkit 任务下载解压。libfrida-core.a 体积约 260MB，
+# 静态链接为 fler_jni 的 frida-client（对端是设备端 root 常驻的 frida-server）。
+# 库缺失时优雅降级：不链接、不定义宏，frida_jni.cpp 退化为安全 stub（isAvailable=false）。
+option(ENABLE_FRIDA "Build with Frida dynamic instrumentation client" ON)
+set(FRIDA_LIB "${FLER_LIBS_DIR}/libfrida-core.a")
+set(FLER_HAS_FRIDA OFF)
+if(ENABLE_FRIDA AND EXISTS "${FRIDA_LIB}")
+    set(FLER_HAS_FRIDA ON)
+    add_library(frida_core STATIC IMPORTED)
+    set_target_properties(frida_core PROPERTIES
+        IMPORTED_LOCATION "${FRIDA_LIB}"
+    )
+elseif(ENABLE_FRIDA)
+    message(WARNING "libfrida-core.a 不存在（${FRIDA_LIB}），Frida 动态插桩禁用；"
+        "运行 app/build.gradle.kts :fler:fetchFridaDevkit 任务下载产物")
+endif()
+
 # ========== 查找 Android 系统库 ==========
 find_library(log-lib log)
 find_library(android-lib android)
@@ -88,6 +107,7 @@ add_library(fler_jni SHARED
     jni_bridge/keystone_jni.cpp
     jni_bridge/rizin_jni.cpp
     jni_bridge/unicorn_jni.cpp
+    jni_bridge/frida_jni.cpp
 )
 
 target_link_libraries(fler_jni
@@ -102,6 +122,11 @@ target_link_libraries(fler_jni
 if(FLER_HAS_UNICORN)
     target_compile_definitions(fler_jni PRIVATE FLER_ENABLE_UNICORN)
     target_link_libraries(fler_jni unicorn)
+endif()
+
+if(FLER_HAS_FRIDA)
+    target_compile_definitions(fler_jni PRIVATE FLER_ENABLE_FRIDA)
+    target_link_libraries(fler_jni frida_core)
 endif()
 
 # 导出符号可见性

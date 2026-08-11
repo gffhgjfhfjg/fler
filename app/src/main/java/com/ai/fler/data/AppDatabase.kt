@@ -8,6 +8,7 @@ import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
+import com.ai.fler.data.dao.HookScriptDao
 import com.ai.fler.data.dao.LibraryDao
 import com.ai.fler.data.dao.McpToolStatDao
 import com.ai.fler.data.dao.PpEntryDao
@@ -17,6 +18,7 @@ import com.ai.fler.data.entity.Analysis
 import com.ai.fler.data.entity.DartCallEdge
 import com.ai.fler.data.entity.DartClass
 import com.ai.fler.data.entity.DartMethod
+import com.ai.fler.data.entity.HookScript
 import com.ai.fler.data.entity.Library
 import com.ai.fler.data.entity.McpToolStat
 import com.ai.fler.data.entity.PpEntry
@@ -38,9 +40,10 @@ import com.ai.fler.data.entity.Project
         Library::class,
         AddressMapping::class,
         DartCallEdge::class,
-        McpToolStat::class
+        McpToolStat::class,
+        HookScript::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -58,6 +61,9 @@ abstract class AppDatabase : RoomDatabase() {
 
     /** MCP 工具调用统计 DAO。 */
     abstract fun mcpToolStatDao(): McpToolStatDao
+
+    /** Hook 脚本 DAO（Frida 落地脚本增删改查）。 */
+    abstract fun hookScriptDao(): HookScriptDao
 
     /**
      * 级联删除项目及其所有关联数据。
