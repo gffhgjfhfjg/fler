@@ -62,6 +62,9 @@ struct FridaWorker {
     GThread* thread = nullptr;
     FridaDeviceManager* manager = nullptr;
     std::atomic<bool> running{false};
+    // 看门狗：某次 syncOnWorker/asyncOnWorker 超时后置 true，后续调用快速失败，
+    // 避免整个 worker 队列被卡死导致 MCP server 失去响应。
+    std::atomic<bool> blocked{false};
 };
 
 static FridaWorker g_worker;
@@ -86,10 +89,16 @@ static void postToWorker(std::function<void()> fn) {
 
 // 在 worker 线程同步执行并回传结果（阻塞调用线程直到 worker 完成）。std::promise
 // 不可拷贝，包一层 shared_ptr 使其作为 lambda 捕获后可被 std::function 持有。
+// 看门狗：future 超时（默认 10s）标记 worker blocked 并抛异常，调用方快速失败，
+// 不再无限挂起（避免单次卡死拖垮整个 MCP server）。
 template <typename R>
-static R syncOnWorker(std::function<R()> fn) {
+static R syncOnWorker(std::function<R()> fn,
+                      std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
     if (!g_worker.running.load() || g_worker.ctx == nullptr) {
         throw std::runtime_error("frida worker not running");
+    }
+    if (g_worker.blocked.load()) {
+        throw std::runtime_error("frida worker blocked (previous op timed out)");
     }
     auto p = std::make_shared<std::promise<R>>();
     auto future = p->get_future();
@@ -101,6 +110,41 @@ static R syncOnWorker(std::function<R()> fn) {
         }
     }};
     g_main_context_invoke(g_worker.ctx, invokeDispatch, job);
+    if (future.wait_for(timeout) != std::future_status::ready) {
+        g_worker.blocked.store(true);
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "syncOnWorker timed out after %lldms; "
+                            "worker marked blocked", (long long)timeout.count());
+        throw std::runtime_error("frida worker blocked (sync op timed out)");
+    }
+    return future.get();
+}
+
+// 在 worker 线程发起 frida *_async 调用并回传结果（阻塞调用线程直到回调完成）。
+// 与 syncOnWorker 的关键区别：job 内只【发起】异步调用（frida 的 async 函数不会
+// 嵌套 pump GMainContext，立即返回），真正的 *_finish 由 frida 在 worker context 上
+// 派发的回调执行，结果经 promise 回传。这样 worker 主循环永不因嵌套 pump 而阻塞，
+// 根治「目标进程有活跃 hook 时 *_sync 重入死锁」问题。
+template <typename R>
+static R asyncOnWorker(std::function<void(const std::shared_ptr<std::promise<R>>&)> fireAsync,
+                       std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    if (!g_worker.running.load() || g_worker.ctx == nullptr) {
+        throw std::runtime_error("frida worker not running");
+    }
+    if (g_worker.blocked.load()) {
+        throw std::runtime_error("frida worker blocked (previous op timed out)");
+    }
+    auto p = std::make_shared<std::promise<R>>();
+    auto future = p->get_future();
+    auto* job = new InvokeJob{ [fireAsync = std::move(fireAsync), p]() mutable {
+        fireAsync(p);
+    }};
+    g_main_context_invoke(g_worker.ctx, invokeDispatch, job);
+    if (future.wait_for(timeout) != std::future_status::ready) {
+        g_worker.blocked.store(true);
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "asyncOnWorker timed out after %lldms; "
+                            "worker marked blocked", (long long)timeout.count());
+        throw std::runtime_error("frida worker blocked (async op timed out)");
+    }
     return future.get();
 }
 
@@ -109,6 +153,7 @@ static void workerMain() {
     g_worker.loop = g_main_loop_new(g_worker.ctx, FALSE);
     g_worker.manager = frida_device_manager_new();
     g_worker.running.store(true);
+    g_worker.blocked.store(false);
     __android_log_print(ANDROID_LOG_INFO, TAG, "frida worker thread started");
     g_main_loop_run(g_worker.loop);
     g_worker.running.store(false);
@@ -308,15 +353,36 @@ static std::string errToString(GError** error) {
     return "";
 }
 
-// ---- 本地设备（attach 到 frida-server 回环端口，每次现查） ---------------------
-// 注意：不用 FRIDA_DEVICE_TYPE_LOCAL（进程内注入引擎，Android 上需 dlopen libart，
-// App 命名空间取不到会报 "Unable to load libart.so"）。我们连已常驻的 frida-server
-// 的 socket 后端（127.0.0.1:27042），由 server 端注入，App 客户端只做控制面。
+// 本地设备（attach 到 frida-server 回环端口）。改为异步获取：add_remote_device 的
+// *_sync 同样会在 worker 上嵌套 pump，必须走 *_async + *_finish。每次现查（新设备
+// 引用），调用方在操作回调里 g_object_unref 释放。
 static const char* kFridaServerAddr = "127.0.0.1:27042";
 
-static FridaDevice* obtainLocalDevice(GError** error) {
-    return frida_device_manager_add_remote_device_sync(
-        g_worker.manager, kFridaServerAddr, nullptr, nullptr, error);
+struct DeviceAcquireCtx {
+    std::shared_ptr<std::promise<FridaDevice*>> promise;
+};
+
+static void onLocalDeviceReady(GObject* obj, GAsyncResult* result, gpointer userData) {
+    auto* ctx = static_cast<DeviceAcquireCtx*>(userData);
+    FridaDeviceManager* manager = reinterpret_cast<FridaDeviceManager*>(obj);
+    GError* error = nullptr;
+    FridaDevice* device = frida_device_manager_add_remote_device_finish(manager, result, &error);
+    if (device == nullptr) {
+        ctx->promise->set_exception(std::make_exception_ptr(std::runtime_error(
+            "add remote device (127.0.0.1:27042) failed: " + errToString(&error))));
+    } else {
+        ctx->promise->set_value(device);
+    }
+    delete ctx;
+}
+
+// worker 上异步获取 local device 并阻塞等待结果（返回的 device 持引用，调用方负责释放）。
+static FridaDevice* acquireLocalDeviceAsync() {
+    return asyncOnWorker<FridaDevice*>([](const auto& p) {
+        auto* ctx = new DeviceAcquireCtx{ p };
+        frida_device_manager_add_remote_device(g_worker.manager, kFridaServerAddr, nullptr,
+                                               nullptr, onLocalDeviceReady, ctx);
+    });
 }
 
 // ---- script "message" 回调 ------------------------------------------------------
@@ -350,12 +416,214 @@ static void onSessionDetached(FridaSession* session, FridaSessionDetachReason re
     (void)session;
 }
 
+// ---- createScript/loadScript 异步回调（asyncOnWorker 用，worker context 上派发） ----
+// 结构体打包回调上下文：promise（回传结果）+ 回调期仍需要的资源（options 生命周期
+// 延长到 create 完成后释放）。
+struct ScriptCreateCtx {
+    std::shared_ptr<std::promise<long>> promise;
+    FridaScriptOptions* options;
+};
+
+static void onScriptCreated(GObject* obj, GAsyncResult* result, gpointer userData) {
+    auto* ctx = static_cast<ScriptCreateCtx*>(userData);
+    FridaSession* session = reinterpret_cast<FridaSession*>(obj);
+    GError* error = nullptr;
+    FridaScript* script = frida_session_create_script_finish(session, result, &error);
+    long h = 0L;
+    if (script == nullptr) {
+        std::string e = errToString(&error);
+        setLastScriptError("createScript failed: " + e);
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "createScript failed: %s", e.c_str());
+    } else {
+        g_signal_connect(script, "message", G_CALLBACK(onScriptMessage), nullptr);
+        h = storeScript(script);
+    }
+    if (ctx->options != nullptr) {
+        g_object_unref(ctx->options);
+        ctx->options = nullptr;
+    }
+    ctx->promise->set_value(h);
+    delete ctx;
+}
+
+struct ScriptLoadCtx {
+    std::shared_ptr<std::promise<bool>> promise;
+};
+
+static void onScriptLoaded(GObject* obj, GAsyncResult* result, gpointer userData) {
+    auto* ctx = static_cast<ScriptLoadCtx*>(userData);
+    FridaScript* script = reinterpret_cast<FridaScript*>(obj);
+    GError* error = nullptr;
+    frida_script_load_finish(script, result, &error);
+    bool ok = (error == nullptr);
+    if (!ok) {
+        std::string e = errToString(&error);
+        setLastScriptError("loadScript failed: " + e);
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "loadScript failed: %s", e.c_str());
+    }
+    ctx->promise->set_value(ok);
+    delete ctx;
+}
+
+// ---- 设备级操作异步回调（acquireLocalDeviceAsync 后接续使用；device 由回调释放） ----
+struct EnumerateProcsCtx {
+    std::shared_ptr<std::promise<std::string>> promise;
+    FridaDevice* device;
+};
+
+static void onProcessesEnumerated(GObject* obj, GAsyncResult* result, gpointer userData) {
+    auto* ctx = static_cast<EnumerateProcsCtx*>(userData);
+    FridaDevice* dev = reinterpret_cast<FridaDevice*>(obj);
+    GError* error = nullptr;
+    FridaProcessList* list = frida_device_enumerate_processes_finish(dev, result, &error);
+    std::string body;
+    if (list == nullptr) {
+        body = "{\"error\":\"" + errToString(&error) + "\"}";
+    } else {
+        body = "[";
+        gint n = frida_process_list_size(list);
+        const gchar* sep = "";
+        for (gint i = 0; i != n; i++) {
+            FridaProcess* p = frida_process_list_get(list, i);
+            guint pid = frida_process_get_pid(p);
+            const gchar* name = frida_process_get_name(p);
+            body += sep;
+            body += "{\"pid\":" + std::to_string(pid) +
+                    ",\"name\":\"" + std::string(name) + "\"}";
+            sep = ",";
+        }
+        g_object_unref(list);
+        body += "]";
+    }
+    g_object_unref(ctx->device);
+    ctx->promise->set_value(std::move(body));
+    delete ctx;
+}
+
+struct EnumerateAppsCtx {
+    std::shared_ptr<std::promise<std::string>> promise;
+    FridaDevice* device;
+};
+
+static void onApplicationsEnumerated(GObject* obj, GAsyncResult* result, gpointer userData) {
+    auto* ctx = static_cast<EnumerateAppsCtx*>(userData);
+    FridaDevice* dev = reinterpret_cast<FridaDevice*>(obj);
+    GError* error = nullptr;
+    FridaApplicationList* list = frida_device_enumerate_applications_finish(dev, result, &error);
+    std::string body;
+    if (list == nullptr) {
+        body = "{\"error\":\"" + errToString(&error) + "\"}";
+    } else {
+        body = "[";
+        gint n = frida_application_list_size(list);
+        const gchar* sep = "";
+        for (gint i = 0; i != n; i++) {
+            FridaApplication* app = frida_application_list_get(list, i);
+            const gchar* id = frida_application_get_identifier(app);
+            const gchar* name = frida_application_get_name(app);
+            body += sep;
+            body += "{\"identifier\":\"" + std::string(id) +
+                    "\",\"name\":\"" + std::string(name) + "\"}";
+            sep = ",";
+        }
+        g_object_unref(list);
+        body += "]";
+    }
+    g_object_unref(ctx->device);
+    ctx->promise->set_value(std::move(body));
+    delete ctx;
+}
+
+struct AttachCtx {
+    std::shared_ptr<std::promise<long>> promise;
+    FridaDevice* device;
+    guint pid;
+};
+
+static void onAttached(GObject* obj, GAsyncResult* result, gpointer userData) {
+    auto* ctx = static_cast<AttachCtx*>(userData);
+    FridaDevice* dev = reinterpret_cast<FridaDevice*>(obj);
+    GError* error = nullptr;
+    FridaSession* session = frida_device_attach_finish(dev, result, &error);
+    long h = 0L;
+    if (session == nullptr) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "attach %u failed: %s",
+                            ctx->pid, errToString(&error).c_str());
+    } else {
+        g_signal_connect(session, "detached", G_CALLBACK(onSessionDetached), nullptr);
+        __android_log_print(ANDROID_LOG_INFO, TAG, "attached to pid %u", ctx->pid);
+        h = storeSession(session);
+    }
+    g_object_unref(ctx->device);
+    ctx->promise->set_value(h);
+    delete ctx;
+}
+
+struct SpawnCtx {
+    std::shared_ptr<std::promise<long>> promise;
+    FridaDevice* device;
+    std::string identifier;
+};
+
+static void onSpawned(GObject* obj, GAsyncResult* result, gpointer userData) {
+    auto* ctx = static_cast<SpawnCtx*>(userData);
+    FridaDevice* dev = reinterpret_cast<FridaDevice*>(obj);
+    GError* error = nullptr;
+    guint pid = frida_device_spawn_finish(dev, result, &error);
+    if (error != nullptr || pid == 0) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "spawn %s failed: %s",
+                            ctx->identifier.c_str(), errToString(&error).c_str());
+    } else {
+        __android_log_print(ANDROID_LOG_INFO, TAG, "spawned %s pid=%u",
+                            ctx->identifier.c_str(), pid);
+    }
+    g_object_unref(ctx->device);
+    ctx->promise->set_value(static_cast<long>(pid));
+    delete ctx;
+}
+
+struct DeviceBoolCtx {
+    std::shared_ptr<std::promise<bool>> promise;
+    FridaDevice* device;
+};
+
+static void onResumed(GObject* obj, GAsyncResult* result, gpointer userData) {
+    auto* ctx = static_cast<DeviceBoolCtx*>(userData);
+    FridaDevice* dev = reinterpret_cast<FridaDevice*>(obj);
+    GError* error = nullptr;
+    frida_device_resume_finish(dev, result, &error);
+    bool ok = (error == nullptr);
+    if (!ok) errToString(&error);
+    g_object_unref(ctx->device);
+    ctx->promise->set_value(ok);
+    delete ctx;
+}
+
+static void onKilled(GObject* obj, GAsyncResult* result, gpointer userData) {
+    auto* ctx = static_cast<DeviceBoolCtx*>(userData);
+    FridaDevice* dev = reinterpret_cast<FridaDevice*>(obj);
+    GError* error = nullptr;
+    frida_device_kill_finish(dev, result, &error);
+    bool ok = (error == nullptr);
+    if (!ok) errToString(&error);
+    g_object_unref(ctx->device);
+    ctx->promise->set_value(ok);
+    delete ctx;
+}
+
 // ─────────────────────────────────────────────────────────────
 // JNI 入口（static Java 方法：com/ai/fler/core/jni/FridaBindings）
 // ─────────────────────────────────────────────────────────────
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_ai_fler_core_jni_FridaBindings_nativeIsAvailable(JNIEnv*, jobject) {
     return JNI_TRUE;
+}
+
+// worker liveness：不经过 worker（纯原子量读取），worker 卡死时也能返回 false，
+// 供 MCP 侧 frida_ready/frida_status 快速失败判定。
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ai_fler_core_jni_FridaBindings_nativeWorkerAlive(JNIEnv*, jobject) {
+    return static_cast<jboolean>(g_worker.running.load() && !g_worker.blocked.load());
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -388,29 +656,11 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeInitialize(JNIEnv* env, jobject) {
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_ai_fler_core_jni_FridaBindings_nativeEnumerateProcesses(JNIEnv* env, jobject) {
     try {
-        std::string out = syncOnWorker<std::string>([]() -> std::string {
-            GError* error = nullptr;
-            FridaDevice* local = obtainLocalDevice(&error);
-            if (local == nullptr)
-                return "{\"error\":\"no local device: " + errToString(&error) + "\"}";
-            FridaProcessList* list =
-                frida_device_enumerate_processes_sync(local, nullptr, nullptr, &error);
-            g_object_unref(local);
-            if (list == nullptr) return "{\"error\":\"" + errToString(&error) + "\"}";
-            std::string body = "[";
-            gint n = frida_process_list_size(list);
-            const gchar* sep = "";
-            for (gint i = 0; i != n; i++) {
-                FridaProcess* p = frida_process_list_get(list, i);
-                guint pid = frida_process_get_pid(p);
-                const gchar* name = frida_process_get_name(p);
-                body += sep;
-                body += "{\"pid\":" + std::to_string(pid) +
-                        ",\"name\":\"" + std::string(name) + "\"}";
-                sep = ",";
-            }
-            g_object_unref(list);
-            return body + "]";
+        FridaDevice* local = acquireLocalDeviceAsync();
+        std::string out = asyncOnWorker<std::string>([local](const auto& p) {
+            auto* ctx = new EnumerateProcsCtx{ p, local };
+            frida_device_enumerate_processes(local, nullptr, nullptr,
+                                             onProcessesEnumerated, ctx);
         });
         return env->NewStringUTF(out.c_str());
     } catch (const std::exception& e) {
@@ -423,29 +673,11 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeEnumerateProcesses(JNIEnv* env, jo
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_ai_fler_core_jni_FridaBindings_nativeEnumerateApplications(JNIEnv* env, jobject) {
     try {
-        std::string out = syncOnWorker<std::string>([]() -> std::string {
-            GError* error = nullptr;
-            FridaDevice* local = obtainLocalDevice(&error);
-            if (local == nullptr)
-                return "{\"error\":\"no local device: " + errToString(&error) + "\"}";
-            FridaApplicationList* list =
-                frida_device_enumerate_applications_sync(local, nullptr, nullptr, &error);
-            g_object_unref(local);
-            if (list == nullptr) return "{\"error\":\"" + errToString(&error) + "\"}";
-            std::string body = "[";
-            gint n = frida_application_list_size(list);
-            const gchar* sep = "";
-            for (gint i = 0; i != n; i++) {
-                FridaApplication* app = frida_application_list_get(list, i);
-                const gchar* id = frida_application_get_identifier(app);
-                const gchar* name = frida_application_get_name(app);
-                body += sep;
-                body += "{\"identifier\":\"" + std::string(id) +
-                        "\",\"name\":\"" + std::string(name) + "\"}";
-                sep = ",";
-            }
-            g_object_unref(list);
-            return body + "]";
+        FridaDevice* local = acquireLocalDeviceAsync();
+        std::string out = asyncOnWorker<std::string>([local](const auto& p) {
+            auto* ctx = new EnumerateAppsCtx{ p, local };
+            frida_device_enumerate_applications(local, nullptr, nullptr,
+                                                onApplicationsEnumerated, ctx);
         });
         return env->NewStringUTF(out.c_str());
     } catch (const std::exception& e) {
@@ -458,25 +690,10 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeEnumerateApplications(JNIEnv* env,
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_ai_fler_core_jni_FridaBindings_nativeAttach(JNIEnv*, jobject, jlong pid) {
     try {
-        return static_cast<jlong>(syncOnWorker<long>([pid]() -> long {
-            GError* error = nullptr;
-            FridaDevice* local = obtainLocalDevice(&error);
-            if (local == nullptr) {
-                __android_log_print(ANDROID_LOG_ERROR, TAG, "attach: no local device (%s)",
-                                    errToString(&error).c_str());
-                return 0L;
-            }
-            FridaSession* session =
-                frida_device_attach_sync(local, static_cast<guint>(pid), nullptr, nullptr, &error);
-            g_object_unref(local);
-            if (session == nullptr) {
-                __android_log_print(ANDROID_LOG_ERROR, TAG, "attach %lld failed: %s",
-                                    (long long)pid, errToString(&error).c_str());
-                return 0L;
-            }
-            g_signal_connect(session, "detached", G_CALLBACK(onSessionDetached), nullptr);
-            __android_log_print(ANDROID_LOG_INFO, TAG, "attached to pid %lld", (long long)pid);
-            return storeSession(session);
+        FridaDevice* local = acquireLocalDeviceAsync();
+        return static_cast<jlong>(asyncOnWorker<long>([local, pid](const auto& p) {
+            auto* ctx = new AttachCtx{ p, local, static_cast<guint>(pid) };
+            frida_device_attach(local, static_cast<guint>(pid), nullptr, nullptr, onAttached, ctx);
         }));
     } catch (const std::exception& e) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "nativeAttach exception: %s", e.what());
@@ -492,22 +709,10 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeSpawn(JNIEnv* env, jobject, jstrin
     std::string identifier(idUtf);
     env->ReleaseStringUTFChars(jIdentifier, idUtf);
     try {
-        return static_cast<jlong>(syncOnWorker<long>([identifier]() -> long {
-            GError* error = nullptr;
-            FridaDevice* local = obtainLocalDevice(&error);
-            if (local == nullptr) {
-                __android_log_print(ANDROID_LOG_ERROR, TAG, "spawn: no local device");
-                return 0L;
-            }
-            guint pid = frida_device_spawn_sync(local, identifier.c_str(), nullptr, nullptr, &error);
-            g_object_unref(local);
-            if (error != nullptr || pid == 0) {
-                __android_log_print(ANDROID_LOG_ERROR, TAG, "spawn %s failed: %s",
-                                    identifier.c_str(), errToString(&error).c_str());
-                return 0L;
-            }
-            __android_log_print(ANDROID_LOG_INFO, TAG, "spawned %s pid=%u", identifier.c_str(), pid);
-            return static_cast<long>(pid);
+        FridaDevice* local = acquireLocalDeviceAsync();
+        return static_cast<jlong>(asyncOnWorker<long>([local, identifier](const auto& p) {
+            auto* ctx = new SpawnCtx{ p, local, identifier };
+            frida_device_spawn(local, identifier.c_str(), nullptr, nullptr, onSpawned, ctx);
         }));
     } catch (const std::exception& e) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "nativeSpawn exception: %s", e.what());
@@ -518,15 +723,10 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeSpawn(JNIEnv* env, jobject, jstrin
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_ai_fler_core_jni_FridaBindings_nativeResume(JNIEnv*, jobject, jlong pid) {
     try {
-        return static_cast<jboolean>(syncOnWorker<bool>([pid]() -> bool {
-            GError* error = nullptr;
-            FridaDevice* local = obtainLocalDevice(&error);
-            if (local == nullptr) return false;
-            frida_device_resume_sync(local, static_cast<guint>(pid), nullptr, &error);
-            g_object_unref(local);
-            bool ok = (error == nullptr);
-            if (!ok) errToString(&error);
-            return ok;
+        FridaDevice* local = acquireLocalDeviceAsync();
+        return static_cast<jboolean>(asyncOnWorker<bool>([local, pid](const auto& p) {
+            auto* ctx = new DeviceBoolCtx{ p, local };
+            frida_device_resume(local, static_cast<guint>(pid), nullptr, onResumed, ctx);
         }));
     } catch (...) {
         return JNI_FALSE;
@@ -536,15 +736,10 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeResume(JNIEnv*, jobject, jlong pid
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_ai_fler_core_jni_FridaBindings_nativeKill(JNIEnv*, jobject, jlong pid) {
     try {
-        return static_cast<jboolean>(syncOnWorker<bool>([pid]() -> bool {
-            GError* error = nullptr;
-            FridaDevice* local = obtainLocalDevice(&error);
-            if (local == nullptr) return false;
-            frida_device_kill_sync(local, static_cast<guint>(pid), nullptr, &error);
-            g_object_unref(local);
-            bool ok = (error == nullptr);
-            if (!ok) errToString(&error);
-            return ok;
+        FridaDevice* local = acquireLocalDeviceAsync();
+        return static_cast<jboolean>(asyncOnWorker<bool>([local, pid](const auto& p) {
+            auto* ctx = new DeviceBoolCtx{ p, local };
+            frida_device_kill(local, static_cast<guint>(pid), nullptr, onKilled, ctx);
         }));
     } catch (...) {
         return JNI_FALSE;
@@ -568,22 +763,13 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeCreateScript(JNIEnv* env, jobject,
     std::string source(srcUtf);
     env->ReleaseStringUTFChars(jSource, srcUtf);
     try {
-        return static_cast<jlong>(syncOnWorker<long>([session, source]() -> long {
-            GError* error = nullptr;
+        return static_cast<jlong>(asyncOnWorker<long>([session, source](const auto& p) {
             FridaScriptOptions* options = frida_script_options_new();
             frida_script_options_set_name(options, "fler");
             frida_script_options_set_runtime(options, FRIDA_SCRIPT_RUNTIME_QJS);
-            FridaScript* script = frida_session_create_script_sync(
-                session, source.c_str(), options, nullptr, &error);
-            g_object_unref(options);
-            if (script == nullptr) {
-                std::string e = errToString(&error);
-                setLastScriptError("createScript failed: " + e);
-                __android_log_print(ANDROID_LOG_ERROR, TAG, "createScript failed: %s", e.c_str());
-                return 0L;
-            }
-            g_signal_connect(script, "message", G_CALLBACK(onScriptMessage), nullptr);
-            return storeScript(script);
+            auto* ctx = new ScriptCreateCtx{ p, options };
+            frida_session_create_script(session, source.c_str(), options, nullptr,
+                                        onScriptCreated, ctx);
         }));
     } catch (const std::exception& e) {
         setLastScriptError(std::string("createScript exception: ") + e.what());
@@ -600,19 +786,13 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeLoadScript(JNIEnv*, jobject, jlong
         return JNI_FALSE;
     }
     try {
-        return static_cast<jboolean>(syncOnWorker<bool>([script]() -> bool {
-            GError* error = nullptr;
-            frida_script_load_sync(script, nullptr, &error);
-            if (error != nullptr) {
-                std::string e = errToString(&error);
-                setLastScriptError("loadScript failed: " + e);
-                __android_log_print(ANDROID_LOG_ERROR, TAG, "loadScript failed: %s", e.c_str());
-                return false;
-            }
-            return true;
+        return static_cast<jboolean>(asyncOnWorker<bool>([script](const auto& p) {
+            auto* ctx = new ScriptLoadCtx{ p };
+            frida_script_load(script, nullptr, onScriptLoaded, ctx);
         }));
-    } catch (...) {
-        setLastScriptError("loadScript exception");
+    } catch (const std::exception& e) {
+        setLastScriptError(std::string("loadScript exception: ") + e.what());
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "nativeLoadScript exception: %s", e.what());
         return JNI_FALSE;
     }
 }
@@ -699,6 +879,11 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeClose(JNIEnv*, jobject) {
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_ai_fler_core_jni_FridaBindings_nativeIsAvailable(JNIEnv*, jobject) {
+    return JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ai_fler_core_jni_FridaBindings_nativeWorkerAlive(JNIEnv*, jobject) {
     return JNI_FALSE;
 }
 

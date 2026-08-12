@@ -61,6 +61,7 @@ class FridaEngine @Inject constructor(
         val root: Boolean,
         val serverRunning: Boolean,
         val initialized: Boolean,
+        val workerAlive: Boolean,
     )
 
     // ---------- 状态 ----------
@@ -92,6 +93,7 @@ class FridaEngine @Inject constructor(
             root = rootAccess.isRoot(),
             serverRunning = if (!FridaBindings.isAvailable) false else rootAccess.isServerRunning(),
             initialized = initialized,
+            workerAlive = if (!FridaBindings.isAvailable) false else FridaBindings.workerAlive,
         )
     }
 

@@ -77,6 +77,12 @@ object FridaBindings {
     /** 取回并清空最近一次脚本 create/load 的原生错误文本（无错误时为空串）。 */
     fun takeLastScriptError(): String = nativeLastScriptError()
 
+    /**
+     * frida worker 线程是否存活且未被看门狗标记阻塞。不经过 worker（纯原生原子量
+     * 读取），worker 卡死时也能返回 false，供 frida_ready/frida_status 快速失败判定。
+     */
+    val workerAlive: Boolean get() = nativeWorkerAlive()
+
     private external fun nativeIsAvailable(): Boolean
     private external fun nativeVersion(): String
     private external fun nativeInitialize(): Boolean
@@ -93,4 +99,5 @@ object FridaBindings {
     private external fun nativeDetach(sessionHandle: Long): Boolean
     private external fun nativeClose()
     private external fun nativeLastScriptError(): String
+    private external fun nativeWorkerAlive(): Boolean
 }

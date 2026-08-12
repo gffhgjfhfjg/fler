@@ -43,7 +43,7 @@ class FridaMcpToolRegistry @Inject constructor(
     fun buildTools(): List<McpToolHandlers.McpTool> = listOf(
         tool(
             name = "frida_ready",
-            description = "Frida 环境就绪检查+启动：探测 root，必要时把 frida-server 部署到 /data/local/tmp 并拉起（常驻），初始化本地 libfrida-core 客户端。返回 available/root/serverRunning/initialized/version",
+            description = "Frida 环境就绪检查+启动：探测 root，必要时把 frida-server 部署到 /data/local/tmp 并拉起（常驻），初始化本地 libfrida-core 客户端。返回 available/root/serverRunning/initialized/version/workerAlive（worker 卡死时为 false，可据此 fast-fail）",
         ) { _ ->
             val status = engine.ensureReady()
             buildJsonObject {
@@ -52,11 +52,12 @@ class FridaMcpToolRegistry @Inject constructor(
                 put("serverRunning", status.serverRunning)
                 put("initialized", status.initialized)
                 put("version", status.version)
+                put("workerAlive", status.workerAlive)
             }
         },
         tool(
             name = "frida_status",
-            description = "Frida 环境状态查询（不触发部署）：available（libfrida-core 客户端）/root/serverRunning/initialized/version",
+            description = "Frida 环境状态查询（不触发部署）：available（libfrida-core 客户端）/root/serverRunning/initialized/version/workerAlive",
         ) { _ ->
             val status = engine.status()
             buildJsonObject {
@@ -65,6 +66,7 @@ class FridaMcpToolRegistry @Inject constructor(
                 put("serverRunning", status.serverRunning)
                 put("initialized", status.initialized)
                 put("version", status.version)
+                put("workerAlive", status.workerAlive)
             }
         },
         tool(
