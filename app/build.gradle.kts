@@ -58,6 +58,14 @@ android {
         }
     }
 
+    packagingOptions {
+        jniLibs {
+            // so 以 deflate 压缩进 APK（实测 85MB→31MB），安装时解压到数据分区。
+            // 分发体积敏感优先此配置；代价是安装略慢 + 数据分区多占解压空间。
+            useLegacyPackaging = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
