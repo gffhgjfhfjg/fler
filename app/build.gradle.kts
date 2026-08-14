@@ -52,7 +52,8 @@ android {
             // 真机冒烟用本地 debug 签名，避免依赖发布签名
             signingConfig = signingConfigs.getByName("debug")
             ndk {
-                debugSymbolLevel = "FULL"
+                // 精简发布体积：不保留符号表（崩溃符号化改用外部符号文件方案）
+                debugSymbolLevel = "NONE"
             }
         }
     }

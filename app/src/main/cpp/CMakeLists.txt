@@ -6,6 +6,8 @@ project("fler")
 add_compile_options(
     -std=c++20
     -fvisibility=hidden
+    -ffunction-sections
+    -fdata-sections
     -Wall
     -Wextra
     -fPIC
@@ -131,6 +133,13 @@ endif()
 
 # 导出符号可见性
 set_target_properties(fler_jni PROPERTIES
-    CXX_VISIBILITY_PRESET default
+    CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
+)
+
+# 链接期裁剪：丢弃未引用函数/数据段（需配合 -ffunction-sections/-fdata-sections），
+# 并隐藏所有静态库导出符号，仅保留 Java_* JNI 导出
+target_link_options(fler_jni PRIVATE
+    -Wl,--gc-sections
+    -Wl,--exclude-libs,ALL
 )
