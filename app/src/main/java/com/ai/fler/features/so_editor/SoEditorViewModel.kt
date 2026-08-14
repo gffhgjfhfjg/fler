@@ -1130,6 +1130,23 @@ class SoEditorViewModel @Inject constructor(
         return patchExporter.exportSoToUri(uri, File(_uiState.value.filePath))
     }
 
+    /** 导出补丁 .patch 到工作目录（SAF 或兜底 App 缓存）。 */
+    suspend fun exportPatchesToWorkDir(): Boolean {
+        val records = backupManager.getPatchRecords()
+        if (records.isEmpty()) return false
+        return patchExporter.exportToWorkDir(
+            soFileName = _uiState.value.fileName,
+            records = records
+        )
+    }
+
+    /** 导出修改后的 SO 到工作目录（SAF 或兜底 App 缓存）。 */
+    suspend fun exportSoToWorkDir(): Boolean {
+        if (!_uiState.value.isFileOpen) return false
+        if (backupManager.getPatchRecords().isEmpty()) return false
+        return patchExporter.exportSoToWorkDir(File(_uiState.value.filePath))
+    }
+
     // ==================================================================
     // 最近文件
     // ==================================================================

@@ -10,7 +10,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedInputStream
-import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
@@ -29,12 +28,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - `POST /message`         legacy 消息端点（响应经对应 SSE 流回发）
  * - `POST /mcp`             MCP Streamable HTTP：JSON-RPC（内联或 SSE 响应，支持 Mcp-Session-Id）
  * - `GET  /mcp`             MCP Streamable HTTP：服务器→客户端事件流（Session-Id 握手）
- * - `GET  /export`          列出 so_export 导出目录内的文件
+ * - `GET  /export`          列出导出根（工作目录或默认缓存）内的文件
  * - `GET  /export/<file>`   下载导出目录内的文件（流式，防路径穿越，仅限该目录）
  *
- * 下载根目录 [fileRoot] 由调用方注入（默认 cacheDir/so_export），
- * 与 export_patched_so 工具的兜底导出目录一致：不传 destDir 且未配置 SAF 目录时
- * 导出的 so 会落在这里，即可用 `curl http://<host>:<port>/export/<文件名>` 直接拉取。
+ * 下载根目录经 [exportRootProvider] 每请求解析（跟随「工作目录」配置动态切换），
+ * 与 export_patched_so 工具的兜底导出目录一致：不传 destDir 且未配置工作目录时
+ * 导出的 so 会落在 cacheDir/so_export，即可用 `curl http://<host>:<port>/export/<文件名>` 直接拉取。
  *
  * 并发模型：每连接用 [scope] 启动协程执行 [McpProtocol.handle]（挂起、可超时、可取消），
  * 不再占用请求线程池等待长任务；线程池仅用于读请求字节。长工具（仿真/建图/导出）
@@ -45,7 +44,7 @@ class McpHttpServer(
     private val config: McpConfig,
     private val sessions: McpSessions,
     private val logger: McpLogger,
-    private val fileRoot: File,
+    private val exportRootProvider: () -> ExportRoot,
 ) {
     private data class Request(
         val method: String,
@@ -70,7 +69,7 @@ class McpHttpServer(
         ss.bind(InetSocketAddress(bindHost, port))
         serverSocket = ss
         running.set(true)
-        runCatching { fileRoot.mkdirs() }
+        runCatching { exportRootProvider().prepare() }
         Thread({ acceptLoop(ss) }, "mcp-accept").start()
         return ss.localPort
     }
@@ -186,42 +185,35 @@ class McpHttpServer(
 
     /** 列出导出目录内的文件（供用户挑选可下载的 so）。 */
     private fun listExportFiles(): String {
-        val files = runCatching {
-            fileRoot.listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: emptyList()
-        }.getOrDefault(emptyList())
-        if (files.isEmpty()) return "(so_export 目录为空，先用 export_patched_so 导出 so)"
-        return files.joinToString("\n") { "${it.name}\t${it.length()} bytes" }
+        val files = runCatching { exportRootProvider().list() }.getOrDefault(emptyList())
+        if (files.isEmpty()) return "(导出目录为空，先用 export_patched_so 导出 so)"
+        return files.joinToString("\n") { "${it.name}\t${it.size} bytes" }
     }
 
     /**
      * `GET /export/<file>`：流式下载导出目录内的文件。
-     * 仅允许 so_export 目录内的普通文件；拒绝路径穿越（../、/、\）。
+     * 仅允许导出根目录内的普通文件；拒绝路径穿越（../、/、\）。
      */
     private fun handleFileDownload(req: Request, output: OutputStream) {
         val name = req.path.substring("/export/".length)
-        if (name.isBlank() || name.contains("..") || name.contains('/') || name.contains('\\')) {
+        if (!isSafeExportName(name)) {
             writeResponse(output, 400, "text/plain", "invalid filename: $name")
             return
         }
-        val safeRoot = runCatching { fileRoot.canonicalPath }.getOrDefault(fileRoot.absolutePath)
-        val file = runCatching { File(fileRoot, name).canonicalFile }.getOrNull()
-        if (file == null ||
-            !file.path.startsWith(safeRoot + File.separator) ||
-            !file.exists() || !file.isFile
-        ) {
+        val input = runCatching { exportRootProvider().open(name) }.getOrNull()
+        if (input == null) {
             writeResponse(output, 404, "text/plain", "not found")
             return
         }
-        val safeName = name.replace("\"", "'")
-        val head = "HTTP/1.1 200 OK\r\n" +
-            "Content-Type: application/octet-stream\r\n" +
-            "Content-Length: ${file.length()}\r\n" +
-            "Content-Disposition: attachment; filename=\"$safeName\"\r\n" +
-            "Cache-Control: no-store\r\n" +
-            "Connection: close\r\n\r\n"
-        output.write(head.toByteArray(Charsets.ISO_8859_1))
-        file.inputStream().use { input ->
-            input.copyTo(output, 64 * 1024)
+        input.use { stream ->
+            val safeName = name.replace("\"", "'")
+            val head = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: application/octet-stream\r\n" +
+                "Content-Disposition: attachment; filename=\"$safeName\"\r\n" +
+                "Cache-Control: no-store\r\n" +
+                "Connection: close\r\n\r\n"
+            output.write(head.toByteArray(Charsets.ISO_8859_1))
+            stream.copyTo(output, 64 * 1024)
             output.flush()
         }
     }

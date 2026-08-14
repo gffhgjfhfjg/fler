@@ -168,7 +168,8 @@ class AnalysisRunner @Inject constructor(
                 failAnalysis(analysisId, extractResult.error ?: "Extraction failed")
                 return
             }
-            Log.i(TAG, "阶段 1/5 完成: libapp=${extractResult.libappPath}, libflutter=${extractResult.libflutterPath}")
+            Log.i(TAG, "阶段 1/5 完成: libapp=${extractResult.libappPath}, libflutter=${extractResult.libflutterPath}, " +
+                "extraLibs=${extractResult.extraLibs.size}")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

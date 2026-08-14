@@ -1,6 +1,8 @@
 package com.ai.fler.features.mcp
 
 import android.content.Context
+import com.ai.fler.core.mcp.ExportRoot
+import com.ai.fler.core.mcp.FileExportRoot
 import com.ai.fler.core.mcp.McpCallStats
 import com.ai.fler.core.mcp.McpConfig
 import com.ai.fler.core.mcp.McpHttpServer
@@ -8,7 +10,9 @@ import com.ai.fler.core.mcp.McpLogger
 import com.ai.fler.core.mcp.McpProtocol
 import com.ai.fler.core.mcp.McpSessions
 import com.ai.fler.core.mcp.McpToolHandlers
+import com.ai.fler.core.mcp.SafExportRoot
 import com.ai.fler.core.log.AppLogger
+import com.ai.fler.core.service.WorkDirectory
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,14 +42,25 @@ class McpServerManager @Inject constructor(
     private val logger: McpLogger,
     private val appLogger: AppLogger,
     private val stats: McpCallStats,
+    private val workDirectory: WorkDirectory,
     @ApplicationContext private val context: Context,
 ) {
     private val sessions = McpSessions()
     private val protocol by lazy {
         McpProtocol(toolHandlers, logger, sessions, stats, toolHandlers)
     }
+    // /export 下载根每请求解析：已设置工作目录 → SAF 实现；否则回退 cacheDir/so_export。
+    // 工作目录变更后无需重启服务器即生效。
+    private val exportRootProvider: () -> ExportRoot = {
+        val doc = workDirectory.asDocumentFile()
+        if (doc != null && doc.canWrite()) {
+            SafExportRoot(context, android.net.Uri.parse(workDirectory.treeUri.value))
+        } else {
+            FileExportRoot(java.io.File(context.cacheDir, "so_export"))
+        }
+    }
     private val httpServer by lazy {
-        McpHttpServer(protocol, config, sessions, logger, java.io.File(context.cacheDir, "so_export"))
+        McpHttpServer(protocol, config, sessions, logger, exportRootProvider)
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

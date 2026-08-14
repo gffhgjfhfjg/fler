@@ -373,6 +373,30 @@ fun SoEditorScreen(
                                     createSoLauncher.launch("${name}_patched_$ts.so")
                                 }
                             )
+                            DropdownMenuItem(
+                                text = { Text("导出到工作目录 (.patch)") },
+                                onClick = {
+                                    showExportMenu = false
+                                    scope.launch {
+                                        val ok = viewModel.exportPatchesToWorkDir()
+                                        snackbarHostState.showSnackbar(
+                                            if (ok) "已导出到工作目录" else "导出失败（无补丁或目录不可写）"
+                                        )
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("导出到工作目录 (.so)") },
+                                onClick = {
+                                    showExportMenu = false
+                                    scope.launch {
+                                        val ok = viewModel.exportSoToWorkDir()
+                                        snackbarHostState.showSnackbar(
+                                            if (ok) "已导出修改后的 SO 到工作目录" else "导出失败（无补丁或目录不可写）"
+                                        )
+                                    }
+                                }
+                            )
                         }
                     }
                 }

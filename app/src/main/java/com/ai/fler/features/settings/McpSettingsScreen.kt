@@ -1,7 +1,5 @@
 package com.ai.fler.features.settings
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,7 +26,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -51,23 +48,6 @@ fun McpSettingsScreen(
 ) {
     val mcpState by viewModel.mcpState.collectAsStateWithLifecycle()
     var showToolsDialog by remember { mutableStateOf(false) }
-
-    val context = LocalContext.current
-    val folderPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-            } catch (_: Exception) {
-            }
-            viewModel.mcpSetExportTreeUri(uri.toString())
-        }
-    }
 
     Scaffold(
         topBar = {
@@ -96,7 +76,6 @@ fun McpSettingsScreen(
                     onSetToken = { viewModel.mcpSetToken(it) },
                     onSetPatchEnabled = { viewModel.mcpSetPatchEnabled(it) },
                     onSetEmuToolsEnabled = { viewModel.mcpSetEmuToolsEnabled(it) },
-                    onPickExportFolder = { folderPicker.launch(null) },
                     onStart = { viewModel.mcpStartServer() },
                     onStop = { viewModel.mcpStopServer() },
                     onOpenLog = onOpenLog,

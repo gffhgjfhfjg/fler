@@ -10,6 +10,7 @@ import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
 import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.AddressTranslator
+import com.ai.fler.core.service.WorkDirectory
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.entity.Analysis
 import com.ai.fler.data.dao.DartCallGraphDao
@@ -62,6 +63,7 @@ class McpToolHandlers @Inject constructor(
     private val functionIndex: FunctionIndex,
     private val stringXrefScanner: StringXrefScanner,
     private val fridaTools: FridaMcpToolRegistry,
+    private val workDirectory: WorkDirectory,
     @SuppressLint("StaticFieldLeak")
     @ApplicationContext private val context: Context,
 ) : McpResourceProvider {
@@ -1790,7 +1792,7 @@ name = "get_pp_entry",
         },
         McpTool(
             name = "export_patched_so",
-            description = "把（已补丁的）so 文件复制/导出到指定目录，供用户获取。目标目录缺省用设置里用户选定的 SAF 导出文件夹；若无则落到 App 缓存 cacheDir/so_export——该目录会经 MCP 服务器暴露为 GET /export/<文件名>，可用 curl http://<手机IP>:<端口>/export/<destName> 直接下载。可传 destDir 绝对路径覆盖（需 App 有写入权限，否则报错）。destName 缺省用源文件名",
+            description = "把（已补丁的）so 文件复制/导出到指定目录，供用户获取。目标目录缺省用设置里用户选定的工作目录（补丁后 SO 的默认导出位置）；若无则落到 App 缓存 cacheDir/so_export——该目录会经 MCP 服务器暴露为 GET /export/<文件名>，可用 curl http://<手机IP>:<端口>/export/<destName> 直接下载。可传 destDir 绝对路径覆盖（需 App 有写入权限，否则报错）。destName 缺省用源文件名",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -1828,7 +1830,7 @@ name = "get_pp_entry",
     private suspend fun currentProgress(): ProgressSink =
         kotlinx.coroutines.currentCoroutineContext()[McpRequestContext]?.progress ?: NoopProgressSink
 
-    /** 把补丁后的 so 复制到目标。优先 destDir（绝对路径），否则用户选定的 SAF 目录，兜底 cacheDir/so_export。 */
+    /** 把补丁后的 so 复制到目标。优先 destDir（绝对路径），否则用户选定的工作目录，兜底 cacheDir/so_export。 */
     private suspend fun exportPatchedSo(src: java.io.File, destName: String, destDir: String): ExportResult {
         return try {
             val progress = currentProgress()
@@ -1845,20 +1847,16 @@ name = "get_pp_entry",
                 return ExportResult(true, out.absolutePath, size, "已复制到 $out")
             }
 
-            val treeUri = config.exportTreeUri.value
-            if (treeUri.isNotBlank()) {
-                val uri = android.net.Uri.parse(treeUri)
-                val doc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, uri)
-                if (doc != null && doc.canWrite()) {
-                    val child = doc.createFile("application/octet-stream", destName)
-                    if (child != null) {
-                        context.contentResolver.openOutputStream(child.uri)?.use { os ->
-                            copyStream(src, os) { p -> progress.report(rangeProgress(p, 0.1f, 0.95f), "复制 $destName ${(p * 100).toInt()}%") }
-                            os.flush()
-                        } ?: return ExportResult(false, "", 0, "无法打开 SAF 输出流")
-                        progress.report(1f, "已导出到 SAF 目录")
-                        return ExportResult(true, child.uri.toString(), src.length(), "已导出到 SAF 目录")
-                    }
+            val workDoc = workDirectory.asDocumentFile()
+            if (workDoc != null && workDoc.canWrite()) {
+                val child = workDoc.createFile("application/octet-stream", destName)
+                if (child != null) {
+                    context.contentResolver.openOutputStream(child.uri)?.use { os ->
+                        copyStream(src, os) { p -> progress.report(rangeProgress(p, 0.1f, 0.95f), "复制 $destName ${(p * 100).toInt()}%") }
+                        os.flush()
+                    } ?: return ExportResult(false, "", 0, "无法打开工作目录输出流")
+                    progress.report(1f, "已导出到工作目录")
+                    return ExportResult(true, child.uri.toString(), src.length(), "已导出到工作目录")
                 }
             }
 

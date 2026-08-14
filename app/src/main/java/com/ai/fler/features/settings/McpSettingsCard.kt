@@ -42,7 +42,6 @@ fun McpSettingsCard(
     onSetToken: (String) -> Unit,
     onSetPatchEnabled: (Boolean) -> Unit,
     onSetEmuToolsEnabled: (Boolean) -> Unit,
-    onPickExportFolder: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onOpenLog: () -> Unit,
@@ -105,7 +104,7 @@ fun McpSettingsCard(
                     UrlLine("局域网 /export", exportUrlFrom(state.lanUrl))
                 }
                 Text(
-                    text = "/mcp: MCP Inspector/通用客户端 · /sse: Claude Desktop · /export: 下载导出目录内的 so",
+                    text = "/mcp: MCP Inspector/通用客户端 · /sse: Claude Desktop · /export: 下载工作目录内的 so",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -197,29 +196,6 @@ fun McpSettingsCard(
                     )
                 }
                 Switch(checked = state.emuToolsEnabled, onCheckedChange = onSetEmuToolsEnabled)
-            }
-
-            // 导出文件夹
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("导出文件夹", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        text = if (state.exportTreeUri.isBlank())
-                            "未设置（默认 App 缓存 cacheDir/so_export）"
-                        else
-                            "patch 后的 so 将导出到此目录",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2
-                    )
-                }
-                OutlinedButton(onClick = onPickExportFolder) {
-                    Text(if (state.exportTreeUri.isBlank()) "选择" else "更换")
-                }
             }
 
             // 应用端口

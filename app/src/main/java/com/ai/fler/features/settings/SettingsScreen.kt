@@ -57,8 +57,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ai.fler.core.service.EnginePackManager
@@ -90,7 +93,26 @@ fun SettingsScreen(
     val mcpState by viewModel.mcpState.collectAsStateWithLifecycle()
     val fridaStatus by viewModel.fridaStatus.collectAsStateWithLifecycle()
     val engineState by engineViewModel.uiState.collectAsStateWithLifecycle()
+    val workDirTreeUri by viewModel.workDirTreeUri.collectAsStateWithLifecycle()
     var showCacheCleanConfirm by remember { mutableStateOf(false) }
+
+    // 工作目录选择器（SAF tree，持久化授权，写回 ViewModel）
+    val context = LocalContext.current
+    val workDirPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
+            viewModel.setWorkDirTreeUri(uri.toString())
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -136,6 +158,16 @@ fun SettingsScreen(
             McpEntryCard(
                 state = mcpState,
                 onClick = onOpenMcpSettings
+            )
+        }
+
+        // 工作目录（App 级一级设置项：产物导出 / MCP /export 下载根）
+        item {
+            WorkDirectoryCard(
+                treeUri = workDirTreeUri,
+                displayName = viewModel.workDirDisplayName,
+                onPick = { workDirPicker.launch(null) },
+                onClear = { viewModel.clearWorkDir() },
             )
         }
 
@@ -682,6 +714,7 @@ private fun EngineSourceCard(
     onReset: () -> Unit
 ) {
     var isEditing by remember { mutableStateOf(false) }
+    var manifestUrl by remember(state) { mutableStateOf(state.manifestUrl) }
     var githubProxy by remember(state) { mutableStateOf(state.githubProxy) }
 
     Card(
@@ -718,6 +751,13 @@ private fun EngineSourceCard(
                 // 编辑模式
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
+                        value = manifestUrl,
+                        onValueChange = { manifestUrl = it },
+                        label = { Text("引擎清单地址 (manifest.json)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
                         value = githubProxy,
                         onValueChange = { githubProxy = it },
                         label = { Text("GitHub 加速前缀") },
@@ -738,7 +778,7 @@ private fun EngineSourceCard(
                         }
                         Button(
                             onClick = {
-                                onSave(state.manifestUrl, githubProxy)
+                                onSave(manifestUrl, githubProxy)
                                 isEditing = false
                             },
                             modifier = Modifier.weight(1f)
@@ -750,6 +790,7 @@ private fun EngineSourceCard(
             } else {
                 // 展示模式
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SourceItem(label = "引擎清单", url = state.manifestUrl)
                     SourceItem(
                         label = "GitHub 加速",
                         url = if (state.githubProxy.isBlank()) "未启用" else state.githubProxy
@@ -805,6 +846,67 @@ private fun McpEntryCard(
         leadingIcon = Icons.Outlined.Storage,
         onClick = onClick,
     )
+}
+
+@Composable
+private fun WorkDirectoryCard(
+    treeUri: String,
+    displayName: String?,
+    onPick: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val isSet = treeUri.isNotBlank()
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "工作目录",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "补丁后的 so / .patch 等产物导出位置，也是 MCP 服务器 /export 的下载根。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = if (isSet) {
+                    "当前: ${displayName ?: treeUri}"
+                } else {
+                    "未设置（默认 App 缓存 cacheDir/so_export）"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isSet) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onPick,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (isSet) "更换" else "选择")
+                }
+                if (isSet) {
+                    OutlinedButton(
+                        onClick = onClear,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("清除")
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

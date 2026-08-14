@@ -10,6 +10,7 @@ import com.ai.fler.core.mcp.McpToolHandlers
 import com.ai.fler.core.service.EnginePackManager
 import com.ai.fler.core.service.EngineSourceConfig
 import com.ai.fler.core.service.EngineUpdate
+import com.ai.fler.core.service.WorkDirectory
 import com.ai.fler.features.mcp.McpServerManager
 import com.ai.fler.features.mcp.McpServerService
 import com.ai.fler.features.mcp.McpStatus
@@ -39,6 +40,7 @@ class SettingsViewModel @Inject constructor(
     private val mcpServerManager: McpServerManager,
     private val toolHandlers: McpToolHandlers,
     private val fridaEngine: FridaEngine,
+    private val workDirectory: WorkDirectory,
 ) : ViewModel() {
 
     private val _updateState = MutableStateFlow(UpdateCheckState())
@@ -61,6 +63,13 @@ class SettingsViewModel @Inject constructor(
     /** Frida 动态插桩状态（客户端可用性/root/server/初始化）。 */
     private val _fridaStatus = MutableStateFlow(FridaStatusUiState())
     val fridaStatus: StateFlow<FridaStatusUiState> = _fridaStatus.asStateFlow()
+
+    /** 工作目录 SAF tree URI（未设置 = 空串）。 */
+    private val _workDirTreeUri = MutableStateFlow(workDirectory.treeUri.value)
+    val workDirTreeUri: StateFlow<String> = _workDirTreeUri.asStateFlow()
+
+    /** 工作目录显示名（目录名或 URI 尾部；未设置 = null），UI 副标题用。 */
+    val workDirDisplayName: String? get() = workDirectory.displayName()
 
     /** MCP 工具列表（名称 + 解释）。 */
     val mcpTools: List<McpToolHandlers.McpTool>
@@ -88,11 +97,9 @@ class SettingsViewModel @Inject constructor(
             mcpConfig.token,
             mcpConfig.patchEnabled,
         ) { enabled, bindMode, port, token, patchEnabled ->
-            McpConfigSnapshot(enabled, bindMode, port, token, patchEnabled, false, "")
+            McpConfigSnapshot(enabled, bindMode, port, token, patchEnabled, false)
         }.combine(mcpConfig.emuToolsEnabled) { cfg, emu ->
             cfg.copy(emuToolsEnabled = emu)
-        }.combine(mcpConfig.exportTreeUri) { cfg, exportTreeUri ->
-            cfg.copy(exportTreeUri = exportTreeUri)
         }.combine(mcpServerManager.status) { cfg, status ->
             McpUiState(
                 enabled = cfg.enabled,
@@ -101,7 +108,6 @@ class SettingsViewModel @Inject constructor(
                 token = cfg.token,
                 patchEnabled = cfg.patchEnabled,
                 emuToolsEnabled = cfg.emuToolsEnabled,
-                exportTreeUri = cfg.exportTreeUri,
                 isRunning = status.isRunning,
                 activeSessions = status.activeSessions,
                 localUrl = status.localUrl,
@@ -111,6 +117,11 @@ class SettingsViewModel @Inject constructor(
                 errorMessage = status.errorMessage,
             )
         }.collect { _mcpState.value = it }
+
+        // 工作目录状态独立收集（App 级，不属于 MCP 配置）
+        viewModelScope.launch {
+            workDirectory.treeUri.collect { _workDirTreeUri.value = it }
+        }
     }
 
     // ========== MCP Server ==========
@@ -151,8 +162,16 @@ class SettingsViewModel @Inject constructor(
         mcpConfig.setEmuToolsEnabled(value)
     }
 
-    fun mcpSetExportTreeUri(value: String) {
-        mcpConfig.setExportTreeUri(value)
+    // ========== 工作目录（App 级设置） ==========
+
+    /** 设置工作目录（SAF tree URI，调用方需先 takePersistableUriPermission）。 */
+    fun setWorkDirTreeUri(value: String) {
+        workDirectory.setTreeUri(value)
+    }
+
+    /** 清除工作目录，回退到默认 App 缓存。 */
+    fun clearWorkDir() {
+        workDirectory.clear()
     }
 
     /**
@@ -317,7 +336,6 @@ data class McpUiState(
     val token: String = "",
     val patchEnabled: Boolean = false,
     val emuToolsEnabled: Boolean = false,
-    val exportTreeUri: String = "",
     val isRunning: Boolean = false,
     val activeSessions: Int = 0,
     val localUrl: String = "",
@@ -335,7 +353,6 @@ private data class McpConfigSnapshot(
     val token: String,
     val patchEnabled: Boolean,
     val emuToolsEnabled: Boolean,
-    val exportTreeUri: String = "",
 )
 
 /** Frida 动态插桩状态（设置页状态卡片用）。 */

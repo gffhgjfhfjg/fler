@@ -648,7 +648,7 @@ class McpHttpServer(
     private val config: McpConfig,
     private val sessions: McpSessions,
     private val logger: McpLogger,
-    private val fileRoot: File,
+    private val exportRootProvider: () -> ExportRoot,
 )
 ```
 
@@ -658,11 +658,38 @@ class McpHttpServer(
   - `POST /message` — legacy 消息端点
   - `POST /mcp` — MCP Streamable HTTP JSON-RPC
   - `GET /mcp` — 服务器→客户端事件流
-  - `GET /export` — 列出 `so_export` 导出目录内的文件
-  - `GET /export/<file>` — 流式下载导出目录内的文件（attachment）
-- `fileRoot` 由 `McpServerManager` 注入，默认为 `context.cacheDir/so_export`，与 `export_patched_so` 的兜底导出目录一致
-- 下载路由防路径穿越：拒绝 `../`、`/`、`\`，并校验 canonical 路径限定在导出目录内
+  - `GET /export` — 列出导出根（工作目录或默认缓存）内的文件
+  - `GET /export/<file>` — 流式下载导出根内的文件（attachment）
+- `exportRootProvider` 由 `McpServerManager` 注入，**每请求动态解析**：已设置工作目录 → `SafExportRoot`（SAF tree）；否则回退 `FileExportRoot(context.cacheDir/so_export)`。工作目录变更无需重启服务器即生效
+- 下载路由防路径穿越：拒绝 `../`、`/`、`\`，并校验目标限定在导出根内
 - 支持 Bearer Token 认证（下载路由同样受 token 保护）
+
+#### WorkDirectory.kt — 工作目录配置（App 级）
+
+```kotlin
+@Singleton
+class WorkDirectory @Inject constructor(
+    @ApplicationContext private val context: Context,
+)
+```
+
+- 独立 SharedPreferences `work_directory`；首次读取时把旧版 McpConfig 的 `export_tree_uri`（`mcp_server` prefs）迁移过来，老用户不丢
+- `treeUri: StateFlow<String>`（SAF tree URI，空 = 未设置）；`asDocumentFile()` 解析 SAF `DocumentFile`；`displayName()` 供 UI 副标题
+- 未设置时各消费方回退 App 缓存（cacheDir/so_export）：PatchExporter / McpToolHandlers.exportPatchedSo / McpHttpServer /export 根
+
+#### ExportRoot.kt — /export 下载根抽象
+
+```kotlin
+interface ExportRoot {
+    fun list(): List<ExportFileInfo>
+    fun open(name: String): InputStream?
+    fun prepare()
+}
+```
+
+- `FileExportRoot`：本地目录实现（canonical 路径校验）
+- `SafExportRoot`：SAF tree 实现（DocumentFile 遍历 + ContentResolver 流，与工作目录解耦）
+- 设置页一级「工作目录」卡片选择/更换/清除；MCP 设置页不再含导出文件夹项
 
 #### McpToolHandlers.kt — MCP 工具处理器
 

@@ -18,7 +18,9 @@ import javax.inject.Singleton
  *
  * 从 APK 文件中提取 native 库：
  * 1. 优先路径（Flutter 应用）：提取 libapp.so 和 libflutter.so
- * 2. 回退路径（非 Flutter 应用）：libapp.so 不存在时，提取最优 ABI 目录下的全部 *.so
+ * 2. 附加提取（Flutter / 非 Flutter 通用）：提取最优 ABI 目录下的全部 *.so
+ *    （Flutter 应用除 libapp/libflutter 外的插件与业务 native 库同样可提取，
+ *    供 SO 编辑器 / MCP 引擎分析其他 so，如 reqable 等自研 native 库）
  *
  * APK 本质上是一个 ZIP 文件，其中 .so 文件存储在 lib/<abi>/ 目录下。
  */
@@ -33,7 +35,7 @@ class ApkExtractor @Inject constructor(
         private const val ARM64_ABI = "arm64-v8a"
         private const val X86_64_ABI = "x86_64"
 
-        /** 回退提取单个 APK 的 .so 数量上限（超大 APK 截断并记日志）。 */
+        /** 提取单个 APK 的 .so 数量上限（超大 APK 截断并记日志）。 */
         private const val MAX_FALLBACK_SO_COUNT = 30
 
         // 需要提取的 so 文件列表（Flutter 优先路径）
@@ -135,30 +137,29 @@ class ApkExtractor @Inject constructor(
                     if (foundAnySo) break
                 }
 
-                // 回退路径（非 Flutter）：无 libapp.so 时提取最优 ABI 目录下的全部 *.so。
-                // libflutter 已命中但 libapp 缺失的罕见情况同样走回退（此时已有库不重复提取）。
-                if (result.libapp == null) {
-                    val fallbackAbi = pickFallbackAbi(zip)
-                    if (fallbackAbi != null) {
+                // 附加/回退路径（Flutter 与非 Flutter 通用）：提取最优 ABI 目录下的全部 *.so。
+                // Flutter 应用除 libapp.so/libflutter.so 外，其余插件与业务 native 库也会被提取，
+                // 供「SO 文件」列表 / SO 编辑器 / MCP engine 等工具分析其他 so。
+                // libflutter 已命中但 libapp 缺失的罕见情况同样走此逻辑（此时已有库不重复提取）。
+                val fallbackAbi = pickFallbackAbi(zip)
+                if (fallbackAbi != null) {
+                    if (result.libapp == null) {
                         Log.i(TAG, "未找到 libapp.so，回退提取 lib/$fallbackAbi/ 下全部 native 库")
-                        val prefix = "lib/$fallbackAbi/"
-                        val soEntries = zip.entries().toList()
-                            .filter { !it.isDirectory && it.name.startsWith(prefix) && it.name.endsWith(".so") }
-                            .sortedBy { it.name }
-                        if (soEntries.size > MAX_FALLBACK_SO_COUNT) {
-                            Log.w(TAG, "lib/$fallbackAbi/ 含 ${soEntries.size} 个 .so，超过上限 " +
-                                "$MAX_FALLBACK_SO_COUNT，截断")
-                        }
-                        for (entry in soEntries.take(MAX_FALLBACK_SO_COUNT)) {
-                            val libName = entry.name.removePrefix(prefix)
-                            // 优先路径已提取过的（如 libflutter.so）跳过
-                            if (result.libflutter?.libraryName == libName) continue
-                            val library = extractEntry(zip, entry, entry.name, outputDir)
-                            result.extraLibs.add(library)
-                            Log.i(TAG, "回退提取 ${entry.name} -> ${library.path} (${library.size} bytes)")
-                        }
-                        foundAnySo = foundAnySo || result.extraLibs.isNotEmpty()
+                    } else {
+                        Log.d(TAG, "Flutter 应用：附加提取 lib/$fallbackAbi/ 下其他 native 库")
                     }
+                    val skipped = buildSet {
+                        result.libapp?.let { add(it.libraryName) }
+                        result.libflutter?.let { add(it.libraryName) }
+                    }
+                    val extraCount = extractAllNativeLibraries(
+                        zip = zip,
+                        abi = fallbackAbi,
+                        outputDir = outputDir,
+                        skipNames = skipped,
+                        result = result
+                    )
+                    foundAnySo = foundAnySo || extraCount > 0
                 }
 
                 if (!foundAnySo) {
@@ -210,6 +211,46 @@ class ApkExtractor @Inject constructor(
             sectionCount = 0,
             symbolCount = 0
         )
+    }
+
+    /**
+     * 提取指定 ABI 目录下的全部 *.so 到 [ExtractResult.extraLibs]（Flutter 与非 Flutter 通用）。
+     *
+     * @param zip APK（ZIP 文件）
+     * @param abi 目标 ABI 目录名（如 arm64-v8a）
+     * @param outputDir 输出目录
+     * @param skipNames 已由优先路径提取、需跳过的库名（如 libapp.so / libflutter.so）
+     * @param result 提取结果（追加到 extraLibs）
+     * @return 新提取的库数量
+     */
+    private fun extractAllNativeLibraries(
+        zip: ZipFile,
+        abi: String,
+        outputDir: File,
+        skipNames: Set<String>,
+        result: ExtractResult
+    ): Int {
+        val prefix = "lib/$abi/"
+        val soEntries = zip.entries().toList()
+            .filter { !it.isDirectory && it.name.startsWith(prefix) && it.name.endsWith(".so") }
+            .sortedBy { it.name }
+        if (soEntries.size > MAX_FALLBACK_SO_COUNT) {
+            Log.w(TAG, "lib/$abi/ 含 ${soEntries.size} 个 .so，超过上限 " +
+                "$MAX_FALLBACK_SO_COUNT，截断")
+        }
+        var count = 0
+        for (entry in soEntries.take(MAX_FALLBACK_SO_COUNT)) {
+            val libName = entry.name.removePrefix(prefix)
+            // 优先路径已提取过的（如 libapp.so / libflutter.so）跳过
+            if (libName in skipNames) continue
+            // 防漏：zip 内同名重复条目只提取一次
+            if (result.extraLibs.any { it.libraryName == libName }) continue
+            val library = extractEntry(zip, entry, entry.name, outputDir)
+            result.extraLibs.add(library)
+            count++
+            Log.i(TAG, "提取 ${entry.name} -> ${library.path} (${library.size} bytes)")
+        }
+        return count
     }
 
     /**
@@ -308,8 +349,8 @@ class ApkExtractor @Inject constructor(
     /**
      * 提取结果数据类。
      *
-     * [extraLibs] 为非 Flutter 回退路径提取的全部 native 库
-     * （Flutter 路径下通常为空）。
+     * [extraLibs] 为最优 ABI 目录下提取的全部 native 库（含 Flutter 应用
+     * 除 libapp.so/libflutter.so 外的插件与业务库，以及非 Flutter 应用的全部库）。
      */
     data class ExtractResult(
         var libapp: Library? = null,

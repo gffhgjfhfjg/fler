@@ -34,7 +34,8 @@ import javax.inject.Singleton
 @Singleton
 class PatchExporter @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val backupManager: BackupManager
+    private val backupManager: BackupManager,
+    private val workDirectory: WorkDirectory,
 ) {
 
     /**
@@ -122,5 +123,80 @@ class PatchExporter @Inject constructor(
         } catch (e: Exception) {
             false
         }
+    }
+
+    /**
+     * 导出补丁到工作目录（SAF 或兜底 App 缓存）。
+     *
+     * @param soFileName 目标 SO 文件名（用于生成 .patch 文件名）
+     * @param records 补丁记录列表
+     * @param destName 文件名（含 .patch 后缀）；空则用默认命名
+     * @return 是否成功
+     */
+    suspend fun exportToWorkDir(
+        soFileName: String,
+        records: List<PatchRecord>,
+        destName: String = ""
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val content = generatePatchContent(soFileName, records)
+            val fileName = destName.ifBlank {
+                val base = soFileName.removeSuffix(".so")
+                val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                    .format(java.util.Date())
+                "${base}_$ts.patch"
+            }
+            writeToWorkDir(fileName, content.toByteArray())
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 导出「修改后的 SO」二进制到工作目录（SAF 或兜底 App 缓存）。
+     *
+     * @param sourceFile 已应用补丁的 SO 文件
+     * @param destName 文件名（含 .so 后缀）；空则用默认命名
+     * @return 是否成功
+     */
+    suspend fun exportSoToWorkDir(
+        sourceFile: File,
+        destName: String = ""
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            if (!sourceFile.exists() || !sourceFile.isFile) return@withContext false
+            val fileName = destName.ifBlank {
+                val base = sourceFile.name.removeSuffix(".so")
+                val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                    .format(java.util.Date())
+                "${base}_patched_$ts.so"
+            }
+            val bytes = sourceFile.readBytes()
+            writeToWorkDir(fileName, bytes)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** 写入工作目录：优先 SAF tree，未设置/不可写则回退 cacheDir/so_export。 */
+    private fun writeToWorkDir(fileName: String, bytes: ByteArray): Boolean {
+        val doc = workDirectory.asDocumentFile()
+        if (doc != null && doc.canWrite()) {
+            val child = doc.createFile("application/octet-stream", fileName) ?: return false
+            return context.contentResolver.openOutputStream(child.uri)?.use { os ->
+                os.write(bytes)
+                os.flush()
+                true
+            } ?: false
+        }
+        // 兜底：App 缓存目录（与 MCP /export 下载根一致）
+        return runCatching {
+            val dir = File(context.cacheDir, "so_export").apply { mkdirs() }
+            File(dir, fileName).outputStream().use { os ->
+                os.write(bytes)
+                os.flush()
+            }
+            true
+        }.getOrDefault(false)
     }
 }
