@@ -29,3 +29,16 @@ fler-engines/
 
 # ── unicorn 源码与构建产物（scripts/build-unicorn.ps1 交叉编译）──
 /vendor/
+
+# ── 开发/调研/工具目录或文档（不入库）──
+# 根目录除 README.md 外的其他 md（开发测试、调研、方案计划）全部忽略
+/*.md
+!/README.md
+# .qoder / .trae（本地调研/Agent 工具目录）
+.qoder/
+.trae/
+# docs 目录只保留 .md（skill/提示词），忽略其余（如 lorebook json）
+/docs/**
+!/docs/
+!/docs/**/
+!/docs/**/*.md
