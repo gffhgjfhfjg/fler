@@ -116,8 +116,12 @@ class FridaEngine @Inject constructor(
             initialized = FridaBindings.initialize()
         }
         if (initialized) {
-            // 探活：枚举一次进程，确认 server 链路通
-            val probe = FridaBindings.enumerateProcesses()
+            // 探活：枚举一次进程，确认 server 链路通。首次枚举若失败（例如 server
+            // 刚拉起或 root 授权时序导致 worker 首调竞态）重试一次再判失败。
+            var probe = FridaBindings.enumerateProcesses()
+            if (probe.contains("error")) {
+                probe = FridaBindings.enumerateProcesses()
+            }
             if (probe.contains("error")) {
                 appLogger.error(TAG, "frida-server 链路探测失败: $probe")
             } else {

@@ -150,6 +150,11 @@ static R asyncOnWorker(std::function<void(const std::shared_ptr<std::promise<R>>
 
 static void workerMain() {
     g_worker.ctx = g_main_context_new();
+    // frida-core 的 vala 异步代码（协程 continuation、find_device 的 timeout/cancel
+    // source、ensure_service_and_then_call 的 idle source）都用 MainContext.get_thread_default()
+    // 挂源。必须把本线程的线程默认上下文指向 g_worker.ctx，否则源会挂到全局默认上下文，
+    // 首次 add_remote_device 时在错误上下文上重入导致协程状态损坏 → find_device_co 空指针崩溃。
+    g_main_context_push_thread_default(g_worker.ctx);
     g_worker.loop = g_main_loop_new(g_worker.ctx, FALSE);
     g_worker.manager = frida_device_manager_new();
     g_worker.running.store(true);
@@ -163,6 +168,7 @@ static void workerMain() {
     }
     g_main_loop_unref(g_worker.loop);
     g_worker.loop = nullptr;
+    g_main_context_pop_thread_default(g_worker.ctx);
     g_main_context_unref(g_worker.ctx);
     g_worker.ctx = nullptr;
     __android_log_print(ANDROID_LOG_INFO, TAG, "frida worker thread exited");
@@ -378,6 +384,9 @@ static void onLocalDeviceReady(GObject* obj, GAsyncResult* result, gpointer user
 
 // worker 上异步获取 local device 并阻塞等待结果（返回的 device 持引用，调用方负责释放）。
 static FridaDevice* acquireLocalDeviceAsync() {
+    if (g_worker.manager == nullptr) {
+        throw std::runtime_error("frida device manager not ready");
+    }
     return asyncOnWorker<FridaDevice*>([](const auto& p) {
         auto* ctx = new DeviceAcquireCtx{ p };
         frida_device_manager_add_remote_device(g_worker.manager, kFridaServerAddr, nullptr,
