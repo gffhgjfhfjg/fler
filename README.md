@@ -74,6 +74,18 @@ app/build/outputs/apk/.../*.apk
 
 ---
 
+## Blutter 分析引擎（fler-dart）
+
+Flutter App 的 Dart AOT 恢复依赖 Blutter 引擎，但该引擎**不在本仓库**，而是由独立仓库 **[myfler/fler-dart](https://github.com/myfler/fler-dart)** 负责编译与发布，App 运行时按需下载加载：
+
+- **职责分离**：`fler-dart` 通过 CI 按 Dart 版本交叉编译 Blutter 的 `dartvm.so`，并把 `blutter_entry.cpp`（把 Blutter 分析结果写入 SQLite 的入口）打进引擎，产出发行包（如 `fler-engines.7z` / `dartvm-<dartVersion>.7z`）上传到 GitHub Releases。
+- **运行期分发**：App 从 `fler-dart` main 分支的 `manifest.json`（`https://raw.githubusercontent.com/myfler/fler-dart/main/manifest.json`）读取可用 Dart 版本清单，经 `EngineLoader` 按需下载对应 `dartvm_<dartVersion>.so`，由 JNI `blutter_analyze()` 执行分析，结果写入 SQLite（表结构由引擎决定）。
+- **默认源**：`EngineSourceConfig` 内置 manifest 地址 + GitHub 加速前缀（`https://gh-proxy.com`，可在设置页修改/清空），缺失或不可用时可在设置页改自定义源。
+
+> 引擎包为独立版本（当前 `v0.4.0`），与 App 版本解耦；升级引擎只要重下对应 Dart 版本的 `dartvm_*.so`，无需重装 App。
+
+---
+
 ## 使用
 
 1. **本机（Android）**：安装 App → 设置页启动 MCP 服务器，得到 `http://127.0.0.1:8765/mcp`。
