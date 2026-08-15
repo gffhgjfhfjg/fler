@@ -89,6 +89,13 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             combineMcpState()
         }
+        // 工作目录状态独立收集（App 级，不属于 MCP 配置）。
+        // 必须单独 launch：combineMcpState 的 collect 是无限收集，
+        // 若把这段放在 combineMcpState 内部，将永远执行不到（死代码），
+        // 导致设置工作目录后 UI 仍显示「未设置」。
+        viewModelScope.launch {
+            workDirectory.treeUri.collect { _workDirTreeUri.value = it }
+        }
     }
 
     private suspend fun combineMcpState() {
@@ -119,11 +126,6 @@ class SettingsViewModel @Inject constructor(
                 errorMessage = status.errorMessage,
             )
         }.collect { _mcpState.value = it }
-
-        // 工作目录状态独立收集（App 级，不属于 MCP 配置）
-        viewModelScope.launch {
-            workDirectory.treeUri.collect { _workDirTreeUri.value = it }
-        }
     }
 
     // ========== MCP Server ==========

@@ -431,7 +431,10 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeProjectSave(
     const char* path = env->GetStringUTFChars(jPath, nullptr);
     if (!path) return JNI_FALSE;
 
-    bool ok = rz_project_save_file(core, path, true);
+    // rz_project_save_file 返回 RzProjectErr 枚举：RZ_PROJECT_ERR_SUCCESS=0，
+    // 其余均为错误码（≠0）。不能把原始返回值当 bool 用——否则「成功=0」会被
+    // 判为 false、「失败=非0」会被判为 true，导致项目永远存不上/永远误判已加载。
+    bool ok = (rz_project_save_file(core, path, true) == RZ_PROJECT_ERR_SUCCESS);
     env->ReleaseStringUTFChars(jPath, path);
 
     __android_log_print(ANDROID_LOG_INFO, TAG,
@@ -457,7 +460,8 @@ Java_com_ai_fler_core_jni_RizinBindings_nativeProjectLoad(
     const char* path = env->GetStringUTFChars(jPath, nullptr);
     if (!path) return JNI_FALSE;
 
-    bool ok = rz_project_load_file(core, path, false, nullptr);
+    // 同 projectSave：返回 RzProjectErr（0=成功，非0=错误），不能当 bool 用。
+    bool ok = (rz_project_load_file(core, path, false, nullptr) == RZ_PROJECT_ERR_SUCCESS);
     env->ReleaseStringUTFChars(jPath, path);
 
     __android_log_print(ANDROID_LOG_INFO, TAG,

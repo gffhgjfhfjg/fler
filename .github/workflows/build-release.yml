@@ -121,6 +121,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           name: ${{ github.ref_name }}
-          draft: true
+          draft: false
           files: |
             ${{ steps.apk.outputs.name }}
