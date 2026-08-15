@@ -2,7 +2,7 @@
 # Build Release — 自动编译 fler 的 release APK（仅 tag 触发）
 #
 # 触发：push 到形如 v* 的 tag（例 v1.4）；也支持手动 workflow_dispatch 调试。
-# 流程：checkout -> JDK17 -> prepare-native-libs(下载解压 .a) -> NDK r28
+# 流程：checkout -> JDK17 -> prepare-native-libs(下载解压 .a) -> NDK 28.2.13676358
 #        -> assembleRelease -> 重命名 APK -> 上传 artifact -> 打 tag 时发 GitHub Release
 #
 # 签名：沿用项目现状 signingConfig=debug（release 也是 debug 签名，可直接安装）。
@@ -34,7 +34,6 @@ concurrency:
 env:
   FLER_NATIVE_VER: v1
   FLER_NATIVE_SHA: 79c25d84941456de18189f53eac0a052dfc971e4c6328d10adc67fc840ebff43
-  GRADLE_USER_HOME: ${{ github.workspace }}/.gradle-home
   ORG_GRADLE_JVMARGS: -Xmx4g -Dfile.encoding=UTF-8
 
 jobs:
@@ -53,11 +52,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android NDK r28
+      - name: Setup Android NDK 28.2.13676358
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r28
+          ndk-version: '28.2.13676358'
           add-to-path: false
 
       - name: Write local.properties (sdk + ndk)

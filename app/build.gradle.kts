@@ -15,6 +15,9 @@ android {
         }
     }
 
+    // 显式固定 NDK 版本，与本地 SDK 及 CI（build-release.yml）保持一致
+    ndkVersion = "28.2.13676358"
+
     defaultConfig {
         applicationId = "com.ai.fler"
         minSdk = 26
