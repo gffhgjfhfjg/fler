@@ -19,6 +19,8 @@ Thumbs.db
 
 # ── fler 运行/下载产物（不入库）──
 fler-engines/
+# 打包脚本产物（scripts/package-native-libs.ps1 输出的 tar.xz/sha256/manifest 等）
+/out/
 *.7z
 *.zip
 *.log
