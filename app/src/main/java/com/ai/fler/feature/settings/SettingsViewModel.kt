@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import java.io.File
 import javax.inject.Inject
 
@@ -209,8 +211,10 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             _fridaStatus.value = _fridaStatus.value.copy(loading = true, errorMessage = null)
             try {
-                val s = withContext(Dispatchers.IO) {
-                    if (ensureReady) fridaEngine.ensureReady() else fridaEngine.status()
+                val s = withTimeout(8_000) {
+                    withContext(Dispatchers.IO) {
+                        if (ensureReady) fridaEngine.ensureReady() else fridaEngine.status()
+                    }
                 }
                 _fridaStatus.value = FridaStatusUiState(
                     available = s.available,
@@ -219,11 +223,31 @@ class SettingsViewModel @Inject constructor(
                     serverRunning = s.serverRunning,
                     initialized = s.initialized,
                 )
+            } catch (e: TimeoutCancellationException) {
+                if (ensureReady) retriggerRootAuthForProbe()
+                _fridaStatus.value = FridaStatusUiState(
+                    errorMessage = "探测超时：Magisk 授权未完成。请在弹出的 root 授权窗口点击「允许」后重试",
+                )
             } catch (e: Exception) {
                 _fridaStatus.value = FridaStatusUiState(
                     errorMessage = e.message ?: "Frida 探测失败",
                 )
             }
+        }
+    }
+
+    /** 探测超时兜底：再触发一次 Magisk 授权弹窗。 */
+    private fun retriggerRootAuthForProbe() {
+        try {
+            Thread {
+                try {
+                    Thread.sleep(800)
+                    val p = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
+                    if (!p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly()
+                } catch (_: Exception) {
+                }
+            }.start()
+        } catch (_: Exception) {
         }
     }
 

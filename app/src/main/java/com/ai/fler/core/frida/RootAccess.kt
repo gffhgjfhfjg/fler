@@ -10,6 +10,7 @@ import org.tukaani.xz.XZInputStream
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -45,13 +46,22 @@ class RootAccess @Inject constructor(
 
         private const val RELEASE_URL =
             "https://github.com/frida/frida/releases/download/%s/frida-server-%s-android-arm64.xz"
+
+        /** su 命令超时阈值（毫秒）。防止 Magisk 授权挂起导致永久阻塞。 */
+        private const val SU_TIMEOUT_MS = 5_000L
+
+        /** 授权重触发的探活命令（触发 Magisk 弹窗重新浮起）。 */
+        private const val AUTH_RETRIGGER_CMD = "id"
+
+        /** 授权重触发前的延迟（毫秒），给上一个 su 的退出留出时间。 */
+        private const val AUTH_RETRIGGER_DELAY_MS = 1_000L
     }
 
     // ========== root 检测 ==========
 
     /** 当前进程是否有 root 能力（su -c id 返回 uid=0）。 */
     suspend fun isRoot(): Boolean = withContext(Dispatchers.IO) {
-        runSu("id")?.contains("uid=0") == true
+        runSu("id", retriggerAuth = true)?.contains("uid=0") == true
     }
 
     // ========== frida-server 部署 ==========
@@ -161,7 +171,7 @@ class RootAccess @Inject constructor(
 
     /** frida-server 是否在跑。 */
     suspend fun isServerRunning(): Boolean = withContext(Dispatchers.IO) {
-        val out = runSu("ps -A | grep frida-server | grep -v grep")
+        val out = runSu("ps -A | grep frida-server | grep -v grep", retriggerAuth = true)
         !out.isNullOrBlank()
     }
 
@@ -175,19 +185,53 @@ class RootAccess @Inject constructor(
     /**
      * 单条 su 命令执行，返回 stdout；失败/不可用返回 null。
      * 避免在响应体里混入错误输出。
+     *
+     * 带超时保护：Magisk 按 uid 授权，重装后 uid 漂移会导致 su 挂起等待授权弹窗，
+     * 若无超时这里会永久阻塞（UI「探测中」卡死）。[retriggerAuth] 为 true 时，
+     * 超时会再触发一次 su（重新拉起 Magisk 授权弹窗，供用户在弹窗里点「允许」）。
      */
-    private fun runSu(cmd: String): String? {
+    private fun runSu(cmd: String, retriggerAuth: Boolean = false): String? {
         return try {
             val process = ProcessBuilder("su", "-c", cmd)
                 .redirectErrorStream(true)
                 .start()
+            val finished = process.waitFor(SU_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                Log.w(TAG, "su '$cmd' 超时(>${SU_TIMEOUT_MS}ms)，疑似等待 Magisk 授权，已强杀")
+                if (retriggerAuth) retriggerRootAuth()
+                return null
+            }
             val out = process.inputStream.readBytes().toString(Charsets.UTF_8)
-            val rc = process.waitFor()
+            val rc = process.exitValue()
             Log.d(TAG, "su '$cmd' -> rc=$rc out=${out.trim()}")
             out.trim().takeIf { it.isNotEmpty() }
         } catch (e: Exception) {
             Log.e(TAG, "runSu failed: ${e.message}", e)
             null
+        }
+    }
+
+    /**
+     * 重新触发一次 root 授权：短暂延迟后再跑一次 su，让 Magisk 的授权弹窗
+     * 重新浮起。仅当上一条 su 因授权挂起时调用（由 [retriggerAuth] 控制），
+     * 用于用户点「允许」后完成 uid 授权。
+     */
+    private fun retriggerRootAuth() {
+        try {
+            Thread.sleep(AUTH_RETRIGGER_DELAY_MS)
+            val p = ProcessBuilder("su", "-c", AUTH_RETRIGGER_CMD)
+                .redirectErrorStream(true)
+                .start()
+            if (p.waitFor(3, TimeUnit.SECONDS)) {
+                val out = p.inputStream.readBytes().toString(Charsets.UTF_8).trim()
+                Log.d(TAG, "授权重触发 su 'id' -> rc=${p.exitValue()} out=$out")
+            } else {
+                p.destroyForcibly()
+                Log.w(TAG, "授权重触发 su 再次超时，请检查 Magisk 授权弹窗")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "retriggerRootAuth failed: ${e.message}", e)
         }
     }
 }
