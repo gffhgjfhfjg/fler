@@ -53,18 +53,22 @@ jobs:
           java-version: '17'
 
       - name: Setup Android NDK 28.2.13676358
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: '28.2.13676358'
-          add-to-path: false
+        shell: bash
+        run: |
+          # setup-ndk 只支持 rNN 渠道名（会解析到其他 build），无法装精确版本。
+          # 这里用 runner 自带的 sdkmanager 安装与本地/AGP 默认一致的精确 NDK 版本。
+          SDKMGR="$(find "${ANDROID_HOME}" -path '*/cmdline-tools/*/bin/sdkmanager' | head -n1)"
+          [ -n "$SDKMGR" ] || { echo "!! 未找到 sdkmanager"; exit 1; }
+          yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+          "$SDKMGR" "ndk;28.2.13676358"
+          test -d "${ANDROID_HOME}/ndk/28.2.13676358" || { echo "!! NDK 28.2.13676358 未安装成功"; exit 1; }
 
       - name: Write local.properties (sdk + ndk)
         shell: bash
         run: |
           cat > local.properties <<EOF
           sdk.dir=$ANDROID_HOME
-          ndk.dir=${{ steps.setup-ndk.outputs.ndk-path }}
+          ndk.dir=${ANDROID_HOME}/ndk/28.2.13676358
           EOF
 
       - name: Cache native static libs (.a)
