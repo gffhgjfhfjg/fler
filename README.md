@@ -97,6 +97,22 @@ app/build/outputs/apk/.../*.apk
 
 ---
 
+## 缺点与不足
+
+以下为本项目当前已知的短板 / 待改进项，供使用者与贡献者透明参考：
+
+- **仅 arm64-v8a**：Native 层（capstone/keystone/rizin/frida/unicorn 静态链接进单 `.so`）只构建了 arm64。armv7 / x86_64 设备无法使用，低端 32 位机型不支持。
+- **依赖 root 才能用足 Frida**：Frida 动态插桩（attach/spawn/hook/热补丁）走 Magisk root + `frida-server` 部署，非 root 设备上仅能用静态分析面。
+- **重装易遇 root 授权痛点**：Magisk 按 uid 授权，每次重装 App uid 漂移使旧授权失效；且 MIUI 等 ROM 的后台启动限制会压掉授权弹窗，需手动给 Magisk 授权或改库，体验不算顺滑（代码侧已做超时兜底缓解卡死）。
+- **镜像与第三方库导致构建较重**：unicorn、keystone 需交叉编译且 `.a`/`vendor` 不入库（构建期拉取/本地脚本），首次构建依赖 Google/阿里云镜像网络，断网或代理环境下易失败。
+- **`.so` 较大、安装增耗**：`libfler_jni.so` 打包 frida-core + rizin(+26 个 `.a`) + capstone + keystone + unicorn ≈ 85MB；虽用 deflate 压缩进 APK（→31MB），但安装时解压到数据分区，安装略慢、磁盘占用较高，非体积敏感分发场景不划算。
+- **MCP 仅本机/LAN**：Streamable HTTP 服务器绑定 `127.0.0.1`（或可选 LAN `0.0.0.0`），不支持跨网远程连接（除非另配代理/隧道）。
+- **分析结果是离线快照**：`analysisId` 是一次 Blutter 分析的结果快照；App 更新后需重新导入 `libapp.so` 并重跑分析，不自动跟踪版本差异。
+- **依赖 Rizin 的全量 `aaa` 分析对大库开销高**：对超大 `libapp.so` 做函数/CFG/xref 分析内存与耗时都大（有 OOM 风险），分析代码时建议用 Blutter 合并结果而非整库 `engine_analyze`。
+- **UI 面较薄**：当前核心能力通过 MCP 暴露给桌面端 LLM 客户端，App 自身倾向于「工具/服务器」定位，独立交互 UI（除设置/统计/日志页外）较简，不适合纯手机端手工逆向。
+
+---
+
 ## License
 
 见 [LICENSE](LICENSE)。

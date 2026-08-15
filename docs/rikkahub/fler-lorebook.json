@@ -61,7 +61,7 @@
         "修改字节",
         "undo_patch"
       ],
-      "content": "补丁类工具默认关闭且破坏性。正确顺序：read_so_bytes 或 disassemble_range 确认原值 → assemble_instruction 预览机器码并获用户同意 → patch_bytes / patch_instruction 写入（可 undo_patch 回滚）→ export_patched_so 导出，从 http://<host>:<port>/export/<fileName> 下载。",
+      "content": "补丁类工具默认关闭且破坏性。正确顺序：read_so_bytes 或 disassemble_range 确认原值 → assemble_instruction 预览机器码并获用户同意 → patch_bytes / patch_instruction 写入（可 undo_patch 回滚，list_patches 看已打补丁）→ export_patched_so 导出，从 http://<host>:<port>/export/<fileName> 下载（GET /export 可列目录）。",
       "comment": "补丁纪律",
       "constant": false,
       "position": 4,
@@ -143,6 +143,49 @@
       "comment": "数据字符串无 xref",
       "constant": false,
       "position": 10,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "frida_ready",
+        "frida_hook",
+        "frida_attach",
+        "动态插桩",
+        "frida_events",
+        "frida_spawn"
+      ],
+      "content": "Frida 动态插桩（root 方案）链路：frida_ready（探测 root+部署 frida-server+初始化客户端，返回 available/root/serverRunning/initialized/version/workerAlive）→ frida_list_processes（取 pid）/ frida_list_apps（取 identifier）→ frida_attach(pid) 或 frida_spawn(pkg)（得到 sessionHandle）→ frida_hook（把静态分析库的 Dart/so 方法 vaddr 翻译成 Interceptor 脚本并加载，或 frida_eval 加载任意 JS / frida_use_script 用落地脚本）→ frida_events 拉取命中事件。生命周期：frida_resume / frida_kill / frida_detach / frida_unload。运行时热补丁：frida_patch_code / frida_read_code。脚本管理：frida_scripts / frida_post。注意 frida 客户端与服务端须同版本（17.17.0），不一致时自动停旧重装。",
+      "comment": "Frida 插桩链路",
+      "constant": false,
+      "position": 11,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "engine_open",
+        "engine_analyze",
+        "engine_disassemble",
+        "engine_",
+        "rizin 会话"
+      ],
+      "content": "engine_* 是对普通 so（非 Dart 大库）做 rizin 级函数/CFG/交叉引用的工具面（list_engines / open / close / analyze / get_info / list_sections / list_symbols / list_functions / find_function_at / function_cfg / xrefs_to / xrefs_from / disassemble / assemble / read_bytes / write_bytes / scan_strings / md5 / sha256 / crc32）。对 Dart 大库（libapp.so）函数导航用 Blutter 合并结果（engine_list_functions/engine_find_function_at 自动合并），不要再跑 engine_analyze 全量 aaa（超大库内存/耗时高、有 OOM 风险）。用完 engine_close 释放。",
+      "comment": "engine 工具面",
+      "constant": false,
+      "position": 12,
+      "enabled": true
+    },
+    {
+      "keys": [
+        "emu_open",
+        "emu_call_function",
+        "仿真",
+        "unicorn",
+        "emu_run"
+      ],
+      "content": "emu_*（Emulation）是对 so 做 unicorn 仿真执行的工具面（默认在设置里关闭、显式开启才暴露）。流程：emu_open(soPath) 打开仿真会话（PT_LOAD 装载 + 栈/heap/映射）→ emu_call_function(soPath, function, args) 高层调用并返回 x0，或用 emu_run / emu_step / emu_read_registers 手动控制 → emu_close(soPath) 释放。带断点/内存读写的相关 emu_write_* 属破坏性，未经确认不做。",
+      "comment": "仿真工具面",
+      "constant": false,
+      "position": 13,
       "enabled": true
     }
   ]
