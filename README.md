@@ -91,7 +91,6 @@ app/build/outputs/apk/.../*.apk
 
 ## 已知注意项
 
-- **root / Magisk 授权**：Magisk 按 uid 授权，重装 App 会导致 uid 漂移使旧授权失效；同时部分 ROM（如 MIUI）有**后台启动限制**会压掉 Magisk 授权弹窗（`SuRequestActivity` 一拉起即转 BACKGROUND）。遇到"探测中一直转/超时"时：在 Magisk 给当前 uid 授权，或给 Magisk 关掉后台弹出界面限制。App 侧已做 `runSu` 5s 超时 + 授权重触发 + 设置页 withTimeout 兜底，避免永久卡死。
 - **Frida 客户端/服务端须同版本**（当前 `17.17.0`），不一致时会自动停旧重装。
 - 模拟执行（Unicorn）默认关闭，需在设置中显式开启。
 
@@ -103,7 +102,6 @@ app/build/outputs/apk/.../*.apk
 
 - **仅 arm64-v8a**：Native 层（capstone/keystone/rizin/frida/unicorn 静态链接进单 `.so`）只构建了 arm64。armv7 / x86_64 设备无法使用，低端 32 位机型不支持。
 - **依赖 root 才能用足 Frida**：Frida 动态插桩（attach/spawn/hook/热补丁）走 Magisk root + `frida-server` 部署，非 root 设备上仅能用静态分析面。
-- **重装易遇 root 授权痛点**：Magisk 按 uid 授权，每次重装 App uid 漂移使旧授权失效；且 MIUI 等 ROM 的后台启动限制会压掉授权弹窗，需手动给 Magisk 授权或改库，体验不算顺滑（代码侧已做超时兜底缓解卡死）。
 - **镜像与第三方库导致构建较重**：unicorn、keystone 需交叉编译且 `.a`/`vendor` 不入库（构建期拉取/本地脚本），首次构建依赖 Google/阿里云镜像网络，断网或代理环境下易失败。
 - **`.so` 较大、安装增耗**：`libfler_jni.so` 打包 frida-core + rizin(+26 个 `.a`) + capstone + keystone + unicorn ≈ 85MB；虽用 deflate 压缩进 APK（→31MB），但安装时解压到数据分区，安装略慢、磁盘占用较高，非体积敏感分发场景不划算。
 - **MCP 仅本机/LAN**：Streamable HTTP 服务器绑定 `127.0.0.1`（或可选 LAN `0.0.0.0`），不支持跨网远程连接（除非另配代理/隧道）。
@@ -112,6 +110,20 @@ app/build/outputs/apk/.../*.apk
 - **UI 面较薄**：当前核心能力通过 MCP 暴露给桌面端 LLM 客户端，App 自身倾向于「工具/服务器」定位，独立交互 UI（除设置/统计/日志页外）较简，不适合纯手机端手工逆向。
 
 ---
+
+## 致谢
+
+本项目构建在众多优秀的开源项目之上，特此感谢：
+
+- **[Blutter](https://github.com/worawit/Blutter)** — Dart AOT 对象池/类/方法恢复引擎，本项目 Blutter 分析的基础。
+- **[Rizin](https://github.com/rizinorg/rizin)** — 二进制分析框架，提供函数 / CFG / 交叉引用 / 反汇编能力。
+- **[Capstone](https://github.com/capstone-engine/capstone)** — 反汇编框架，ARM64 指令级反汇编。
+- **[Keystone](https://github.com/keystone-engine/keystone)** — 汇编框架，指令级汇编与补丁。
+- **[Unicorn](https://github.com/unicorn-engine/unicorn)** — CPU 模拟引擎，指令模拟执行。
+- **[Frida](https://github.com/frida/frida)** — 动态插桩框架，attach / spawn / hook / 运行时热补丁。
+- **[Flutter](https://flutter.dev)** — 本项目 UI 框架。
+- **[Android](https://developer.android.com)** — 平台与工具链。
+- **[rikkahub](https://github.com/rikka-apps/)** 及其工具链 — 提供系统提示词与 `fler-analyze-method` 技能注入。
 
 ## License
 
