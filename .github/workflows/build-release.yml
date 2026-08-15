@@ -1,0 +1,123 @@
+# =============================================================================
+# Build Release — 自动编译 fler 的 release APK（仅 tag 触发）
+#
+# 触发：push 到形如 v* 的 tag（例 v1.4）；也支持手动 workflow_dispatch 调试。
+# 流程：checkout -> JDK17 -> prepare-native-libs(下载解压 .a) -> NDK r28
+#        -> assembleRelease -> 重命名 APK -> 上传 artifact -> 打 tag 时发 GitHub Release
+#
+# 签名：沿用项目现状 signingConfig=debug（release 也是 debug 签名，可直接安装）。
+#       若将来要对外分发，请改为正式签名（secrets + keystore）。
+# 依赖的 .a 静态库由 scripts/prepare-native-libs.sh 从本仓库 GitHub Release 资产
+#   fler-native-libs-<ver>.tar.xz 拉取（见 scripts/package-native-libs.ps1）。
+#
+# 内存/缓存说明：
+#   - ORG_GRADLE_JVMARGS=-Xmx4g：R8 混淆 + 原生链接内存压力大，避免 OOM
+#     （覆盖 gradle.properties 的 -Xmx2048m）
+#   - gradle-build-action 自动缓存 ~/.gradle，加速依赖下载
+#   - actions/cache 缓存 app/libs 下的 .a，命中即跳过下载（需保持 FLER_NATIVE_SHA 一致）
+# =============================================================================
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-release
+  cancel-in-progress: true
+
+env:
+  FLER_NATIVE_VER: v1
+  FLER_NATIVE_SHA: 79c25d84941456de18189f53eac0a052dfc971e4c6328d10adc67fc840ebff43
+  GRADLE_USER_HOME: ${{ github.workspace }}/.gradle-home
+  ORG_GRADLE_JVMARGS: -Xmx4g -Dfile.encoding=UTF-8
+
+jobs:
+  build-release:
+    name: Build release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android NDK r28
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r28
+          add-to-path: false
+
+      - name: Write local.properties (sdk + ndk)
+        shell: bash
+        run: |
+          cat > local.properties <<EOF
+          sdk.dir=$ANDROID_HOME
+          ndk.dir=${{ steps.setup-ndk.outputs.ndk-path }}
+          EOF
+
+      - name: Cache native static libs (.a)
+        id: cache-native-libs
+        uses: actions/cache@v4
+        with:
+          path: app/libs/arm64-v8a
+          key: fler-native-libs-${{ env.FLER_NATIVE_VER }}-${{ env.FLER_NATIVE_SHA }}
+
+      - name: Prepare native static libs (.a)
+        if: steps.cache-native-libs.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          FLER_NATIVE_VER: ${{ env.FLER_NATIVE_VER }}
+          FLER_NATIVE_SHA: ${{ env.FLER_NATIVE_SHA }}
+        run: bash scripts/prepare-native-libs.sh
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Assemble release
+        uses: gradle/gradle-build-action@v3
+        with:
+          arguments: :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Compute APK name and sha256
+        id: apk
+        shell: bash
+        run: |
+          SRC=$(find app/build/outputs/apk/release -name '*.apk' | head -n1)
+          [ -n "$SRC" ] || { echo "!! 未找到 release APK"; exit 1; }
+          TAG="${GITHUB_REF_NAME:+$GITHUB_REF_NAME}"
+          TAG="${TAG:-manual}"
+          NAME="fler-${TAG}.apk"
+          cp "$SRC" "$NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "src=$SRC" >> "$GITHUB_OUTPUT"
+          sha256sum "$NAME"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fler-release-apk-${{ steps.apk.outputs.name }}
+          path: ${{ steps.apk.outputs.name }}
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: ${{ github.ref_name }}
+          draft: true
+          files: |
+            ${{ steps.apk.outputs.name }}
