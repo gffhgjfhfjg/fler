@@ -51,8 +51,8 @@ echo "==> 解压到 $LIBS_HOME"
 TMP_X="$(mktemp -d)"
 trap 'rm -f "$TMP_ARCHIVE"; rm -rf "$TMP_X"' EXIT
 tar -xJf "$TMP_ARCHIVE" -C "$TMP_X"
-# 布局：<tmp>/fler-native-libs/lib/*.a
-SRC="$(find "$TMP_X" -mindepth 2 -maxdepth 2 -name '*.a' | head -n1)"
+# 布局：<tmp>/fler-native-libs/lib/*.a（注意归档 arcname=fler-native-libs，.a 实际在深度 3）
+SRC="$(find "$TMP_X" -name '*.a' | head -n1)"
 [ -n "$SRC" ] || { echo "!! 归档中未找到任何 .a"; exit 1; }
 LIBDIR_SRC="$(dirname "$SRC")"
 cp "$LIBDIR_SRC"/*.a "$LIBS_HOME"/
