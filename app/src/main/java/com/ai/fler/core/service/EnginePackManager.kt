@@ -74,6 +74,11 @@ class EnginePackManager @Inject constructor(
         val speed: String = "",
         val extractProgress: Float = 0f,
         val errorMessage: String? = null,
+        /** 批量下载（一键下载全部）时的进度信息：已完成数 / 总数。 */
+        val batchCompleted: Int = 0,
+        val batchTotal: Int = 0,
+        /** 批量下载时的版本提示文案（如「正在下载 Dart 3.12.2」）。 */
+        val batchLabel: String = "",
     ) {
         enum class Phase {
             IDLE,
@@ -246,6 +251,110 @@ class EnginePackManager @Inject constructor(
         } catch (e: Exception) {
             Log.e(TAG, "引擎安装失败: ${e.message}", e)
             appLogger.error(TAG, "引擎安装失败: ${e.message}")
+            val err = EngineProgress(
+                phase = EngineProgress.Phase.FAILED,
+                errorMessage = e.message ?: "未知错误",
+            )
+            _progress.value = err
+            send(err)
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * 一键下载全部引擎（逐个串行）。
+     *
+     * 单次 fetchManifest；先确保运行库就绪，再对 manifest.engines 中每个
+     * 未安装的版本逐个执行下载/校验/解压。已安装的跳过；单个版本失败记录
+     * 错误并继续下一个，最后汇总（COMPLETED 若至少成功一个，否则 FAILED）。
+     */
+    fun installAllEngines(): Flow<EngineProgress> = channelFlow {
+        try {
+            val manifest = downloader.fetchManifest()
+                ?: throw IllegalStateException("无法获取引擎清单 manifest.json（请检查下载源配置与网络）")
+            if (manifest.engines.isEmpty()) {
+                throw IllegalStateException("远程清单中没有任何引擎版本")
+            }
+
+            // 运行库必装基线
+            if (!isRuntimeReady()) {
+                val rt = manifest.runtimeLibs
+                    ?: throw IllegalStateException("manifest 缺少运行库信息（runtimeLibs）")
+                emitProgress(this, EngineProgress(EngineProgress.Phase.DOWNLOADING, batchLabel = "正在安装运行库..."))
+                installAsset(this, rt.file, rt.url, rt.sha256, FILE_RUNTIME_LIBS)
+                if (!isRuntimeReady()) {
+                    throw IllegalStateException("运行库安装后仍不可用，无法加载引擎")
+                }
+                engineLoader.ensureSharedLibsLoaded()
+            }
+
+            // 需要安装的版本列表
+            val pending = manifest.engines
+                .map { it.dartVersion }
+                .filter { !isEngineVersionReady(it) }
+            val total = pending.size
+            if (total == 0) {
+                emitProgress(this, EngineProgress(EngineProgress.Phase.COMPLETED, batchTotal = total))
+                return@channelFlow
+            }
+
+            var completed = 0
+            var failed = 0
+            val failedVersions = mutableListOf<String>()
+            for (version in pending) {
+                emitProgress(
+                    this,
+                    EngineProgress(
+                        phase = EngineProgress.Phase.DOWNLOADING,
+                        batchCompleted = completed,
+                        batchTotal = total,
+                        batchLabel = "正在下载 Dart $version ($completed/$total)",
+                    )
+                )
+                try {
+                    val entry = manifest.engines.first { it.dartVersion == version }
+                    installAsset(this, entry.file, entry.url, entry.sha256, "dartvm-${version}.7z")
+                    if (!isEngineVersionReady(version)) {
+                        throw IllegalStateException("引擎 Dart $version 安装后仍不可用")
+                    }
+                    completed++
+                    Log.i(TAG, "批量下载：Dart $version 完成 ($completed/$total)")
+                } catch (e: Exception) {
+                    failed++
+                    failedVersions.add(version)
+                    Log.e(TAG, "批量下载：Dart $version 失败: ${e.message}", e)
+                }
+            }
+
+            installedPackVersion = manifest.packVersion
+            notifyVersionsChanged()
+            Log.i(TAG, "批量下载结束: 成功 $completed/$total, 失败 $failed")
+            appLogger.info(TAG, "批量下载引擎结束: 成功 $completed/$total")
+
+            if (failed == 0) {
+                emitProgress(
+                    this,
+                    EngineProgress(
+                        phase = EngineProgress.Phase.COMPLETED,
+                        batchCompleted = completed,
+                        batchTotal = total,
+                        batchLabel = "全部引擎下载完成 ($completed/$total)",
+                    )
+                )
+            } else {
+                emitProgress(
+                    this,
+                    EngineProgress(
+                        phase = EngineProgress.Phase.FAILED,
+                        batchCompleted = completed,
+                        batchTotal = total,
+                        batchLabel = "部分引擎下载失败（${failedVersions.joinToString()}）",
+                        errorMessage = "失败版本: ${failedVersions.joinToString()}（已成功 $completed/$total）",
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "批量下载引擎失败: ${e.message}", e)
+            appLogger.error(TAG, "批量下载引擎失败: ${e.message}")
             val err = EngineProgress(
                 phase = EngineProgress.Phase.FAILED,
                 errorMessage = e.message ?: "未知错误",

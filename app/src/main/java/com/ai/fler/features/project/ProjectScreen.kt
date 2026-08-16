@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,6 +26,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
@@ -45,6 +47,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -65,6 +68,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ai.fler.core.service.FlutterEngineProber
 import com.ai.fler.data.entity.Project
 import com.ai.fler.feature.project.AnalyzeResult
 import com.ai.fler.feature.project.AnalysisProgress
@@ -88,10 +92,13 @@ import java.util.Locale
 @Composable
 fun ProjectScreen(
     viewModel: ProjectViewModel = hiltViewModel(),
-    onProjectClick: (Long) -> Unit = {}
+    onProjectClick: (Long) -> Unit = {},
+    onOpenSettings: () -> Unit = {},
 ) {
     val state by viewModel.projectListState.collectAsStateWithLifecycle()
     val progress by viewModel.analysisProgress.collectAsStateWithLifecycle()
+    val probeResult by viewModel.probeResult.collectAsStateWithLifecycle()
+    val installedVersions by viewModel.installedVersions.collectAsStateWithLifecycle()
     var showNewProjectDialog by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -147,9 +154,11 @@ fun ProjectScreen(
                     ProjectList(
                         projects = state.projects,
                         progress = progress,
+                        installedVersions = installedVersions,
                         onProjectClick = onProjectClick,
                         onDeleteClick = { project -> viewModel.deleteProject(project) },
-                        onAnalyzeClick = { project -> viewModel.startAnalysis(project.id) }
+                        onAnalyzeClick = { project -> viewModel.startAnalysis(project.id) },
+                        onOpenSettings = onOpenSettings,
                     )
                 }
             }
@@ -161,7 +170,15 @@ fun ProjectScreen(
     // 新建项目对话框
     if (showNewProjectDialog) {
         NewProjectDialog(
-            onDismiss = { showNewProjectDialog = false },
+            probeResult = probeResult,
+            installedVersions = installedVersions,
+            onApkSelected = { apkPath -> viewModel.probeApk(apkPath) },
+            onOpenSettings = onOpenSettings,
+            onDismiss = {
+                showNewProjectDialog = false
+                // 关闭对话框后重置探测结果，避免下次打开显示旧数据
+                viewModel.resetProbeResult()
+            },
             onCreate = { name, apkPath ->
                 viewModel.createProject(name, apkPath)
                 showNewProjectDialog = false
@@ -220,9 +237,11 @@ private fun EmptyContent(onAddClick: () -> Unit) {
 private fun ProjectList(
     projects: List<Project>,
     progress: AnalysisProgress,
+    installedVersions: List<String>,
     onProjectClick: (Long) -> Unit,
     onDeleteClick: (Project) -> Unit,
-    onAnalyzeClick: (Project) -> Unit
+    onAnalyzeClick: (Project) -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -236,9 +255,11 @@ private fun ProjectList(
             ProjectCard(
                 project = project,
                 progress = progress,
+                installedVersions = installedVersions,
                 onClick = { onProjectClick(project.id) },
                 onDelete = { onDeleteClick(project) },
                 onAnalyze = { onAnalyzeClick(project) },
+                onOpenSettings = onOpenSettings,
                 modifier = Modifier.animateItem()
             )
         }
@@ -251,9 +272,11 @@ private fun ProjectList(
 private fun ProjectCard(
     project: Project,
     progress: AnalysisProgress,
+    installedVersions: List<String>,
     onClick: () -> Unit,
     onDelete: () -> Unit,
     onAnalyze: () -> Unit,
+    onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
@@ -262,6 +285,10 @@ private fun ProjectCard(
         progress.stage != AnalysisStage.Idle &&
         progress.stage != AnalysisStage.Completed &&
         progress.stage != AnalysisStage.Failed
+
+    // 引擎门禁：Flutter 项目已检测出版本但本机未安装对应引擎
+    val engineMissing = project.dartVersion != null &&
+        project.dartVersion !in installedVersions
 
     Card(
         onClick = onClick,
@@ -365,17 +392,33 @@ private fun ProjectCard(
                 project.status != Project.STATUS_EXTRACTING &&
                 !isAnalyzing) {
                 Spacer(modifier = Modifier.height(12.dp))
-                TextButton(
-                    onClick = onAnalyze,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Analytics,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("开始分析")
+                if (engineMissing) {
+                    // 引擎未安装：禁用分析，引导去设置下载
+                    TextButton(
+                        onClick = onOpenSettings,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("引擎未安装（去设置下载 Dart ${project.dartVersion}）")
+                    }
+                } else {
+                    TextButton(
+                        onClick = onAnalyze,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Analytics,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("开始分析")
+                    }
                 }
             }
         }
@@ -471,6 +514,10 @@ fun InlineAnalysisProgress(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NewProjectDialog(
+    probeResult: FlutterEngineProber.ProbeResult?,
+    installedVersions: List<String>,
+    onApkSelected: (String) -> Unit,
+    onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
     onCreate: (String, String) -> Unit
 ) {
@@ -478,6 +525,7 @@ private fun NewProjectDialog(
     var apkPath by remember { mutableStateOf("") }
     var isCopying by remember { mutableStateOf(false) }
     var copyError by remember { mutableStateOf<String?>(null) }
+    var lastProbedPath by remember { mutableStateOf("") }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -503,6 +551,9 @@ private fun NewProjectDialog(
                 withContext(Dispatchers.Main) {
                     if (local != null) {
                         apkPath = local.absolutePath
+                        lastProbedPath = local.absolutePath
+                        // 复制完成后立即探测 Dart 版本与引擎就绪状态
+                        onApkSelected(local.absolutePath)
                     } else {
                         copyError = "文件复制失败，请重试或手动输入路径"
                         apkPath = u.toString() // 至少保留原始 URI 作为输入框提示
@@ -600,6 +651,16 @@ private fun NewProjectDialog(
                     )
                 }
 
+                // 引擎探测结果（仅显示当前选中 APK 的探测结果）
+                if (!isCopying && apkPath.isNotBlank() && apkPath == lastProbedPath) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    ProbeStatusRow(
+                        probeResult = probeResult,
+                        installedVersions = installedVersions,
+                        onOpenSettings = onOpenSettings,
+                    )
+                }
+
                 // 备选：直接输入路径
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
@@ -633,6 +694,78 @@ private fun NewProjectDialog(
             }
         }
     )
+}
+
+// ========== 引擎探测状态行（新建项目对话框内） ==========
+
+@Composable
+private fun ProbeStatusRow(
+    probeResult: FlutterEngineProber.ProbeResult?,
+    installedVersions: List<String>,
+    onOpenSettings: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        when (probeResult) {
+            is FlutterEngineProber.ProbeResult.NotFlutter -> {
+                Text(
+                    text = "非 Flutter 应用：无需下载 Dart 引擎，可直接分析",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(10.dp),
+                )
+            }
+            is FlutterEngineProber.ProbeResult.Detected -> {
+                Column(modifier = Modifier.padding(10.dp)) {
+                    if (probeResult.engineReady) {
+                        Text(
+                            text = "Dart ${probeResult.dartVersion} · 引擎已安装",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    } else {
+                        Text(
+                            text = "Dart ${probeResult.dartVersion} · 引擎未安装",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        TextButton(
+                            onClick = onOpenSettings,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Download,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("去设置下载引擎")
+                        }
+                    }
+                }
+            }
+            is FlutterEngineProber.ProbeResult.Undetectable -> {
+                Text(
+                    text = "Flutter 应用，但未识别到 Dart 版本（创建后可先运行分析看详细错误）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(10.dp),
+                )
+            }
+            null -> {
+                Text(
+                    text = "正在探测 Dart 版本与引擎状态...",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(10.dp),
+                )
+            }
+        }
+    }
 }
 
 // ========== 工具函数 ==========

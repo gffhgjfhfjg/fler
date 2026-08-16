@@ -5,6 +5,8 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ai.fler.core.analysis.DartCallGraphBuilder
+import com.ai.fler.core.service.EnginePackManager
+import com.ai.fler.core.service.FlutterEngineProber
 import com.ai.fler.data.AppDatabase
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.ProjectDao
@@ -33,12 +35,22 @@ class ProjectViewModel @Inject constructor(
     private val projectDao: ProjectDao,
     private val analysisDao: AnalysisDao,
     private val callGraphBuilder: DartCallGraphBuilder,
-    private val analysisRunner: AnalysisRunner
+    private val analysisRunner: AnalysisRunner,
+    private val enginePackManager: EnginePackManager,
+    private val flutterEngineProber: FlutterEngineProber,
 ) : ViewModel() {
 
     // ========== 项目列表状态 ==========
     private val _projectListState = MutableStateFlow(ProjectListState())
     val projectListState: StateFlow<ProjectListState> = _projectListState.asStateFlow()
+
+    // ========== 创建时引擎探测状态 ==========
+    private val _probeResult = MutableStateFlow<FlutterEngineProber.ProbeResult?>(null)
+    val probeResult: StateFlow<FlutterEngineProber.ProbeResult?> = _probeResult.asStateFlow()
+
+    // ========== 已安装引擎版本（订阅版本变更，供列表门禁） ==========
+    private val _installedVersions = MutableStateFlow<List<String>>(emptyList())
+    val installedVersions: StateFlow<List<String>> = _installedVersions.asStateFlow()
 
     // ========== 分析进度（转发到应用级 AnalysisRunner） ==========
     val analysisProgress: StateFlow<AnalysisProgress> = analysisRunner.analysisProgress
@@ -56,6 +68,12 @@ class ProjectViewModel @Inject constructor(
     // ========== 初始化 ==========
     init {
         loadProjects()
+        // 引擎版本变化（下载完成/清除）时实时刷新已安装版本，无需重启
+        viewModelScope.launch {
+            enginePackManager.versionsEpoch.collect {
+                _installedVersions.value = enginePackManager.listInstalledVersions()
+            }
+        }
     }
 
     private var projectsJob: Job? = null
@@ -97,15 +115,34 @@ class ProjectViewModel @Inject constructor(
     // ========== 新建项目 ==========
 
     /**
-     * 创建新项目。
+     * 探测 APK 的 Dart 版本与引擎就绪状态（对话框 APK 复制完成后触发）。
+     *
+     * @param apkPath APK 文件路径
+     */
+    fun probeApk(apkPath: String) {
+        viewModelScope.launch {
+            _probeResult.value = flutterEngineProber.probe(apkPath)
+        }
+    }
+
+    /** 重置探测结果（对话框关闭时调用，避免下次打开显示旧数据）。 */
+    fun resetProbeResult() {
+        _probeResult.value = null
+    }
+
+    /**
+     * 创建新项目，并用探测到的 Dart 版本写回（后续 UI 据此做引擎门禁）。
      */
     fun createProject(name: String, apkPath: String) {
         viewModelScope.launch {
             try {
+                val dartVersion = (_probeResult.value as? FlutterEngineProber.ProbeResult.Detected)
+                    ?.dartVersion
                 val project = Project(
                     name = name,
                     apkPath = apkPath,
-                    status = Project.STATUS_CREATED
+                    status = Project.STATUS_CREATED,
+                    dartVersion = dartVersion,
                 )
                 projectDao.insert(project)
             } catch (e: Exception) {

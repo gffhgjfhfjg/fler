@@ -11,6 +11,7 @@ import androidx.compose.runtime.setValue
 import com.ai.fler.app.navigation.AppNavGraph
 import com.ai.fler.app.theme.FlerTheme
 import com.ai.fler.core.mcp.McpConfig
+import com.ai.fler.core.service.OverlayKeepAliveService
 import com.ai.fler.features.mcp.McpServerService
 import com.ai.fler.features.onboarding.OnboardingPreferences
 import com.ai.fler.features.onboarding.OnboardingScreen
@@ -35,6 +36,13 @@ class MainActivity : ComponentActivity() {
         // 方便 AI 代理随时连接，无需手动到设置里开关。
         if (config.enabled.value) {
             McpServerService.start(this)
+        }
+        // 自动恢复悬浮窗保活：用户已开启过且拥有悬浮窗权限时，任何入口进入应用都拉起悬浮球
+        if (OverlayKeepAliveService.isOverlayEnabled(this) &&
+            android.provider.Settings.canDrawOverlays(this) &&
+            !OverlayKeepAliveService.isRunning()
+        ) {
+            OverlayKeepAliveService.start(this)
         }
         setContent {
             FlerTheme {

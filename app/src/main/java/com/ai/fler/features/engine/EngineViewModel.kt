@@ -35,6 +35,7 @@ class EngineViewModel @Inject constructor(
         val isRuntimeReady: Boolean = false,
         val progress: EnginePackManager.EngineProgress? = null,
         val isDownloading: Boolean = false,
+        val isDownloadingAll: Boolean = false,
         val errorMessage: String? = null,
         val isCustomSource: Boolean = false,
         val manifest: EngineManifest? = null,
@@ -116,7 +117,7 @@ class EngineViewModel @Inject constructor(
 
     /** 安装指定 Dart 版本引擎。 */
     fun installEngine(version: String) {
-        if (_uiState.value.isDownloading) return
+        if (_uiState.value.isDownloading || _uiState.value.isDownloadingAll) return
         _uiState.update { it.copy(isDownloading = true, errorMessage = null) }
         viewModelScope.launch {
             enginePackManager.installEngineVersion(version).collectLatest { progress ->
@@ -127,7 +128,7 @@ class EngineViewModel @Inject constructor(
 
     /** 安装（或更新）必装运行库。 */
     fun installRuntimeLibs(force: Boolean = false) {
-        if (_uiState.value.isDownloading) return
+        if (_uiState.value.isDownloading || _uiState.value.isDownloadingAll) return
         _uiState.update { it.copy(isDownloading = true, errorMessage = null) }
         viewModelScope.launch {
             enginePackManager.installRuntimeLibs(force).collectLatest { progress ->
@@ -136,14 +137,30 @@ class EngineViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 一键下载全部引擎（逐个串行，由 [EnginePackManager.installAllEngines] 执行）。
+     * 下载期间禁用单个安装与下拉。
+     */
+    fun downloadAllEngines() {
+        if (_uiState.value.isDownloading || _uiState.value.isDownloadingAll) return
+        _uiState.update { it.copy(isDownloadingAll = true, errorMessage = null) }
+        viewModelScope.launch {
+            enginePackManager.installAllEngines().collectLatest { progress ->
+                applyProgress(progress)
+            }
+        }
+    }
+
     private fun applyProgress(progress: EnginePackManager.EngineProgress) {
+        val isBusy = progress.phase == EnginePackManager.EngineProgress.Phase.DOWNLOADING ||
+            progress.phase == EnginePackManager.EngineProgress.Phase.EXTRACTING ||
+            progress.phase == EnginePackManager.EngineProgress.Phase.VERIFYING ||
+            progress.phase == EnginePackManager.EngineProgress.Phase.LOADING
         _uiState.update {
             it.copy(
                 progress = progress,
-                isDownloading = progress.phase == EnginePackManager.EngineProgress.Phase.DOWNLOADING ||
-                    progress.phase == EnginePackManager.EngineProgress.Phase.EXTRACTING ||
-                    progress.phase == EnginePackManager.EngineProgress.Phase.VERIFYING ||
-                    progress.phase == EnginePackManager.EngineProgress.Phase.LOADING,
+                isDownloading = isBusy && !it.isDownloadingAll,
+                isDownloadingAll = it.isDownloadingAll && isBusy,
             )
         }
 
@@ -152,6 +169,7 @@ class EngineViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         isDownloading = false,
+                        isDownloadingAll = false,
                         isReady = enginePackManager.isEnginePackReady(),
                         isRuntimeReady = enginePackManager.isRuntimeReady(),
                     )
@@ -161,6 +179,7 @@ class EngineViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         isDownloading = false,
+                        isDownloadingAll = false,
                         errorMessage = progress.errorMessage,
                     )
                 }

@@ -2,6 +2,8 @@ package com.ai.fler.feature.settings
 
 import android.app.Application
 import android.content.Context
+import android.os.Build
+import android.os.PowerManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ai.fler.core.frida.FridaEngine
@@ -10,6 +12,7 @@ import com.ai.fler.core.mcp.McpToolHandlers
 import com.ai.fler.core.service.EnginePackManager
 import com.ai.fler.core.service.EngineSourceConfig
 import com.ai.fler.core.service.EngineUpdate
+import com.ai.fler.core.service.OverlayKeepAliveService
 import com.ai.fler.core.service.WorkDirectory
 import com.ai.fler.features.mcp.McpServerManager
 import com.ai.fler.features.mcp.McpServerService
@@ -69,6 +72,10 @@ class SettingsViewModel @Inject constructor(
     /** 工作目录 SAF tree URI（未设置 = 空串）。 */
     private val _workDirTreeUri = MutableStateFlow(workDirectory.treeUri.value)
     val workDirTreeUri: StateFlow<String> = _workDirTreeUri.asStateFlow()
+
+    /** 后台保活状态（电池优化豁免）。 */
+    private val _keepAliveState = MutableStateFlow(KeepAliveUiState())
+    val keepAliveState: StateFlow<KeepAliveUiState> = _keepAliveState.asStateFlow()
 
     /** 工作目录显示名（目录名或 URI 尾部；未设置 = null），UI 副标题用。 */
     val workDirDisplayName: String? get() = workDirectory.displayName()
@@ -132,12 +139,9 @@ class SettingsViewModel @Inject constructor(
 
     fun mcpStartServer() {
         mcpConfig.setEnabled(true)
-        if (mcpConfig.bindMode.value == McpConfig.BindMode.LAN) {
-            // 局域网模式：前台服务保活
-            McpServerService.start(application)
-        } else {
-            mcpServerManager.start()
-        }
+        // 一律前台化：本机（127.0.0.1）与局域网模式都挂前台服务保活，
+        // 与 MainActivity 启动逻辑一致（避免本机模式退后台即断）。
+        McpServerService.start(application)
     }
 
     fun mcpStopServer() {
@@ -330,6 +334,54 @@ class SettingsViewModel @Inject constructor(
         sourceConfig.resetToDefault()
         _sourceState.value = sourceStateFromConfig()
     }
+
+    // ========== 后台保活（电池优化豁免 + 悬浮窗保活） ==========
+
+    /** 悬浮窗保活开关持久化（与 OverlayKeepAliveService 共享键名）。 */
+    private val keepAlivePrefs =
+        application.getSharedPreferences(OverlayKeepAliveService.PREFS_NAME, Context.MODE_PRIVATE)
+
+    /** 悬浮窗保活开关是否已开启（用户意图，实际运行状态以服务为准）。 */
+    private val overlayEnabled: Boolean
+        get() = keepAlivePrefs.getBoolean(OverlayKeepAliveService.KEY_OVERLAY_ENABLED, false)
+
+    /**
+     * 刷新后台保活状态（Android 9+ 电池优化豁免 + 悬浮窗权限/开关）。
+     * 每次回到设置页前台时调用，保证状态实时更新。
+     */
+    fun refreshKeepAliveStatus() {
+        val pm = application.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val exempt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            pm.isIgnoringBatteryOptimizations(application.packageName)
+        } else {
+            true
+        }
+        val canOverlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            android.provider.Settings.canDrawOverlays(application)
+        // 自动恢复：用户已开启悬浮窗保活但服务不在运行（进程被杀/重启后）时重新拉起
+        if (overlayEnabled && canOverlay && !OverlayKeepAliveService.isRunning()) {
+            OverlayKeepAliveService.start(application)
+        }
+        _keepAliveState.value = KeepAliveUiState(
+            isIgnoringBatteryOptimizations = exempt,
+            canDrawOverlay = canOverlay,
+            overlayRunning = OverlayKeepAliveService.isRunning() || overlayEnabled,
+        )
+    }
+
+    /**
+     * 开启/关闭悬浮窗保活。
+     * 开启前需已获得悬浮窗权限（UI 负责引导授权）。
+     */
+    fun setOverlayKeepAlive(enabled: Boolean) {
+        keepAlivePrefs.edit().putBoolean(OverlayKeepAliveService.KEY_OVERLAY_ENABLED, enabled).apply()
+        if (enabled) {
+            OverlayKeepAliveService.start(application)
+        } else {
+            OverlayKeepAliveService.stop(application)
+        }
+        refreshKeepAliveStatus()
+    }
 }
 
 /**
@@ -390,4 +442,14 @@ data class FridaStatusUiState(
     val initialized: Boolean = false,
     val loading: Boolean = false,
     val errorMessage: String? = null,
+)
+
+/** 后台保活状态（设置页后台保活卡片用）。 */
+data class KeepAliveUiState(
+    /** 是否已豁免电池优化（false = 需引导用户开启）。 */
+    val isIgnoringBatteryOptimizations: Boolean = true,
+    /** 是否已授予悬浮窗权限（SYSTEM_ALERT_WINDOW）。 */
+    val canDrawOverlay: Boolean = false,
+    /** 悬浮窗保活开关是否已开启。 */
+    val overlayRunning: Boolean = false,
 )

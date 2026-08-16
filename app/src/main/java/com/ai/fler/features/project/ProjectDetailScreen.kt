@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -78,6 +80,7 @@ fun ProjectDetailScreen(
     onPpBrowse: (Long) -> Unit = {},
     onAsmBrowse: (Long) -> Unit = {},
     onOpenSo: (String, Long) -> Unit = { _, _ -> },
+    onOpenSettings: () -> Unit = {},
     viewModel: ProjectDetailViewModel = hiltViewModel(),
     projectViewModel: ProjectViewModel = hiltViewModel(),
     modifier: Modifier = Modifier
@@ -86,7 +89,13 @@ fun ProjectDetailScreen(
     val analyses by viewModel.analyses.collectAsStateWithLifecycle()
     val soFiles by viewModel.soFiles.collectAsStateWithLifecycle()
     val progress by projectViewModel.analysisProgress.collectAsStateWithLifecycle()
+    val installedVersions by projectViewModel.installedVersions.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+
+    // 引擎门禁：Flutter 项目已检测出版本但本机未安装对应引擎
+    val projectDartVersion = project?.dartVersion
+    val engineMissing = projectDartVersion != null &&
+        projectDartVersion !in installedVersions
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -150,6 +159,48 @@ fun ProjectDetailScreen(
                         ProjectInfoCard(project = p)
                     }
 
+                    // 引擎未安装引导卡片
+                    if (engineMissing) {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.errorContainer
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Text(
+                                        text = "检测到 Dart ${p.dartVersion}，设备未安装对应引擎",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                    Text(
+                                        text = "请先到设置页下载引擎，安装完成后再手动运行分析",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    TextButton(
+                                        onClick = onOpenSettings,
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Download,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("去设置下载引擎")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     item {
                         Button(
                             onClick = {
@@ -160,9 +211,10 @@ fun ProjectDetailScreen(
                                     projectViewModel.startAnalysis(p.id)
                                 }
                             },
-                            enabled = progress.stage == AnalysisStage.Idle ||
-                                progress.stage == AnalysisStage.Completed ||
-                                progress.stage == AnalysisStage.Failed,
+                            enabled = !engineMissing &&
+                                (progress.stage == AnalysisStage.Idle ||
+                                    progress.stage == AnalysisStage.Completed ||
+                                    progress.stage == AnalysisStage.Failed),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(
@@ -183,6 +235,8 @@ fun ProjectDetailScreen(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("分析中...")
+                            } else if (engineMissing) {
+                                Text("需先安装 Dart ${p.dartVersion} 引擎")
                             } else {
                                 Text("运行分析")
                             }

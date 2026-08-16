@@ -25,6 +25,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -175,7 +176,8 @@ fun AppNavGraph() {
                 ProjectScreen(
                     onProjectClick = { projectId ->
                         navController.navigate(Screen.ProjectDetail.createRoute(projectId))
-                    }
+                    },
+                    onOpenSettings = { navigateToSettings(navController) },
                 )
             }
             composable(
@@ -279,7 +281,8 @@ fun AppNavGraph() {
                     },
                     onOpenSo = { filePath, offset ->
                         navController.navigate(Screen.SoEditor.createRoute(filePath, offset, immersive = true))
-                    }
+                    },
+                    onOpenSettings = { navigateToSettings(navController) },
                 )
             }
 
@@ -354,6 +357,15 @@ fun AppNavGraph() {
             // ========== SO 编辑器详情（已并入 SoEditor Tab：上下文进入时携带
             // filePath/offset/length/immersive 参数，页面自动打开定位）==========
         }
+    }
+}
+
+/** 切换到设置 Tab（与底栏切换一致：弹出至起点、避免栈累积、恢复状态）。 */
+private fun navigateToSettings(navController: NavHostController) {
+    navController.navigate(Screen.Settings.route) {
+        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
     }
 }
 

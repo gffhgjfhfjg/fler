@@ -37,6 +37,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -50,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ai.fler.core.service.EnginePackManager
 import com.ai.fler.feature.settings.FridaStatusUiState
@@ -92,12 +95,35 @@ fun SettingsScreen(
     val cacheCleanResult by viewModel.cacheCleanResult.collectAsStateWithLifecycle()
     val mcpState by viewModel.mcpState.collectAsStateWithLifecycle()
     val fridaStatus by viewModel.fridaStatus.collectAsStateWithLifecycle()
+    val keepAliveState by viewModel.keepAliveState.collectAsStateWithLifecycle()
     val engineState by engineViewModel.uiState.collectAsStateWithLifecycle()
     val workDirTreeUri by viewModel.workDirTreeUri.collectAsStateWithLifecycle()
     var showCacheCleanConfirm by remember { mutableStateOf(false) }
 
-    // 工作目录选择器（SAF tree，持久化授权，写回 ViewModel）
+    // 后台保活状态刷新：每次屏幕回到前台（含从电池优化设置页返回）都重读，
+    // 保证「去开启」后的豁免状态实时更新
+    LifecycleResumeEffect(Unit) {
+        viewModel.refreshKeepAliveStatus()
+        onPauseOrDispose { }
+    }
+
+    // Android 13+ 通知权限（前台服务通知需要）
     val context = LocalContext.current
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { /* 授权结果无需处理，服务通知可正常展示 */ }
+    LaunchedEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            val granted = context.checkSelfPermission(
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    // 工作目录选择器（SAF tree，持久化授权，写回 ViewModel）
     val workDirPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -139,6 +165,7 @@ fun SettingsScreen(
                     onInstallSelected = { engineViewModel.installSelectedVersion() },
                     onSelectVersion = { engineViewModel.selectVersion(it) },
                     onDownloadUpdate = { engineViewModel.installRuntimeLibs(force = true) },
+                    onDownloadAll = { engineViewModel.downloadAllEngines() },
                 )
             }
 
@@ -194,6 +221,14 @@ fun SettingsScreen(
             )
         }
 
+        // 后台保活（电池优化豁免引导 + 悬浮窗保活）
+        item {
+            KeepAliveCard(
+                state = keepAliveState,
+                onToggleOverlay = { viewModel.setOverlayKeepAlive(it) },
+            )
+        }
+
         // 关于
         item {
             AboutCard(onClick = onOpenAbout)
@@ -234,6 +269,7 @@ private fun EngineVersionCard(
     onInstallSelected: () -> Unit,
     onSelectVersion: (String) -> Unit,
     onDownloadUpdate: () -> Unit,
+    onDownloadAll: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -355,7 +391,7 @@ private fun EngineVersionCard(
                 if (!engineState.isRuntimeReady) {
                     OutlinedButton(
                         onClick = onInstallRuntime,
-                        enabled = !engineState.isDownloading,
+                        enabled = !engineState.isDownloading && !engineState.isDownloadingAll,
                     ) {
                         Text("安装运行库")
                     }
@@ -380,7 +416,7 @@ private fun EngineVersionCard(
                     engines = manifest.engines,
                     installedVersions = installedVersions,
                     selectedVersion = engineState.selectedVersion,
-                    enabled = !engineState.isDownloading,
+                    enabled = !engineState.isDownloading && !engineState.isDownloadingAll,
                     onSelect = onSelectVersion,
                 )
 
@@ -389,17 +425,43 @@ private fun EngineVersionCard(
                 Spacer(modifier = Modifier.height(8.dp))
                 Button(
                     onClick = onInstallSelected,
-                    enabled = canInstall && !engineState.isDownloading,
+                    enabled = canInstall && !engineState.isDownloading && !engineState.isDownloadingAll,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
                         when {
                             engineState.isDownloading -> "下载中..."
+                            engineState.isDownloadingAll -> "正在批量下载..."
                             selectedInstalled -> "已安装 Dart ${engineState.selectedVersion}"
                             engineState.selectedVersion != null -> "下载 Dart ${engineState.selectedVersion}"
                             else -> "请选择版本"
                         }
                     )
+                }
+
+                // 一键下载全部（存在未安装版本时可用）
+                val pendingCount = manifest.engines.count { it.dartVersion !in installedVersions }
+                if (pendingCount > 0) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = onDownloadAll,
+                        enabled = !engineState.isDownloading && !engineState.isDownloadingAll,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            when {
+                                engineState.isDownloadingAll ->
+                                    "下载全部引擎中 (${engineState.progress?.batchCompleted ?: 0}/${engineState.progress?.batchTotal ?: pendingCount})"
+                                else -> "下载全部引擎（缺 $pendingCount 个）"
+                            }
+                        )
+                    }
                 }
             }
 
@@ -524,6 +586,7 @@ private fun EngineVersionCard(
 
                     Button(
                         onClick = onDownloadUpdate,
+                        enabled = !engineState.isDownloading && !engineState.isDownloadingAll,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(
@@ -693,12 +756,17 @@ private fun phaseLabel(phase: com.ai.fler.core.service.EnginePackManager.EngineP
 
 private fun progressDetail(progress: com.ai.fler.core.service.EnginePackManager.EngineProgress): String = when (progress.phase) {
     com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.DOWNLOADING -> {
-        val mb = progress.downloadedBytes / (1024.0 * 1024.0)
-        val totalMb = progress.totalBytes / (1024.0 * 1024.0)
-        if (progress.totalBytes > 0) {
-            "%.1f / %.1f MB · %s".format(mb, totalMb, progress.speed)
+        // 批量下载（一键下载全部）优先展示版本进度文案
+        if (progress.batchLabel.isNotBlank()) {
+            progress.batchLabel
         } else {
-            "%.1f MB · %s".format(mb, progress.speed)
+            val mb = progress.downloadedBytes / (1024.0 * 1024.0)
+            val totalMb = progress.totalBytes / (1024.0 * 1024.0)
+            if (progress.totalBytes > 0) {
+                "%.1f / %.1f MB · %s".format(mb, totalMb, progress.speed)
+            } else {
+                "%.1f MB · %s".format(mb, progress.speed)
+            }
         }
     }
     com.ai.fler.core.service.EnginePackManager.EngineProgress.Phase.EXTRACTING -> "%.0f%%".format(progress.extractProgress * 100)
@@ -1068,6 +1136,168 @@ private fun CacheCleanCard(
                     Spacer(modifier = Modifier.width(4.dp))
                     IconButton(onClick = onClearResult, modifier = Modifier.size(20.dp)) {
                         Icon(Icons.Default.Close, contentDescription = "关闭", modifier = Modifier.size(14.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KeepAliveCard(
+    state: com.ai.fler.feature.settings.KeepAliveUiState,
+    onToggleOverlay: (Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+
+    // 悬浮窗权限授权（SYSTEM_ALERT_WINDOW）
+    val overlayPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        // 返回时由 LifecycleResumeEffect 自动刷新权限/开关状态
+    }
+
+    fun launchBatteryOptimizationSettings() {
+        // 1) 非 MIUI：优先系统请求对话框
+        val isMiui = (android.os.Build.MANUFACTURER.equals("Xiaomi", true) ||
+            android.os.Build.BRAND.equals("Xiaomi", true))
+        if (!isMiui) {
+            val requestIntent = android.content.Intent(
+                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                android.net.Uri.parse("package:${context.packageName}")
+            )
+            if (requestIntent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(requestIntent)
+                return
+            }
+        }
+        // 2) MIUI：优先打开 MIUI 电池优化专属页（省电与电池 → 应用智能省电）
+        val miuiIntent = android.content.Intent().apply {
+            setClassName(
+                "com.miui.securitycenter",
+                "com.miui.powercenter.MiuiPowerSave"
+            )
+        }
+        if (isMiui && miuiIntent.resolveActivity(context.packageManager) != null) {
+            val launched = runCatching {
+                context.startActivity(miuiIntent)
+                true
+            }.getOrDefault(false)
+            if (launched) return
+        }
+        // 3) 兜底：通用电池优化设置列表
+        val fallback = android.content.Intent(
+            android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+        )
+        if (fallback.resolveActivity(context.packageManager) != null) {
+            context.startActivity(fallback)
+            return
+        }
+        android.widget.Toast.makeText(
+            context,
+            "无法打开电池优化设置，请手动到系统设置关闭",
+            android.widget.Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text(
+                text = "后台保活",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "分析任务通过前台服务 + WakeLock 在后台持续运行。MIUI 等厂商系统仍可能限制后台进程，建议关闭本 App 的电池优化。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            // ---- 电池优化豁免 ----
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = if (state.isIgnoringBatteryOptimizations) "电池优化：已豁免" else "电池优化：未豁免",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (state.isIgnoringBatteryOptimizations) {
+                        MaterialTheme.colorScheme.tertiary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    }
+                )
+                if (!state.isIgnoringBatteryOptimizations) {
+                    Button(onClick = ::launchBatteryOptimizationSettings) {
+                        Text("去开启")
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(modifier = Modifier.height(16.dp))
+            // ---- 悬浮窗保活 ----
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "悬浮窗保活",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = when {
+                            state.overlayRunning -> "运行中：桌面显示可拖动悬浮球，防止后台进程被回收"
+                            !state.canDrawOverlay -> "需授予悬浮窗权限后开启"
+                            else -> "在桌面显示小型悬浮球，提升后台存活率"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                when {
+                    !state.canDrawOverlay -> OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    android.content.Intent(
+                                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        android.net.Uri.parse("package:${context.packageName}")
+                                    )
+                                )
+                            }.onFailure {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "无法打开悬浮窗授权页",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    ) {
+                        Text("去授权")
+                    }
+                    state.overlayRunning -> OutlinedButton(
+                        onClick = { onToggleOverlay(false) }
+                    ) {
+                        Text("关闭")
+                    }
+                    else -> Button(
+                        onClick = { onToggleOverlay(true) }
+                    ) {
+                        Text("开启")
                     }
                 }
             }

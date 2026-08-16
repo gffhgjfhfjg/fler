@@ -3,4 +3,15 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
     <color name="fler_primary">#FF1E6FBA</color>
+    <color name="overlay_ball">#E6000000</color>
+
+    <!-- 悬浮窗菜单 -->
+    <color name="overlay_menu_bg">#F21E1E22</color>
+    <color name="overlay_menu_border">#22FFFFFF</color>
+    <color name="overlay_menu_divider">#1FFFFFFF</color>
+    <color name="overlay_status_on">#FF4CAF50</color>
+    <color name="overlay_status_off">#FF8D9199</color>
+    <color name="overlay_danger">#FFFF5252</color>
+    <color name="overlay_drop_zone">#CC1A1A1A</color>
+    <color name="overlay_drop_zone_active">#CCBA1A1A</color>
 </resources>

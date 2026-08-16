@@ -1,6 +1,7 @@
 package com.ai.fler.feature.project
 
 import android.content.Context
+import android.os.PowerManager
 import android.util.Log
 import com.ai.fler.core.service.AddressTranslator
 import com.ai.fler.core.service.AnalysisImporter
@@ -19,6 +20,7 @@ import com.ai.fler.data.dao.ProjectDao
 import com.ai.fler.data.entity.Analysis
 import com.ai.fler.data.entity.Library
 import com.ai.fler.data.entity.Project
+import com.ai.fler.features.analysis.AnalysisService
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -76,10 +78,17 @@ class AnalysisRunner @Inject constructor(
     /**
      * 启动分析。可跨页面后台执行，不再绑定到调用方 ViewModel 生命周期。
      *
+     * 启动前台服务（[AnalysisService]）保活 + 持有 WakeLock，防止进程被杀/锁屏 CPU 休眠中断分析。
+     *
      * @param projectId 项目 ID
      */
     fun startAnalysis(projectId: Long) {
         activeJob?.cancel()
+        releaseWakeLock()
+        // 前台服务保活：分析期间进程不被回收
+        AnalysisService.start(context)
+        // WakeLock：锁屏后 CPU 不休眠，Blutter 分析不降速
+        acquireWakeLock()
         _analysisProgress.value = AnalysisProgress(
             projectId = projectId,
             dismissedToBackground = true
@@ -97,6 +106,9 @@ class AnalysisRunner @Inject constructor(
                 activeProjectId = 0L
                 activeAnalysisId = 0L
                 activeJob = null
+                // 分析结束：释放 WakeLock + 停止前台服务
+                releaseWakeLock()
+                AnalysisService.stop(context)
             }
         }
     }
@@ -510,7 +522,30 @@ class AnalysisRunner @Inject constructor(
         )
     }
 
+    // ========== WakeLock 管理 ==========
+
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "fler:analysis").apply {
+            setReferenceCounted(false)
+            acquire(WAKE_LOCK_TIMEOUT_MS)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
+        wakeLock = null
+    }
+
     companion object {
         private const val TAG = "AnalysisRunner"
+
+        /** WakeLock 最长持有时间（分析超长时兜底释放，避免系统强制回收）。 */
+        private const val WAKE_LOCK_TIMEOUT_MS = 30L * 60L * 1000L
     }
 }

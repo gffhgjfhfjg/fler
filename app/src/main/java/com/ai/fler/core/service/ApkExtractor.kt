@@ -277,6 +277,35 @@ class ApkExtractor @Inject constructor(
     }
 
     /**
+     * 轻量提取单个 libflutter.so（仅用于 Dart 版本检测，不做全量提取）。
+     *
+     * 优先 arm64-v8a，其次 x86_64。找不到返回 null。
+     *
+     * @param apkPath APK 文件路径
+     * @param outputDir 输出目录
+     * @return 提取出的 libflutter.so 的 Library 元数据；无则返回 null
+     */
+    suspend fun extractLibflutter(apkPath: String, outputDir: File): Library? =
+        withContext(Dispatchers.IO) {
+            try {
+                if (!outputDir.exists()) outputDir.mkdirs()
+                ZipFile(apkPath).use { zip ->
+                    for (abi in listOf(ARM64_ABI, X86_64_ABI)) {
+                        val entryName = "lib/$abi/libflutter.so"
+                        val entry = zip.getEntry(entryName) ?: continue
+                        Log.i(TAG, "轻量提取 $entryName (size=${entry.size})")
+                        return@withContext extractEntry(zip, entry, entryName, outputDir)
+                    }
+                    Log.w(TAG, "APK 中未找到 libflutter.so（lib/arm64-v8a|lib/x86_64）")
+                    null
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "轻量提取 libflutter.so 失败: ${e.message}", e)
+                null
+            }
+        }
+
+    /**
      * 检查 APK 中包含哪些 ABI 架构。
      *
      * @param apkPath APK 文件路径
