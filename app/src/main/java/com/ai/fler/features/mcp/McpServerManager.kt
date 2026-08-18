@@ -163,8 +163,8 @@ class McpServerManager @Inject constructor(
      *
      * 排除蜂窝（rmnet/ccmni）、VPN（tun/tap）、dummy 接口——其地址在局域网内
      * 不可达，作为「局域网地址」展示会误导。选择优先级：
-     * 1. wlan*/eth*/ap* 接口的 RFC1918 私网地址（典型 WiFi/热点/以太网）
-     * 2. wlan*/eth*/ap* 接口的任意 IPv4
+     * 1. wlan / eth / ap 前缀接口的 RFC1918 私网地址（典型 WiFi/热点/以太网）
+     * 2. wlan / eth / ap 前缀接口的任意 IPv4
      * 3. 其他接口的私网地址
      * 无合适地址返回 null（UI 显示「未获取到局域网 IP」提示）。
      */
