@@ -8,6 +8,8 @@ import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
+import com.ai.fler.data.dao.DartObjectDao
+import com.ai.fler.data.dao.EnumMapDao
 import com.ai.fler.data.dao.HookScriptDao
 import com.ai.fler.data.dao.LibraryDao
 import com.ai.fler.data.dao.McpToolStatDao
@@ -18,6 +20,8 @@ import com.ai.fler.data.entity.Analysis
 import com.ai.fler.data.entity.DartCallEdge
 import com.ai.fler.data.entity.DartClass
 import com.ai.fler.data.entity.DartMethod
+import com.ai.fler.data.entity.DartObject
+import com.ai.fler.data.entity.EnumMap
 import com.ai.fler.data.entity.HookScript
 import com.ai.fler.data.entity.Library
 import com.ai.fler.data.entity.McpToolStat
@@ -41,9 +45,11 @@ import com.ai.fler.data.entity.Project
         AddressMapping::class,
         DartCallEdge::class,
         McpToolStat::class,
-        HookScript::class
+        HookScript::class,
+        DartObject::class,
+        EnumMap::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -64,6 +70,12 @@ abstract class AppDatabase : RoomDatabase() {
 
     /** Hook 脚本 DAO（Frida 落地脚本增删改查）。 */
     abstract fun hookScriptDao(): HookScriptDao
+
+    /** 对象池对象索引 DAO（引擎 objs.txt 轻量索引）。 */
+    abstract fun dartObjectDao(): DartObjectDao
+
+    /** 枚举索引映射 DAO（引擎 enum_map 表）。 */
+    abstract fun enumMapDao(): EnumMapDao
 
     /**
      * 级联删除项目及其所有关联数据。
@@ -94,6 +106,8 @@ abstract class AppDatabase : RoomDatabase() {
             dartMethodDao().deleteByAnalysisId(analysis.id)
             dartClassDao().deleteByAnalysisId(analysis.id)
             libraryDao().deleteByAnalysisId(analysis.id)
+            dartObjectDao().deleteByAnalysisId(analysis.id)
+            enumMapDao().deleteByAnalysisId(analysis.id)
         }
 
         // 2. 删 analyses
@@ -130,6 +144,8 @@ abstract class AppDatabase : RoomDatabase() {
         dartMethodDao().deleteByAnalysisId(analysisId)
         dartClassDao().deleteByAnalysisId(analysisId)
         libraryDao().deleteByAnalysisId(analysisId)
+        dartObjectDao().deleteByAnalysisId(analysisId)
+        enumMapDao().deleteByAnalysisId(analysisId)
         analysisDao().deleteById(analysisId)
     }
 

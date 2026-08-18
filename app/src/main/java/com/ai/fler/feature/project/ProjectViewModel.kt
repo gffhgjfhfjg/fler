@@ -220,5 +220,7 @@ data class AnalyzeResult(
  */
 data class RunOutcome(
     val result: AnalyzeResult,
-    val dbPath: String
+    val dbPath: String,
+    /** 引擎产物落地目录（pp.txt/objs.txt/asm/ida_script/blutter_frida.js），失败为空串 */
+    val outDir: String = ""
 )

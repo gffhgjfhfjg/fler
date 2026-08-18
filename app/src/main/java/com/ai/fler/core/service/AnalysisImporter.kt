@@ -65,6 +65,8 @@ class AnalysisImporter @Inject constructor(
         val classesCount: Int = 0,
         val methodsCount: Int = 0,
         val ppEntriesCount: Int = 0,
+        val objectsCount: Int = 0,
+        val enumsCount: Int = 0,
     )
 
     /**
@@ -87,6 +89,8 @@ class AnalysisImporter @Inject constructor(
         var classes = 0
         var methodsCount = 0
         var pp = 0
+        var objects = 0
+        var enums = 0
 
         try {
             // 确保 Room schema 已建好，并拿到 App DB 文件路径
@@ -279,8 +283,63 @@ class AnalysisImporter @Inject constructor(
                         }
                     }
 
+                    if ("objs" in blutterTables) {
+                        try {
+                            val cols = columnNamesAttached(roomDb, "blutter", "objs")
+                            val hasAddress = "obj_address" in cols
+                            val hasClass = "class_name" in cols
+                            val hasHint = "field_hint" in cols
+                            if (hasAddress && hasClass) {
+                                // 引擎写入 analysis_id=0 占位，这里改写为真实 analysisId
+                                val sql = """
+                                    INSERT INTO objs(
+                                        analysis_id, obj_address, class_name, field_hint
+                                    )
+                                    SELECT
+                                        ?,
+                                        o.obj_address,
+                                        o.class_name,
+                                        o.field_hint
+                                    FROM blutter.objs o
+                                """.trimIndent()
+                                roomDb.execSQL(sql, arrayOf(analysisId))
+                                objects = getLastChangeCount(roomDb)
+                                Log.i(TAG, "导入 objs: $objects 条 (SQL 直搬)")
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "导入 objs 失败", e)
+                        }
+                    }
+
+                    if ("enum_map" in blutterTables) {
+                        try {
+                            val cols = columnNamesAttached(roomDb, "blutter", "enum_map")
+                            val hasClass = "class_name" in cols
+                            val hasIndex = "enum_index" in cols
+                            val hasName = "enum_name" in cols
+                            if (hasClass && hasIndex && hasName) {
+                                val sql = """
+                                    INSERT INTO enum_map(
+                                        analysis_id, class_name, enum_index, enum_name
+                                    )
+                                    SELECT
+                                        ?,
+                                        e.class_name,
+                                        e.enum_index,
+                                        e.enum_name
+                                    FROM blutter.enum_map e
+                                """.trimIndent()
+                                roomDb.execSQL(sql, arrayOf(analysisId))
+                                enums = getLastChangeCount(roomDb)
+                                Log.i(TAG, "导入 enum_map: $enums 条 (SQL 直搬)")
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "导入 enum_map 失败", e)
+                        }
+                    }
+
                     roomDb.setTransactionSuccessful()
-                    Log.i(TAG, "ATTACH 导入完成: classes=$classes, methods=$methodsCount, pp=$pp")
+                    Log.i(TAG, "ATTACH 导入完成: classes=$classes, methods=$methodsCount, pp=$pp, objs=$objects, enums=$enums")
                 } catch (e: Exception) {
                     Log.e(TAG, "ATTACH 导入失败，回滚", e)
                     // 事务回滚
@@ -299,8 +358,14 @@ class AnalysisImporter @Inject constructor(
             return@withContext ImportResult()
         }
 
-        val result = ImportResult(classesCount = classes, methodsCount = methodsCount, ppEntriesCount = pp)
-        appLogger.info(TAG, "导入完成: ${result.classesCount} 类, ${result.methodsCount} 方法, ${result.ppEntriesCount} PP")
+        val result = ImportResult(
+            classesCount = classes,
+            methodsCount = methodsCount,
+            ppEntriesCount = pp,
+            objectsCount = objects,
+            enumsCount = enums
+        )
+        appLogger.info(TAG, "导入完成: ${result.classesCount} 类, ${result.methodsCount} 方法, ${result.ppEntriesCount} PP, ${result.objectsCount} 对象, ${result.enumsCount} 枚举")
         // 回写统计计数（走 Room 连接），产物页据此展示真实数据。
         // 该 UPDATE 同时触发 Room 的 invalidation tracker，让观察 analyses 表的 Flow 刷新。
         try {
@@ -308,7 +373,7 @@ class AnalysisImporter @Inject constructor(
         } catch (e: Exception) {
             Log.e(TAG, "回写统计计数失败", e)
         }
-        Log.i(TAG, "导入完成: classes=$classes, methods=$methodsCount, pp=$pp")
+        Log.i(TAG, "导入完成: classes=$classes, methods=$methodsCount, pp=$pp, objs=$objects, enums=$enums")
         result
     }
 

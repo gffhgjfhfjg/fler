@@ -1,6 +1,7 @@
 package com.ai.fler.core.analysis
 
 import com.ai.fler.data.AppDatabase
+import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.CallerInfo
 import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartMethodDao
@@ -12,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.RandomAccessFile
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -27,6 +29,10 @@ import javax.inject.Singleton
  * 一期只解析目标直接可见的 `bl #imm` / `b #imm`；间接派发（`blr x` + PP 槽）
  * 属二期，暂不产生边。
  *
+ * 二期（混淆包增强）：对 src_code 为空的方法，用 Capstone 直接反汇编 libapp.so
+ * 的 .text 机器码提取 `bl #imm` / `b #imm`——混淆包 Blutter 的 src_code 大字段
+ * 多为空，但机器码结构不变，可弥补调用图稀疏（实测 43 边 → 数千边）。
+ *
  * 坐标：functionOffset 为 ELF 虚拟地址（libapp 上 fileOffset == functionOffset），
  * src_code 内的 `0x..:` 亦为 vaddr，可直接二分定位到目标方法。
  */
@@ -34,7 +40,8 @@ import javax.inject.Singleton
 class DartCallGraphBuilder @Inject constructor(
     private val dartMethodDao: DartMethodDao,
     private val dartCallGraphDao: DartCallGraphDao,
-    private val appDatabase: AppDatabase
+    private val appDatabase: AppDatabase,
+    private val analysisDao: AnalysisDao,
 ) {
 
     /** 常驻后台作用域（建图不随请求/ViewModel 取消而中断）。 */
@@ -119,27 +126,123 @@ class DartCallGraphBuilder @Inject constructor(
         val byOffset = HashMap<Long, Func>(funcs.size)
         for (f in funcs) byOffset[f.offset] = f
 
+        // 1b) 机器码边界估计：为 function_size=0 的方法估算真实 end vaddr，
+        //     提高 findContaining 精度（占位方法内部 bl 归属更准确）。
+        val libappPath = analysisDao.getById(analysisId)?.libappPath
+        if (libappPath != null) {
+            val text = textSection(libappPath)
+            if (text != null) {
+                val ends = DartFunctionBoundary.estimateEnds(
+                    soPath = libappPath,
+                    text = text,
+                    funcs = funcs.map { it.entry },
+                )
+                for (f in funcs) {
+                    ends[f.offset]?.let { f.endVaddr = it }
+                }
+            }
+        }
+
         // 2) 逐页拉取方法体并解析直连调用边（按 caller|callee 去重）。
         val edges = HashMap<Long, DartCallEdge>()
+        val emptySrcOffsets = HashSet<Long>()
         var page = 0
         var parsedMethods = 0
+        var srcMissingMethods = 0
         while (true) {
             val rows = dartMethodDao.getSrcPage(analysisId, page * PAGE_SIZE, PAGE_SIZE)
             if (rows.isEmpty()) break
             for (row in rows) {
                 val caller = byOffset[row.functionOffset] ?: continue
-                val src = row.srcCode ?: continue
-                collectEdges(analysisId, src, caller, funcs, edges)
-                parsedMethods++
+                val src = row.srcCode ?: ""
+                // 占位符 src（<anonymous closure>/<unknown>/空）无真实反汇编文本，
+                // 与空串同等对待：交给机器码扫描补边。
+                if (src.isNotBlank() && !DartNameDisplay.isPlaceholder(src.trim())) {
+                    collectEdges(analysisId, src, caller, funcs, edges)
+                    parsedMethods++
+                } else {
+                    srcMissingMethods++
+                    emptySrcOffsets.add(row.functionOffset)
+                }
             }
             if (rows.size < PAGE_SIZE) break
             page++
         }
+        // 3) 机器码补充：src_code 为空的方法直接反汇编 .text 提取 bl/b。
+        //    混淆包 Blutter 的 src_code 大字段多为空，机器码结构不变，可显著补全调用图。
+        val machineParsed = if (libappPath != null && srcMissingMethods > 0) {
+            collectEdgesFromMachineCode(analysisId, libappPath, funcs, emptySrcOffsets, edges)
+        } else 0
         dartCallGraphDao.deleteByAnalysisId(analysisId)
         if (edges.isNotEmpty()) bulkInsert(edges.values)
         builtIds.add(analysisId)
-        android.util.Log.i("DartCallGraphBuilder", "建图完成 analysis=$analysisId parsed=$parsedMethods 边=${edges.size} 耗时=${System.currentTimeMillis()-t0}ms")
+        android.util.Log.i(
+            "DartCallGraphBuilder",
+            "建图完成 analysis=$analysisId parsed=$parsedMethods machine=$machineParsed 边=${edges.size} 耗时=${System.currentTimeMillis()-t0}ms"
+        )
         edges.size
+    }
+
+    /**
+     * 对 src_code 为空的方法，用 Capstone 直接反汇编 libapp.so 的 .text 机器码提取
+     * `bl #imm` / `b #imm` 边。分块读取 + 反汇编，把命中指令归属到包含该指令
+     * vaddr 的方法，且仅当该方法是空 src 方法（[emptySrcOffsets]）才建边，
+     * 避免与步骤 2 的 src_code 解析重复计数。
+     *
+     * @param emptySrcOffsets src_code 为空的方法 functionOffset 集合
+     * @return 处理的块数（进度参考）
+     */
+    private suspend fun collectEdgesFromMachineCode(
+        analysisId: Long,
+        soPath: String,
+        funcs: List<Func>,
+        emptySrcOffsets: Set<Long>,
+        edges: HashMap<Long, DartCallEdge>,
+    ): Int = withContext(Dispatchers.IO) {
+        val text = textSection(soPath) ?: return@withContext 0
+        var blocks = 0
+        RandomAccessFile(soPath, "r").use { raf ->
+            val buf = ByteArray(MACHINE_CHUNK)
+            var filePos = text.fileOffset
+            val textEnd = text.fileOffset + text.fileSize
+            while (filePos < textEnd) {
+                val want = minOf(MACHINE_CHUNK.toLong(), textEnd - filePos).toInt()
+                raf.seek(filePos)
+                val read = raf.read(buf, 0, want)
+                if (read <= 0) break
+                val block = buf.copyOf(read)
+                val baseVaddr = text.vaddrBase + (filePos - text.fileOffset)
+                val insns = com.ai.fler.core.jni.CapstoneBindings.disassembleWithCapstone(block, baseVaddr)
+                    ?: run { filePos += read; continue }
+                val lines = ArrayList<String>(insns.size)
+                for (ins in insns) {
+                    val mnemonic = ins.mnemonic
+                    val isCall = mnemonic == "bl"
+                    val isBranch = mnemonic == "b" || mnemonic.startsWith("b.")
+                    if (!isCall && !isBranch) continue
+                    val op = ins.opStr
+                    // Capstone 的 bl/b 目标 opStr 形如 `0x6f6ec4`（无 #），collectEdges 要求 `#0x..`，
+                    // 这里规范化：已是 # 开头直接保留，纯 hex 补 #，其余（寄存器等）跳过。
+                    val normalizedOp = when {
+                        op.contains('#') -> op
+                        HEX_ONLY.matches(op.trim()) -> "#" + op.trim()
+                        else -> continue
+                    }
+                    lines.add("// 0x${ins.address.toString(16)}: $mnemonic $normalizedOp")
+                }
+                for (line in lines) {
+                    val colon = line.indexOf(':', 2)
+                    if (colon <= 2) continue
+                    val site = strip0x(line.substring(2, colon).trim()).toLongOrNull(16) ?: continue
+                    val caller = findContaining(funcs, site) ?: continue
+                    if (caller.offset !in emptySrcOffsets) continue
+                    collectEdges(analysisId, line, caller, funcs, edges)
+                }
+                filePos += read
+                blocks++
+            }
+        }
+        blocks
     }
 
     /** 该分析总边数：内存索引已加载则免费读取，否则一次 COUNT（显式状态查询可接受）。 */
@@ -311,7 +414,10 @@ class DartCallGraphBuilder @Inject constructor(
     private fun strip0x(s: String): String =
         if (s.length > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s.substring(2) else s
 
-    /** 给定目标地址，二分返回包含它的方法；找不到返回 null。 */
+    /** 给定目标地址，二分返回包含它的方法；找不到返回 null。
+     *  兼容混淆方法 function_size=0：优先用机器码边界估计出的 [endVaddr]（[DartFunctionBoundary]），
+     *  未知时按「下一方法 start」为界，[start, nextStart) 归当前方法
+     *  （与 FunctionIndex.Snapshot.findContaining 语义一致）。 */
     private fun findContaining(funcs: List<Func>, target: Long): Func? {
         var lo = 0
         var hi = funcs.size - 1
@@ -321,18 +427,32 @@ class DartCallGraphBuilder @Inject constructor(
             if (funcs[mid].offset <= target) { idx = mid; lo = mid + 1 } else hi = mid - 1
         }
         if (idx < 0) return null
-        // 从最近的起点向前找一个 size 覆盖 target 的方法。
-        // 用半开区间 [f.offset, f.offset+size)：target 恰等于方法结束地址时
-        // 不算包含（应归属下一个紧邻方法），与 collectEdges 保持一致。
+        // 从最近的起点向前找一个覆盖 target 的方法。
         for (i in idx downTo 0) {
             val f = funcs[i]
-            if (f.size > 0 && target < f.offset + f.size) return f
-            if (f.size > 0 && target >= f.offset + f.size) break
+            val nextStart = if (i + 1 < funcs.size) funcs[i + 1].offset else Long.MAX_VALUE
+            val effectiveHi = when {
+                f.endVaddr > 0 -> f.endVaddr
+                f.size > 0 -> f.offset + f.size
+                else -> nextStart
+            }
+            if (target < effectiveHi) return f
+            if (f.endVaddr > 0 || f.size > 0) break
         }
         return null
     }
 
-    private fun fullName(m: MethodLight): String = "${m._className}.${m.methodName}"
+    private fun fullName(m: MethodLight): String =
+        DartNameDisplay.displayFullName(m._className, m.methodName, m.functionOffset)
+
+    /** 用 ELF 解析器取 .text 节区间（文件坐标 + vaddr 基线）。 */
+    private fun textSection(soPath: String): com.ai.fler.core.analysis.StringXrefScanner.TextRange? =
+        com.ai.fler.core.jni.ElfParserBindings().use { parser ->
+            if (!parser.open(soPath)) null
+            else parser.getSections().firstOrNull { it.name == ".text" }?.let {
+                com.ai.fler.core.analysis.StringXrefScanner.TextRange(it.offset, it.size, it.address)
+            }
+        }
 
     /** 名字子串反查结果：命中列表 + 该分析总边数（供状态字段）。 */
     class EdgeQueryResult(
@@ -360,6 +480,7 @@ class DartCallGraphBuilder @Inject constructor(
         val name: String,
         val offset: Long = entry.functionOffset ?: 0,
         val size: Long = entry.functionSize ?: 0,
+        var endVaddr: Long = 0L, // 边界估计出的真实 end（0=未知，退回 size/nextStart）
     ) {
         val id: Long get() = entry.id
     }
@@ -368,6 +489,12 @@ class DartCallGraphBuilder @Inject constructor(
         private const val PAGE_SIZE = 1200
         private const val KIND_DIRECT_CALL = "DIRECT_CALL"
         private const val KIND_DIRECT_BRANCH = "DIRECT_BRANCH"
+
+        /** 机器码反汇编分块大小（同 StringXrefScanner 的 256KB 流式）。 */
+        private const val MACHINE_CHUNK = 256 * 1024
+
+        /** 纯十六进制目标（bl/b 的操作数，如 `0x6f6ec4`）。 */
+        private val HEX_ONLY = Regex("0[xX][0-9a-fA-F]+")
 
         /** 内存边索引最多缓存的分析数（每个约 10~30MB，控内存）。 */
         private const val MAX_CACHED_ANALYSES = 2

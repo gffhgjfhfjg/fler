@@ -14,7 +14,7 @@
 #include <csetjmp>
 
 // blutter_analyze 由 dartvm_*.so 导出（visibility("default")）
-typedef int (*blutter_analyze_fn)(const char* so_path, const char* db_path);
+typedef int (*blutter_analyze_fn)(const char* so_path, const char* db_path, const char* out_dir);
 
 static const char* TAG = "FlerBlutterJNI";
 
@@ -74,16 +74,17 @@ static int prepare_workdir(const char* cache_dir) {
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ai_fler_core_jni_BlutterEngine_nativeBlutterAnalyze(
     JNIEnv* env, [[maybe_unused]] jobject thiz,
-    jstring engineSoPath, jstring soPath, jstring dbPath, jstring cacheDir) {
+    jstring engineSoPath, jstring soPath, jstring dbPath, jstring cacheDir, jstring outDir) {
 
     const char* engine_path = env->GetStringUTFChars(engineSoPath, nullptr);
     const char* so = env->GetStringUTFChars(soPath, nullptr);
     const char* db = env->GetStringUTFChars(dbPath, nullptr);
     const char* cache_dir = env->GetStringUTFChars(cacheDir, nullptr);
+    const char* out_dir = env->GetStringUTFChars(outDir, nullptr);
 
     __android_log_print(ANDROID_LOG_INFO, TAG,
-        "nativeBlutterAnalyze: engine=%s, so=%s, db=%s, cacheDir=%s",
-        engine_path, so, db, cache_dir);
+        "nativeBlutterAnalyze: engine=%s, so=%s, db=%s, cacheDir=%s, outDir=%s",
+        engine_path, so, db, cache_dir, out_dir);
 
     // 先用 RTLD_NOLOAD 检查 dartvm_*.so 是否已被 System.load 加载（快速路径）。
     // 若未加载，fallback 用 RTLD_NOW | RTLD_GLOBAL 实际加载。
@@ -116,6 +117,7 @@ Java_com_ai_fler_core_jni_BlutterEngine_nativeBlutterAnalyze(
             env->ReleaseStringUTFChars(soPath, so);
             env->ReleaseStringUTFChars(dbPath, db);
             env->ReleaseStringUTFChars(cacheDir, cache_dir);
+    env->ReleaseStringUTFChars(outDir, out_dir);
             return -999;
         }
         __android_log_print(ANDROID_LOG_INFO, TAG,
@@ -133,6 +135,7 @@ Java_com_ai_fler_core_jni_BlutterEngine_nativeBlutterAnalyze(
         env->ReleaseStringUTFChars(soPath, so);
         env->ReleaseStringUTFChars(dbPath, db);
         env->ReleaseStringUTFChars(cacheDir, cache_dir);
+    env->ReleaseStringUTFChars(outDir, out_dir);
         return -998;
     }
 
@@ -326,8 +329,8 @@ Java_com_ai_fler_core_jni_BlutterEngine_nativeBlutterAnalyze(
 
     int ret;
     if (sigsetjmp(jmp_buf, 1) == 0) {
-        // 正常路径：调用 blutter_analyze
-        ret = fn(so, db);
+        // 正常路径：调用 blutter_analyze（out_dir 为产物落地目录）
+        ret = fn(so, db, out_dir);
         __android_log_print(ANDROID_LOG_INFO, TAG, "blutter_analyze returned: %d", ret);
     } else {
         // 崩溃路径：信号处理器 siglongjmp 跳回这里
@@ -396,5 +399,6 @@ Java_com_ai_fler_core_jni_BlutterEngine_nativeBlutterAnalyze(
     env->ReleaseStringUTFChars(soPath, so);
     env->ReleaseStringUTFChars(dbPath, db);
     env->ReleaseStringUTFChars(cacheDir, cache_dir);
+    env->ReleaseStringUTFChars(outDir, out_dir);
     return ret;
 }

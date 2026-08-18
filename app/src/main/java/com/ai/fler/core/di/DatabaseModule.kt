@@ -10,6 +10,8 @@ import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.DartCallGraphDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.DartMethodDao
+import com.ai.fler.data.dao.DartObjectDao
+import com.ai.fler.data.dao.EnumMapDao
 import com.ai.fler.data.dao.HookScriptDao
 import com.ai.fler.data.dao.LibraryDao
 import com.ai.fler.data.dao.McpToolStatDao
@@ -43,7 +45,7 @@ object DatabaseModule {
         )
             .addMigrations(
                 MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-                MIGRATION_7_8, MIGRATION_8_9
+                MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10
             )
             .fallbackToDestructiveMigration()
             .build()
@@ -149,6 +151,52 @@ object DatabaseModule {
         }
     }
 
+    /** 9 → 10：新增 objs（对象池对象索引）与 enum_map（枚举索引映射）表。 */
+    private val MIGRATION_9_10 = object : Migration(9, 10) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `objs` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`analysis_id` INTEGER NOT NULL, " +
+                    "`obj_address` INTEGER NOT NULL, " +
+                    "`class_name` TEXT, " +
+                    "`field_hint` TEXT, " +
+                    "FOREIGN KEY(`analysis_id`) REFERENCES `analyses`(`id`) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE" +
+                    ")"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_objs_analysis_id` ON `objs` (`analysis_id`)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_objs_analysis_id_class_name` ON `objs` (`analysis_id`, `class_name`)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_objs_analysis_id_obj_address` ON `objs` (`analysis_id`, `obj_address`)"
+            )
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `enum_map` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`analysis_id` INTEGER NOT NULL, " +
+                    "`class_name` TEXT NOT NULL, " +
+                    "`enum_index` INTEGER NOT NULL, " +
+                    "`enum_name` TEXT NOT NULL, " +
+                    "FOREIGN KEY(`analysis_id`) REFERENCES `analyses`(`id`) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE" +
+                    ")"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_enum_map_analysis_id` ON `enum_map` (`analysis_id`)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_enum_map_analysis_id_class_name` ON `enum_map` (`analysis_id`, `class_name`)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_enum_map_analysis_id_enum_index` ON `enum_map` (`analysis_id`, `enum_index`)"
+            )
+        }
+    }
+
     @Provides
     fun provideProjectDao(db: AppDatabase): ProjectDao = db.projectDao()
 
@@ -178,4 +226,10 @@ object DatabaseModule {
 
     @Provides
     fun provideHookScriptDao(db: AppDatabase): HookScriptDao = db.hookScriptDao()
+
+    @Provides
+    fun provideDartObjectDao(db: AppDatabase): DartObjectDao = db.dartObjectDao()
+
+    @Provides
+    fun provideEnumMapDao(db: AppDatabase): EnumMapDao = db.enumMapDao()
 }

@@ -10,6 +10,7 @@ import com.ai.fler.core.service.DartVersionDetector
 import com.ai.fler.core.service.EngineLoader
 import com.ai.fler.core.service.EngineNotReadyException
 import com.ai.fler.core.service.EnginePackManager
+import com.ai.fler.core.service.WorkDirectory
 import com.ai.fler.data.AppDatabase
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.DartClassDao
@@ -33,6 +34,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -63,7 +68,8 @@ class AnalysisRunner @Inject constructor(
     private val enginePackManager: EnginePackManager,
     private val engineLoader: EngineLoader,
     private val analysisImporter: AnalysisImporter,
-    private val addressTranslator: AddressTranslator
+    private val addressTranslator: AddressTranslator,
+    private val workDirectory: WorkDirectory
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -332,7 +338,7 @@ class AnalysisRunner @Inject constructor(
         // ====================================================================
         try {
             updateProgress(projectId, AnalysisStage.SavingResults, 0.8f, "Saving results...")
-            saveAnalysisResults(analysisId, analyzeOutcome)
+            saveAnalysisResults(analysisId, projectId, analyzeOutcome)
             completeAnalysis(analysisId, extractResult, analyzeOutcome.result)
 
             // 构建地址映射（产物 ↔ SO 联动）
@@ -406,9 +412,12 @@ class AnalysisRunner @Inject constructor(
             // 生成数据库文件路径
             val dbPath = File(context.cacheDir, "analysis_${analysisId}.db").absolutePath
             val cacheDir = context.cacheDir.absolutePath
+            // 引擎产物落地目录（按分析 ID 区分，隔离多项目）
+            val outDir = File(cacheDir, "blutter_tmp/analysis_${analysisId}").absolutePath
+            File(outDir).mkdirs()
 
             // 调用 analyze 方法（在 IO 线程执行，避免阻塞主线程）
-            val result = withContext(Dispatchers.IO) { engine.analyze(libappPath, dbPath, cacheDir) }
+            val result = withContext(Dispatchers.IO) { engine.analyze(libappPath, dbPath, cacheDir, outDir) }
 
             // 转换结果
             val success = result.isSuccess
@@ -422,7 +431,8 @@ class AnalysisRunner @Inject constructor(
                     errorMessage = if (success) null
                     else "Blutter 引擎错误码 code=${result.rawCode}（查看 logcat TAG=FlerBlutterJNI 输入诊断信息）"
                 ),
-                dbPath = dbPath
+                dbPath = dbPath,
+                outDir = outDir
             )
         } catch (e: CancellationException) {
             throw e
@@ -432,7 +442,8 @@ class AnalysisRunner @Inject constructor(
                     success = false,
                     errorMessage = e.message ?: "Analysis exception"
                 ),
-                dbPath = ""
+                dbPath = "",
+                outDir = ""
             )
         }
     }
@@ -442,13 +453,91 @@ class AnalysisRunner @Inject constructor(
      *
      * 通过 [AnalysisImporter] 把 Blutter 生成的 SQLite 中的
      * classes/methods/pp_entries/strings 读入 Room；统计计数由 [AnalysisImporter] 内部回写。
+     *
+     * 分析成功后还会把引擎产物（outDir 目录）打包 zip 拷贝到用户设置的工作目录，
+     * 产物仍在 App 缓存保留（blutter_tmp/analysis_<id>/），供 MCP 读取。
      */
     private suspend fun saveAnalysisResults(
         analysisId: Long,
+        projectId: Long,
         outcome: RunOutcome
     ) {
         if (outcome.result.success && outcome.dbPath.isNotBlank()) {
             analysisImporter.import(analysisId, outcome.dbPath)
+        }
+        if (outcome.result.success && outcome.outDir.isNotBlank()) {
+            archiveAndExportProducts(projectId, analysisId, outcome.outDir)
+        }
+    }
+
+    /**
+     * 把引擎产物目录打包 zip 并拷贝到工作目录。
+     *
+     * 产物目录结构：
+     *   outDir/pp.txt、objs.txt、asm 目录、ida_script 目录、blutter_frida.js
+     *
+     * zip 命名：blutter_products_&lt;analysisId&gt;.zip，放在工作目录根；未设置工作目录则跳过（产物仍在缓存）。
+     */
+    private suspend fun archiveAndExportProducts(
+        projectId: Long,
+        analysisId: Long,
+        outDir: String
+    ) {
+        withContext(Dispatchers.IO) {
+            val dir = File(outDir)
+            if (!dir.isDirectory) return@withContext
+            val topFiles = dir.listFiles()?.filter { it.isFile } ?: emptyList()
+            val subDirs = dir.listFiles()?.filter { it.isDirectory } ?: emptyList()
+            if (topFiles.isEmpty() && subDirs.isEmpty()) return@withContext
+            val zipFile = File(dir, "blutter_products_$analysisId.zip")
+            try {
+                ZipOutputStream(FileOutputStream(zipFile)).use { zip ->
+                    // 顶层文件（pp.txt / objs.txt / blutter_frida.js 等）
+                    topFiles.forEach { f ->
+                        zip.putNextEntry(ZipEntry(f.name))
+                        FileInputStream(f).use { it.copyTo(zip) }
+                        zip.closeEntry()
+                    }
+                    // 子目录递归打包（asm/、ida_script/），保留相对路径
+                    subDirs.forEach { sub ->
+                        addDirToZip(zip, sub, sub.name)
+                    }
+                }
+                // 拷贝到工作目录（SAF 或兜底 App 缓存）；失败不影响分析结果
+                try {
+                    exportZipToWorkDir(zipFile)
+                } catch (e: Exception) {
+                    Log.w(TAG, "产物 zip 拷贝工作目录失败（不影响分析）: ${e.message}", e)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "产物打包失败（不影响分析）: ${e.message}", e)
+            }
+        }
+    }
+
+    /** 递归把 [dir] 下全部文件写入 zip，入口目录名作前缀（保留目录层级）。 */
+    private fun addDirToZip(zip: ZipOutputStream, dir: File, entryPrefix: String) {
+        val files = dir.listFiles() ?: return
+        for (f in files) {
+            val entryName = "$entryPrefix/${f.name}"
+            if (f.isDirectory) {
+                addDirToZip(zip, f, entryName)
+            } else {
+                zip.putNextEntry(ZipEntry(entryName))
+                FileInputStream(f).use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
+        }
+    }
+
+    /** 拷贝产物 zip 到工作目录；未设置/不可写则跳过（产物仍在 App 缓存）。 */
+    private suspend fun exportZipToWorkDir(zipFile: File) {
+        val doc = workDirectory.asDocumentFile()
+        if (doc == null || !doc.canWrite()) return
+        val child = doc.createFile("application/zip", zipFile.name) ?: return
+        context.contentResolver.openOutputStream(child.uri)?.use { os ->
+            zipFile.inputStream().use { it.copyTo(os) }
+            os.flush()
         }
     }
 

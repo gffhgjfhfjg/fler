@@ -1,5 +1,6 @@
 package com.ai.fler.core.mcp
 
+import com.ai.fler.core.analysis.DartNameDisplay
 import com.ai.fler.core.frida.FridaEngine
 import com.ai.fler.core.frida.FridaScriptBuilder
 import com.ai.fler.core.frida.HookScriptRepository
@@ -143,11 +144,14 @@ class FridaMcpToolRegistry @Inject constructor(
             } else {
                 val analysisId = p.longOrThrow("analysisId")
                 val methodName = p.strOrThrow("methodName")
-                val method = dartMethodDao.getMethodWithClassByName(analysisId, methodName)
-                    ?: throw McpToolException("analysisId=$analysisId 下未找到方法 $methodName")
+                val method = run {
+                    val subVaddr = DartNameDisplay.parseSubName(methodName)
+                    if (subVaddr != null) dartMethodDao.getMethodWithClassByOffset(analysisId, subVaddr)
+                    else dartMethodDao.getMethodWithClassByName(analysisId, methodName)
+                } ?: throw McpToolException("analysisId=$analysisId 下未找到方法 $methodName")
                 vaddr = method.method.functionOffset
                     ?: throw McpToolException("方法 $methodName 无 functionOffset（可能是内联/未定位）")
-                label = "${method._className}.$methodName"
+                label = DartNameDisplay.displayFullName(method._className, method.method.methodName, method.method.functionOffset)
             }
 
             val js = FridaScriptBuilder.hookNative(module, vaddr, label, decodeDart)
@@ -209,7 +213,9 @@ class FridaMcpToolRegistry @Inject constructor(
             } ?: run {
                 val methodName = p.strOrThrow("methodName")
                 val analysisId = p.longOrThrow("analysisId")
-                dartMethodDao.getMethodWithClassByName(analysisId, methodName)
+                val subVaddr = DartNameDisplay.parseSubName(methodName)
+                (if (subVaddr != null) dartMethodDao.getMethodWithClassByOffset(analysisId, subVaddr)
+                else dartMethodDao.getMethodWithClassByName(analysisId, methodName))
                     ?.method?.functionOffset
                     ?: throw McpToolException("analysisId=$analysisId 下未找到方法 $methodName")
             }

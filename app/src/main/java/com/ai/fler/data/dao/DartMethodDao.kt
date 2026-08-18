@@ -58,6 +58,14 @@ interface DartMethodDao {
     )
     suspend fun getMethodWithClassByName(analysisId: Long, name: String): MethodWithClass?
 
+    /** 按 function_offset（vaddr）精确查找（某次分析内），供 sub_<vaddr> 显示名反查。 */
+    @Query(
+        "SELECT dm.*, dc.class_name AS _class_name FROM dart_methods dm " +
+            "INNER JOIN dart_classes dc ON dm.class_id = dc.id " +
+            "WHERE dm.analysis_id = :analysisId AND dm.function_offset = :offset LIMIT 1"
+    )
+    suspend fun getMethodWithClassByOffset(analysisId: Long, offset: Long): MethodWithClass?
+
     /** 按类取方法（带类名）。 */
     @Query(
         "SELECT dm.*, dc.class_name AS _class_name FROM dart_methods dm " +

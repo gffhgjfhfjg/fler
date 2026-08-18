@@ -2,6 +2,7 @@ package com.ai.fler.core.mcp
 
 import com.ai.fler.core.analysis.AnalysisCapability
 import com.ai.fler.core.analysis.AnalysisSession
+import com.ai.fler.core.analysis.DartNameDisplay
 import com.ai.fler.core.analysis.EngineRegistry
 import com.ai.fler.core.analysis.FunctionInfo
 import com.ai.fler.data.dao.DartMethodDao
@@ -131,7 +132,7 @@ class EngineMcpToolRegistry @Inject constructor(
         val funcs = methods.mapNotNull { m ->
             val vaddr = m.functionOffset ?: return@mapNotNull null
             if (vaddr <= 0L) return@mapNotNull null
-            val name = if (m._className.isNotBlank()) "${m._className}.${m.methodName}" else m.methodName
+            val name = DartNameDisplay.displayFullName(m._className, m.methodName, m.functionOffset)
             val paddr = axisResolver.resolve(soPath, vaddr)?.fileOffset ?: vaddr
             DartFunction(vaddr, paddr, name, m.functionSize ?: 0L)
         }.sortedBy { it.vaddr }

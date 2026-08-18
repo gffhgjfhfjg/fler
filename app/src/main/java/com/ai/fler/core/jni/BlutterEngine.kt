@@ -10,8 +10,8 @@ import android.util.Log
  *
  * 使用方式：
  * ```
- * val engine = BlutterEngine("3.12.2")
- * val result = engine.analyze(soPath, dbPath)
+ * val engine = BlutterEngine("3.10.7", engineSoPath)
+ * val result = engine.analyze(soPath, dbPath, cacheDir, outDir)
  * ```
  *
  * @see dev-plan §P1.5 BlutterEngine
@@ -66,19 +66,22 @@ class BlutterEngine(
          * 实际实现在 blutter_jni.cpp 中：
          * - 通过 dlopen(engineSoPath, RTLD_NOLOAD) 拿到已加载的 dartvm_*.so 的 handle
          * - 通过 dlsym(handle, "blutter_analyze") 查找符号
-         * - 调用 blutter_analyze(soPath, dbPath) 执行分析
+         * - 调用 blutter_analyze(soPath, dbPath, outDir) 执行分析
          * - 返回错误码
          *
          * cacheDir 用于 JNI 端 chdir + setenv("TMPDIR")，让 blutter 内部创建
          * 临时文件时走 app 私有目录（Android app 对 /tmp 无写权限，会立即返回
          * TempDirError=-1）。
+         *
+         * outDir 为引擎产物落地目录（pp.txt/objs.txt/asm/ida_script/blutter_frida.js）。
          */
         @JvmStatic
         private external fun nativeBlutterAnalyze(
             engineSoPath: String,
             soPath: String,
             dbPath: String,
-            cacheDir: String
+            cacheDir: String,
+            outDir: String
         ): Int
     }
 
@@ -88,14 +91,15 @@ class BlutterEngine(
      * @param soPath libapp.so 的绝对路径
      * @param dbPath 输出 SQLite 数据库的绝对路径
      * @param cacheDir app cacheDir 的绝对路径，用于 blutter 内部临时文件
+     * @param outDir 引擎产物落地目录（pp.txt/objs.txt/asm/ida_script/blutter_frida.js）
      * @return 分析结果
      * @throws IllegalStateException 如果 JNI 调用抛出异常（如引擎未加载、dlsym 失败）
      */
-    fun analyze(soPath: String, dbPath: String, cacheDir: String): AnalyzeResult {
-        Log.i(TAG, "analyze 开始: dartVersion=$dartVersion, engine=$engineSoPath, soPath=$soPath, dbPath=$dbPath, cacheDir=$cacheDir")
+    fun analyze(soPath: String, dbPath: String, cacheDir: String, outDir: String): AnalyzeResult {
+        Log.i(TAG, "analyze 开始: dartVersion=$dartVersion, engine=$engineSoPath, soPath=$soPath, dbPath=$dbPath, cacheDir=$cacheDir, outDir=$outDir")
         val startTime = System.currentTimeMillis()
         try {
-            val ret = nativeBlutterAnalyze(engineSoPath, soPath, dbPath, cacheDir)
+            val ret = nativeBlutterAnalyze(engineSoPath, soPath, dbPath, cacheDir, outDir)
             val elapsed = System.currentTimeMillis() - startTime
             val result = AnalyzeResult.fromCode(ret)
             Log.i(TAG, "analyze 完成: rawCode=$ret (${result.displayName()}), 耗时 ${elapsed}ms")

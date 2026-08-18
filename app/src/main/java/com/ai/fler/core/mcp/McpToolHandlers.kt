@@ -4,7 +4,14 @@ import android.annotation.SuppressLint
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
 import com.ai.fler.core.analysis.DartCallGraphBuilder
+import com.ai.fler.core.analysis.DartEntryResolver
+import com.ai.fler.core.analysis.ClosureSlotResolver
+import com.ai.fler.core.analysis.DartFieldSlots
+import com.ai.fler.core.analysis.DartNameDisplay
 import com.ai.fler.core.analysis.FunctionIndex
+import com.ai.fler.core.analysis.IndirectCallScanner
+import com.ai.fler.core.analysis.MethodCfg
+import com.ai.fler.core.analysis.MethodStringLabels
 import com.ai.fler.core.analysis.StringXrefScanner
 import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
@@ -19,6 +26,8 @@ import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.LibraryDao
 import com.ai.fler.data.dao.PpEntryDao
 import com.ai.fler.data.dao.ProjectDao
+import com.ai.fler.data.dao.DartObjectDao
+import com.ai.fler.data.dao.EnumMapDao
 import com.ai.fler.features.mcp.McpPatchService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.currentCoroutineContext
@@ -51,6 +60,8 @@ class McpToolHandlers @Inject constructor(
     private val dartClassDao: DartClassDao,
     private val dartMethodDao: DartMethodDao,
     private val ppEntryDao: PpEntryDao,
+    private val dartObjectDao: DartObjectDao,
+    private val enumMapDao: EnumMapDao,
     private val projectDao: ProjectDao,
     private val addressTranslator: AddressTranslator,
     private val config: McpConfig,
@@ -62,6 +73,8 @@ class McpToolHandlers @Inject constructor(
     private val callGraphBuilder: DartCallGraphBuilder,
     private val functionIndex: FunctionIndex,
     private val stringXrefScanner: StringXrefScanner,
+    private val methodStringLabels: MethodStringLabels,
+    private val indirectCallScanner: IndirectCallScanner,
     private val fridaTools: FridaMcpToolRegistry,
     private val workDirectory: WorkDirectory,
     @SuppressLint("StaticFieldLeak")
@@ -338,6 +351,100 @@ class McpToolHandlers @Inject constructor(
                 }
             }
         },
+        McpTool(
+            name = "search_objects",
+            description = "对象池对象搜索（引擎 objs.txt 轻量索引）：在对象类名与字段摘要中按子串搜索（不区分大小写），如搜「至尊」命中 Obj!qCb@b42021【至尊永久VIP】。返回对象地址/类名/字段摘要。analysisId 可省略（缺省用 use_analysis 设定的当前分析）",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("query") { put("type", "string"); put("description", "搜索子串（匹配类名或字段摘要），不区分大小写") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "返回上限（默认 100）") }
+                }
+                putJsonArray("required") { add("query") }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "search_objects")
+            val query = p.str("query") ?: throw McpToolException("search_objects: 缺少 query")
+            val limit = (p.int("limit") ?: 100).coerceIn(1, 1000)
+            val rows = dartObjectDao.searchObjectsAnywhere(id, query, limit)
+            buildJsonObject {
+                put("count", rows.size)
+                putJsonArray("objects") {
+                    rows.forEach { o ->
+                        addJsonObject {
+                            put("objAddress", o.objAddress)
+                            put("className", o.className ?: "")
+                            put("fieldHint", o.fieldHint ?: "")
+                        }
+                    }
+                }
+            }
+        },
+        McpTool(
+            name = "get_object",
+            description = "按对象地址精确查对象池对象（引擎 objs.txt 轻量索引）：返回对象地址/类名/字段摘要。对象地址来自 search_objects 或 objs.txt。analysisId 可省略（缺省用 use_analysis 设定的当前分析）",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("objAddress") { put("type", "integer"); put("description", "对象地址（十进制或 0x 十六进制）") }
+                }
+                putJsonArray("required") { add("objAddress") }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "get_object")
+            val addr = p.str("objAddress")?.toLongOrNull()
+                ?: throw McpToolException("get_object: 缺少 objAddress")
+            val rows = dartObjectDao.getByAddress(id, addr)
+            buildJsonObject {
+                put("found", rows.isNotEmpty())
+                putJsonArray("objects") {
+                    rows.forEach { o ->
+                        addJsonObject {
+                            put("objAddress", o.objAddress)
+                            put("className", o.className ?: "")
+                            put("fieldHint", o.fieldHint ?: "")
+                        }
+                    }
+                }
+            }
+        },
+        McpTool(
+            name = "enum_lookup",
+            description = "枚举索引映射查询（引擎 enum_map 表）：枚举对象地址不在 pp.txt 中，Blutter objs.txt 里每个枚举值对应一个常量对象（如 Obj!qCb@b42021【至尊永久VIP】level 5，其中 5 是枚举序号，【至尊永久VIP】是枚举值名）。本工具按枚举名/类名反查。analysisId 可省略（缺省用 use_analysis 设定的当前分析）",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("className") { put("type", "string"); put("description", "枚举类名精确匹配（可选）") }
+                    putJsonObject("query") { put("type", "string"); put("description", "枚举值名子串（可选，如「至尊」）") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "返回上限（默认 100）") }
+                }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "enum_lookup")
+            val className = p.str("className")
+            val query = p.str("query")
+            val limit = (p.int("limit") ?: 100).coerceIn(1, 1000)
+            val rows = when {
+                className != null -> enumMapDao.getByClass(id, className)
+                query != null -> enumMapDao.searchByName(id, query, limit)
+                else -> enumMapDao.getByAnalysisIdList(id).take(limit)
+            }
+            buildJsonObject {
+                put("count", rows.size)
+                putJsonArray("enums") {
+                    rows.forEach { e ->
+                        addJsonObject {
+                            put("className", e.className)
+                            put("enumIndex", e.enumIndex)
+                            put("enumName", e.enumName)
+                        }
+                    }
+                }
+            }
+        },
     )
 
     // ========== 浏览工具 ==========
@@ -387,6 +494,33 @@ class McpToolHandlers @Inject constructor(
             val page = (p.int("page") ?: 1).coerceAtLeast(1)
             val pageSize = (p.int("pageSize") ?: 200).coerceIn(1, 1000)
 
+            // sub_<vaddr> 显示名反查：name 命中 sub_ 形态时按 function_offset 精确定位单方法
+            val subVaddr = DartNameDisplay.parseSubName(name)
+            if (subVaddr != null) {
+                val hit = dartMethodDao.getMethodWithClassByOffset(id, subVaddr)
+                val soPath = libAppPath(id)
+                return@McpTool buildJsonObject {
+                    put("total", if (hit != null) 1 else 0)
+                    put("page", page)
+                    put("pageSize", pageSize)
+                    put("truncated", false)
+                    put("resolvedSubName", name)
+                    putJsonArray("methods") {
+                        if (hit != null) {
+                            addJsonObject {
+                                put("id", hit.method.id)
+                                put("classId", hit.method.classId)
+                                put("className", hit._className)
+                                put("methodName", DartNameDisplay.displayMethodName(hit.method.methodName, hit.method.functionOffset))
+                                put("functionOffset", hit.method.functionOffset ?: 0)
+                                fileOffsetOf(soPath, hit.method.functionOffset ?: 0)?.let { put("fileOffset", it) }
+                                put("functionSize", hit.method.functionSize ?: 0)
+                            }
+                        }
+                    }
+                }
+            }
+
             // SQL 下推：DB 侧过滤 + 分页，避免全表载入内存
             val total = dartMethodDao.countMethodsWithClass(id, name, classId)
             val offset = ((page - 1) * pageSize).coerceAtMost(total)
@@ -404,7 +538,7 @@ class McpToolHandlers @Inject constructor(
                             put("id", r.method.id)
                             put("classId", r.method.classId)
                             put("className", r._className)
-                            put("methodName", r.method.methodName)
+                            put("methodName", DartNameDisplay.displayMethodName(r.method.methodName, r.method.functionOffset))
                             put("functionOffset", r.method.functionOffset ?: 0)
                             fileOffsetOf(soPath, r.method.functionOffset ?: 0)?.let { put("fileOffset", it) }
                             put("functionSize", r.method.functionSize ?: 0)
@@ -430,11 +564,15 @@ class McpToolHandlers @Inject constructor(
             val methodId = p.long("methodId")
             val name = p.str("name")
             val full = p.str("includeSrc") == "true"
-            // SQL 命中：methodId 精确 / name 精确，避免全量载入
+            // SQL 命中：methodId 精确 / name 精确（sub_<vaddr> 显示名反查 vaddr）/ LIKE 兜底
             val match = when {
                 methodId != null -> dartMethodDao.getMethodWithClassById(methodId)
-                name != null -> dartMethodDao.getMethodWithClassByName(id, name)
-                    ?: dartMethodDao.searchMethodsWithClass(id, name, null, 1, 0).firstOrNull()
+                name != null -> {
+                    val subVaddr = DartNameDisplay.parseSubName(name)
+                    if (subVaddr != null) dartMethodDao.getMethodWithClassByOffset(id, subVaddr)
+                    else dartMethodDao.getMethodWithClassByName(id, name)
+                        ?: dartMethodDao.searchMethodsWithClass(id, name, null, 1, 0).firstOrNull()
+                }
                 else -> null
             } ?: return@McpTool buildJsonObject { put("found", false) }
 
@@ -447,7 +585,8 @@ class McpToolHandlers @Inject constructor(
                 put("id", m.id)
                 put("classId", m.classId)
                 put("className", match._className)
-                put("methodName", m.methodName)
+                put("methodName", DartNameDisplay.displayMethodName(m.methodName, m.functionOffset))
+                put("rawMethodName", m.methodName)
                 put("functionOffset", m.functionOffset ?: 0)
                 fileOffsetOf(soPath, m.functionOffset ?: 0)?.let { put("fileOffset", it) }
                 put("functionSize", m.functionSize ?: 0)
@@ -457,29 +596,40 @@ class McpToolHandlers @Inject constructor(
         },
         McpTool(
 name = "get_pp_entry",
-            description = "按 pp 偏移（vmOffset）查 Dart 对象池条目：type/description（可读描述）/fileOffset/引用它的方法数。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。pp 对象池是 Dart AOT 的数据区，ppOffset 常出现在 get_pp_references 或方法 src_code 的 [pp+0x..] 中。ppOffset 支持十进制或 0x 十六进制",
+            description = "按 pp 偏移（vmOffset）查 Dart 对象池条目：type/description（可读描述）/fileOffset/引用它的方法数。用途：确认 search_strings / find_bool_getters 拿到的槽是否为目标（如字符串/字段/stub），并作为 scan_pool_refs 的目标槽输入。混淆包的槽描述常为 Field/Stub 形态（如 'static late'），字符串槽 type 为 String。支持两种定位：1) ppOffset 精确查槽；2) query 按 description/type 内容子串反查（不区分大小写）——用于表无记录但代码有引用（如 .rodata 业务串）时先按内容找到槽。analysisId 可省略（缺省 use_analysis）。ppOffset 支持十进制或 0x 十六进制",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
                     putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
-                    putJsonObject("ppOffset") { put("type", "integer"); put("description", "对象池偏移 vmOffset，hex（0x..）或十进制") }
+                    putJsonObject("ppOffset") { put("type", "integer"); put("description", "对象池偏移 vmOffset，hex（0x..）或十进制（与 query 二选一）") }
+                    putJsonObject("query") { put("type", "string"); put("description", "按描述内容子串反查槽（与 ppOffset 二选一，不区分大小写）") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "query 反查上限 1..200（默认 20）") }
                 }
-                putJsonArray("required") { add("ppOffset") }
             }
         ) { p ->
             val id = resolveAnalysisId(p, "get_pp_entry")
-            val off = p.long("ppOffset") ?: throw McpToolException("ppOffset 缺失")
-            val rows = ppEntryDao.getPpByVmOffset(id, off)
+            val off = p.long("ppOffset")
+            val query = p.str("query")
+            val limit = (p.int("limit") ?: 20).coerceIn(1, 200)
+            val rows: List<com.ai.fler.data.entity.PpEntry> = when {
+                off != null -> ppEntryDao.getPpByVmOffset(id, off)
+                query != null -> searchStringSlots(id, query, limit)
+                else -> throw McpToolException("ppOffset 或 query 至少提供其一")
+            }
+            val soPath = libAppPath(id)
             buildJsonObject {
                 put("count", rows.size)
+                put("mode", if (off != null) "by_offset" else "by_content")
+                put("truncated", query != null && rows.size == limit)
                 putJsonArray("entries") {
                     rows.forEach { e ->
                         addJsonObject {
                             put("ppOffset", e.vmOffset)
-                            put("type", e.type)
+                            put("type", e.type ?: "")
                             put("description", e.description ?: "")
                             put("fileOffset", e.fileOffset)
                             put("callerCount", e.callerCount)
+                            fileOffsetOf(soPath, e.vmOffset)?.let { put("soFileOffset", it) }
                         }
                     }
                 }
@@ -487,7 +637,7 @@ name = "get_pp_entry",
         },
         McpTool(
             name = "search_strings",
-            description = "在某次分析的字符串常量中搜索子串（query 必填，不区分大小写）。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。返回 ppOffset/description/fileOffset。用于按关键词定位 Dart 字符串及其文件位置（如渠道、URL、错误提示）。注意：部分大 Flutter 包的对象池未含 String 类型条目，此时返回 0 属正常，可改查 engine_scan_strings",
+            description = "在某次分析的 Dart 字符串常量中搜索子串（query 必填，不区分大小写）。返回 ppOffset/description/fileOffset。用途：1) 反混淆入口——用业务关键词（如 'VIP'/'剩余时长'/'登录'）定位字符串，拿到 vmOffset 后交给 scan_pool_refs（ppOffsets 直传）或 string_xrefs 做真实机器码交叉引用；2) 定位渠道/URL/错误提示。注意：对无 type='String' 条目的混淆包自动回退到「description/type 含引号字符串」的槽做内存过滤（与 scan_pool_refs 的 query 语义一致），不再恒 0。analysisId 可省略（缺省 use_analysis）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -501,15 +651,18 @@ name = "get_pp_entry",
             val id = resolveAnalysisId(p, "search_strings")
             val q = p.str("query") ?: throw McpToolException("query 缺失")
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
-            val rows = ppEntryDao.searchStrings(id, q, limit)
+            val rows = searchStringSlots(id, q, limit)
+            val total = if (ppEntryDao.countStringsByAnalysisId(id) > 0) rows.size else 0
             buildJsonObject {
                 put("count", rows.size)
+                put("fallback", total == 0 && rows.isNotEmpty())
                 put("truncated", rows.size == limit)
                 putJsonArray("strings") {
                     rows.forEach { e ->
                         addJsonObject {
                             put("ppOffset", e.vmOffset)
                             put("description", e.description ?: "")
+                            put("type", e.type ?: "")
                             put("fileOffset", e.fileOffset)
                         }
                     }
@@ -547,7 +700,7 @@ name = "get_pp_entry",
                     methods.forEach { m ->
                         addJsonObject {
                             put("id", m.method.id)
-                            put("methodName", m.method.methodName)
+                            put("methodName", DartNameDisplay.displayMethodName(m.method.methodName, m.method.functionOffset))
                             put("functionOffset", m.method.functionOffset ?: 0)
                             fileOffsetOf(soPath, m.method.functionOffset ?: 0)?.let { put("fileOffset", it) }
                             put("functionSize", m.method.functionSize ?: 0)
@@ -558,7 +711,7 @@ name = "get_pp_entry",
         },
         McpTool(
             name = "list_strings",
-            description = "分页列出某次分析的全部字符串常量（SQL 下推）：ppOffset/description/fileOffset。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。数据量大（数万条）请用 search_strings 按关键词定位，或用本工具分页浏览。分页默认 page=1 / pageSize=200（上限 1000）。注意：部分大 Flutter 包无 String 类型条目时 total=0 属正常",
+            description = "分页列出某次分析的全部字符串常量（SQL 下推）：ppOffset/description/fileOffset。反混淆工作流：分页浏览发现业务关键词槽后，用 get_pp_entry 确认、用 string_xrefs（按串子串查引用）或 scan_pool_refs（按槽偏移查引用）定位使用方。数据量大（数万条）请优先 search_strings 按关键词定位。分页默认 page=1 / pageSize=200（上限 1000）。注意：部分大 Flutter 包无 String 类型条目时 total=0 属正常",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -580,7 +733,9 @@ name = "get_pp_entry",
                 rows = ppEntryDao.getStringsByAnalysisIdPaged(id, pageSize, offset)
                 total = typedTotal
             } else {
-                val quoted = ppEntryDao.getByAnalysisIdList(id).filter { it.description?.contains('"') == true }
+                val quoted = ppEntryDao.getByAnalysisIdList(id).filter {
+                    it.description?.contains('"') == true || it.type?.contains('"') == true
+                }
                 total = quoted.size
                 val offset = ((page - 1) * pageSize).coerceAtMost(total)
                 rows = quoted.subList(offset, minOf(offset + pageSize, total))
@@ -678,8 +833,12 @@ name = "get_pp_entry",
             val limit = (p.int("limit") ?: 100).coerceIn(1, 500)
             val callerId = when {
                 methodId != null -> methodId
-                methodName != null -> dartMethodDao.getMethodWithClassByName(id, methodName)?.method?.id
-                    ?: throw McpToolException("未找到方法: $methodName")
+                methodName != null -> {
+                    val subVaddr = DartNameDisplay.parseSubName(methodName)
+                    val found = if (subVaddr != null) dartMethodDao.getMethodWithClassByOffset(id, subVaddr)
+                    else dartMethodDao.getMethodWithClassByName(id, methodName)
+                    found?.method?.id ?: throw McpToolException("未找到方法: $methodName")
+                }
                 else -> throw McpToolException("需提供 methodId 或 methodName")
             }
             ensureGraph(id)
@@ -764,7 +923,7 @@ name = "get_pp_entry",
         },
         McpTool(
             name = "get_pp_references",
-            description = "反查哪些 Dart 方法在 src_code 中引用了指定 pp 偏移（自动拼 [pp+0x..] 匹配）。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。返回引用方法 id/className/methodName/functionOffset/fileOffset + target 串。用于从对象池数据追到使用方",
+            description = "反查哪些 Dart 方法在 Blutter src_code 文本中引用了指定 pp 偏移（自动拼 [pp+0x..] 匹配）。注意：这是对 Blutter 反汇编文本的 SQL 子串搜索，仅适用未混淆包（src_code 可读、槽引用形态规整）；混淆包 src_code 大字段常为空或形态错配，应改用 string_xrefs / scan_pool_refs（真实 Capstone 机器码扫描，支持大槽双指令）。analysisId 可省略（缺省 use_analysis）。返回引用方法 id/className/methodName/functionOffset/fileOffset + target 串",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -790,7 +949,7 @@ name = "get_pp_entry",
                         addJsonObject {
                             put("id", r.method.id)
                             put("className", r._className)
-                            put("methodName", r.method.methodName)
+                            put("methodName", DartNameDisplay.displayMethodName(r.method.methodName, r.method.functionOffset))
                             put("functionOffset", r.method.functionOffset ?: 0)
                             fileOffsetOf(soPath, r.method.functionOffset ?: 0)?.let { put("fileOffset", it) }
                         }
@@ -820,8 +979,12 @@ name = "get_pp_entry",
 
             val match = when {
                 methodId != null -> dartMethodDao.getMethodWithClassById(methodId)
-                name != null -> dartMethodDao.getMethodWithClassByName(id, name)
-                    ?: dartMethodDao.searchMethodsWithClass(id, name, null, 1, 0).firstOrNull()
+                name != null -> {
+                    val subVaddr = DartNameDisplay.parseSubName(name)
+                    if (subVaddr != null) dartMethodDao.getMethodWithClassByOffset(id, subVaddr)
+                    else dartMethodDao.getMethodWithClassByName(id, name)
+                        ?: dartMethodDao.searchMethodsWithClass(id, name, null, 1, 0).firstOrNull()
+                }
                 else -> null
             } ?: return@McpTool buildJsonObject { put("found", false) }
 
@@ -849,9 +1012,21 @@ name = "get_pp_entry",
                 ppRefs.add(off.toString(16) to (e?.description?.take(80) ?: ""))
             }
 
-            // callers/callees 在挂起点计算，避免在 lambda 内调 suspend
+            // 真实机器码扫描方法 body 区间，提取引用的字符串槽作为业务标签
+            val labels = if (soPath != null) {
+                val text = textSection(soPath)
+                if (text != null) {
+                    val start = m.functionOffset ?: 0
+                    val end = if ((m.functionSize ?: 0) > 0) start + (m.functionSize ?: 0) else 0
+                    if (start > 0) methodStringLabels.scanLabels(id, soPath, text, start, end) else emptyList()
+                } else emptyList()
+            } else emptyList()
+
+            // callers/callees 在挂起点计算，避免在 lambda 内调 suspend。
+            // 用显示名（sub_<vaddr>）查询：匿名方法的原始 <anonymous closure> 与重建后的边名不匹配
+            val callerQuery = DartNameDisplay.displayMethodName(m.methodName, m.functionOffset)
             val callerList = if (graphBuilt) {
-                callGraphBuilder.findCallersByName(id, m.methodName, edgeLimit)
+                callGraphBuilder.findCallersByName(id, callerQuery, edgeLimit)
                     ?.callers?.take(edgeLimit).orEmpty()
             } else emptyList()
             val calleeList = if (graphBuilt) dartCallGraphDao.calleesOf(id, m.id, edgeLimit) else emptyList()
@@ -861,7 +1036,8 @@ name = "get_pp_entry",
                 put("id", m.id)
                 put("classId", m.classId)
                 put("className", match._className)
-                put("methodName", m.methodName)
+                put("methodName", DartNameDisplay.displayMethodName(m.methodName, m.functionOffset))
+                put("rawMethodName", m.methodName)
                 put("functionOffset", m.functionOffset ?: 0)
                 fileOffsetOf(soPath, m.functionOffset ?: 0)?.let { put("fileOffset", it) }
                 put("functionSize", m.functionSize ?: 0)
@@ -898,6 +1074,24 @@ name = "get_pp_entry",
                             put("description", desc)
                         }
                     }
+                }
+                putJsonArray("stringLabels") {
+                    labels.forEach { l ->
+                        addJsonObject {
+                            put("ppOffset", "0x${l.ppOffset.toString(16)}")
+                            put("text", l.text)
+                        }
+                    }
+                }
+                closureSlotFor(id, m.functionOffset)?.let { cs ->
+                    put("closure", buildJsonObject {
+                        put("owner", cs.owner)
+                        if (cs.library != null) put("library", cs.library)
+                        put("parentVaddr", cs.parentVaddr)
+                        put("isStatic", cs.isStatic)
+                        put("displayName", cs.displayName)
+                        put("rawValue", cs.rawValue.take(160))
+                    })
                 }
             }
         },
@@ -1241,14 +1435,15 @@ name = "get_pp_entry",
         },
         McpTool(
             name = "scan_pool_refs",
-            description = "全 .text 扫描哪些 Dart 方法引用了指定 pool 槽（Dart 字符串/Stub 常量）。基于真实 Capstone 反汇编（非 Blutter 文本），匹配 pool 基址 ldr 形态。analysisId 可省略（缺省用 use_analysis 设定的当前分析）。返回 methodId/className/methodName/siteVaddr（sot offset 即补丁坐标）",
+            description = "精确 pool 槽交叉引用：全 .text 扫描哪些 Dart 方法引用了指定 pool 槽（Dart 字符串/Stub/字段常量）。基于真实 Capstone 反汇编，同时匹配小槽单指令 `ldr [poolReg,#imm]` 与大槽双指令 `add xN, poolReg, #hi, lsl #12 + ldr xN, [xN, #lo]`（pp=(hi<<12)+lo）。两个应用场景：1) string_xrefs 对中文串 0 命中时，先用 search_strings 拿到字符串的 vmOffset，再 ppOffsets 直传该槽做精确验证（注意目标槽若是 >4095 的大槽会自动走双指令匹配，这是旧版扫不到的盲区）；2) 已知槽偏移（如 find_bool_getters 返回的）反查所有引用方。返回 methodId/className/methodName/siteVaddr（补丁坐标）。analysisId 可省略（缺省 use_analysis）。poolRegs 可覆盖默认 x27,x26（校准实证的池基址）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
                     putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选）") }
                     putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径（可选，缺省用分析自带的 libappPath）") }
                     putJsonObject("query") { put("type", "string"); put("description", "字符串子串过滤（可选）：只扫 description 含 query 的 String pp 槽") }
-                    putJsonObject("ppOffsets") { put("type", "string"); put("description", "直接指定 pool 槽偏移（逗号分隔 hex/dec，如 0x2328,8992），绕过 String 槽限制——无 String 条目时用此参数") }
+                    putJsonObject("ppOffsets") { put("type", "string"); put("description", "直接指定 pool 槽偏移（逗号分隔 hex/dec，如 0x2328,8992），绕过 String 槽限制——无 String 条目时用此参数；支持 >4095 大槽（自动走 add+ldr 双指令匹配）") }
+                    putJsonObject("poolRegs") { put("type", "string"); put("description", "池基址寄存器候选（逗号分隔，如 x27,x26；缺省 x27,x26）") }
                     putJsonObject("minRefCount") { put("type", "integer"); put("description", "只返回引用数 >= 该值的方法（可选）") }
                     putJsonObject("maxResults") { put("type", "integer"); put("description", "返回上限 1..5000（默认 500）") }
                 }
@@ -1260,8 +1455,15 @@ name = "get_pp_entry",
                 ?: throw McpToolException("soPath 缺失且分析无 libappPath")
             val query = p.str("query")
             val ppOffsetsParam = p.str("ppOffsets")
+            val poolRegsParam = p.str("poolRegs")
             val minRef = p.int("minRefCount") ?: 0
             val limit = (p.int("maxResults") ?: 500).coerceIn(1, 5000)
+            val poolRegs: List<String> = poolRegsParam
+                ?.split(',')
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() }
+                ?.takeIf { it.isNotEmpty() }
+                ?: StringXrefScanner.DEFAULT_POOL_REGS
             val directOffsets: Set<Long> = ppOffsetsParam?.split(',')
                 ?.mapNotNull { it.trim().removePrefix("0x").toLongOrNull(16) ?: it.trim().toLongOrNull() }
                 ?.toSet()
@@ -1271,13 +1473,12 @@ name = "get_pp_entry",
             val targets: Map<Long, Any?> = when {
                 directOffsets.isNotEmpty() -> directOffsets.associateWith { null }
                 query.isNullOrBlank() -> allStrings.associateBy { it.vmOffset }
-                else -> allStrings.filter {
-                    it.description?.contains(query, ignoreCase = true) == true
-                }.associateBy { it.vmOffset }
+                else -> allStrings.filter { stringSlotContains(it, query) }.associateBy { it.vmOffset }
             }
             if (targets.isEmpty()) return@McpTool buildJsonObject {
                 put("count", 0); put("reason", "该分析 pp_entries 无 String 类型条目（或查询无命中），可改查 engine_scan_strings；或用 ppOffsets 直传已知槽偏移")
             }
+            val resolvedTargets = ppEntryDao.getPpByVmOffsets(id, targets.keys.toList())
             // 构建 .text 区间
             val text = textSection(so) ?: return@McpTool buildJsonObject {
                 put("count", 0); put("reason", "未找到 .text 节")
@@ -1286,15 +1487,16 @@ name = "get_pp_entry",
             val hits = stringXrefScanner.scan(
                 soPath = so, text = text, analysisId = id,
                 targetPpOffsets = targets.keys.toSet(),
+                poolRegs = poolRegs,
                 sink = { f, m -> progress.report(f * 0.9f, m) },
             )
             // 聚合 per method
             val byMethod = HashMap<Long, MutableList<StringXrefScanner.Hit>>()
-            val byMethodMeta = HashMap<Long, Pair<String, String>>()
+            val byMethodMeta = HashMap<Long, Triple<String, String, Long>>()
             for (h in hits) {
                 if (h.methodId == 0L) continue
                 byMethod.getOrPut(h.methodId) { ArrayList() }.add(h)
-                if (!byMethodMeta.containsKey(h.methodId)) byMethodMeta[h.methodId] = h.className to h.methodName
+                if (!byMethodMeta.containsKey(h.methodId)) byMethodMeta[h.methodId] = Triple(h.className, h.methodName, h.methodVaddr)
             }
             val filtered = byMethod.filter { (_, list) -> list.size >= minRef }
             val sorted = filtered.entries.sortedByDescending { it.value.size }
@@ -1304,16 +1506,16 @@ name = "get_pp_entry",
                 put("count", hits.size)
                 put("methodCount", filtered.size)
                 putJsonArray("poolRegs") {
-                    StringXrefScanner.DEFAULT_POOL_REGS.forEach { add(JsonPrimitive(it)) }
+                    poolRegs.forEach { add(JsonPrimitive(it)) }
                 }
                 put("truncated", sorted.size > limit)
                 putJsonArray("methods") {
                     top.forEach { (methodId, list) ->
                         addJsonObject {
-                            val meta = byMethodMeta[methodId] ?: ("" to "")
+                            val meta = byMethodMeta[methodId] ?: Triple("", "", 0L)
                             put("methodId", methodId)
                             put("className", meta.first)
-                            put("methodName", meta.second)
+                            put("methodName", DartNameDisplay.displayMethodName(meta.second, meta.third))
                             put("refCount", list.size)
                             putJsonArray("sites") {
                                 list.forEach { hit ->
@@ -1330,12 +1532,12 @@ name = "get_pp_entry",
         },
         McpTool(
             name = "string_xrefs",
-            description = "定位哪些方法引用了包含指定子串的 Dart 字符串（pool 字符串 xref）。反向：给字符串查引用它的方法。analysisId 可省略（缺省用 use_analysis）。本工具是全 .text 结构扫描（真实交叉引用），返回引用方法/class + site vaddr",
+            description = "字符串交叉引用（反混淆核心入口）：定位哪些 Dart 方法引用了含指定子串的 Dart 字符串（pool 字符串 xref）。基于真实 Capstone 反汇编全 .text 扫描（非 Blutter 文本），同时匹配小槽单指令 `ldr [x27,#imm]` 与大槽双指令 `add xN, x27/x26, #hi, lsl #12 + ldr xN, [xN, #lo]`（pp=(hi<<12)+lo，覆盖 >4095 的槽）。用法：给 query（如 'VIP'/'登录'/'剩余时长'，中英文均可，不区分大小写），返回引用方法/class + siteVaddr（即补丁坐标，functionOffset 同系可直接转文件偏移）。混淆包建议用较独特的中文字符串片段缩小噪音。analysisId 可省略（缺省 use_analysis）。query 无匹配或对象池无 String 条目时返回 count=0，可改 engine_scan_strings 或 scan_pool_refs 用 ppOffsets 直传",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
                     putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选）") }
-                    putJsonObject("query") { put("type", "string"); put("description", "字符串子串，不区分大小写，如 VIP / is_premium") }
+                    putJsonObject("query") { put("type", "string"); put("description", "字符串子串，不区分大小写，如 VIP / 登录 / is_premium") }
                     putJsonObject("maxResults") { put("type", "integer"); put("description", "返回上限 1..5000（默认 300）") }
                 }
                 putJsonArray("required") { add("query") }
@@ -1346,7 +1548,7 @@ name = "get_pp_entry",
             val limit = (p.int("maxResults") ?: 300).coerceIn(1, 5000)
             val so = libappPathOf(id) ?: throw McpToolException("分析无 libappPath")
             val targets = stringPoolTargets(id)
-                .filter { it.description?.contains(q, ignoreCase = true) == true }
+                .filter { stringSlotContains(it, q) }
             if (targets.isEmpty()) return@McpTool buildJsonObject {
                 put("count", 0); put("reason", "该分析 pp_entries 无匹配 String（或对象池未含 String 类型条目，可改查 engine_scan_strings）")
             }
@@ -1374,7 +1576,7 @@ name = "get_pp_entry",
                         }
                     }
                 }
-                put("note", "targetSample 仅为确认目标槽的取样；字符串槽可能因 Dart AOT 间接加载而无 ldr x27 直接引用，故无命中时属正常，可用 scan_pool_refs ppOffsets 精确验证")
+                put("note", "targetSample 仅为确认目标槽的取样；若 query 命中了字符串但 xrefs 为空：该串可能只被间接加载（无直接 ldr 引用），或槽为 >4095 大槽但加载形态特殊（理论上 add+ldr 双指令已覆盖）。可用 scan_pool_refs 的 ppOffsets 直传 targetSample 里的 vmOffset 做单槽精确验证")
                 putJsonArray("xrefs") {
                     top.forEach { h ->
                         addJsonObject {
@@ -1383,7 +1585,7 @@ name = "get_pp_entry",
                             put("string", descByOffset[h.ppOffset]?.description ?: "")
                             put("methodId", h.methodId)
                             put("className", h.className)
-                            put("methodName", h.methodName)
+                            put("methodName", DartNameDisplay.displayMethodName(h.methodName, h.methodVaddr))
                         }
                     }
                 }
@@ -1391,7 +1593,7 @@ name = "get_pp_entry",
         },
         McpTool(
             name = "infer_class_fields",
-            description = "类级字段聚合（反混淆）：对某类全部方法用 .text 结构扫描，收集这些方法引用的 Dart 字符串/Stub pool 槽，恢复该类的字段面（如 is_premium/premiumUser/premiumExpiresIn）。对混淆类（方法名不可读）尤其有效：不依赖符号名，只看方法体引用了什么字符串。analysisId 可省略（缺省 use_analysis 当前分析）",
+            description = "类级字段聚合（反混淆）：1) 对某类全部方法用 .text 结构扫描（真实 Capstone，支持小槽单指令 + 大槽 add+ldr 双指令），收集这些方法引用的 Dart 字符串/Stub pool 槽，恢复该类的字段面（如 is_premium/premiumUser/premiumExpiresIn）；2) 聚合 Blutter pp_entries 的 type=Field 结构化字段槽（含字段名+对象内偏移+owner 类+修饰符，如 Ofa._bvf → late @0x120），比字符串推断更直接。对混淆类（方法名不可读）尤其有效：不依赖符号名。用法：className 传乱码类名（如从 string_xrefs 命中里拿到的引用类），query 过滤（如 'premium'），返回字符串字段槽 fields + 结构化字段槽 fieldSlots。analysisId 可省略（缺省 use_analysis 当前分析）",
             inputSchema = buildJsonObject {
                 put("type", "object")
                 putJsonObject("properties") {
@@ -1446,6 +1648,12 @@ name = "get_pp_entry",
                 .map { (pp, list) -> pp to list }
                 .sortedByDescending { (_, list) -> list.size }
             val top = if (fieldList.size > limit) fieldList.subList(0, limit) else fieldList
+            // ========== Field 槽聚合（Blutter pp_entries 的 type=Field 结构化字段，含字段名+偏移+owner 类） ==========
+            val fieldSlots = DartFieldSlots.parseAll(ppEntryDao.getByAnalysisIdList(id))
+                .filter { DartFieldSlots.ownerMatches(it, cls.className) }
+                .filter { q.isNullOrBlank() || it.displayName.contains(q, ignoreCase = true) || (it.description ?: "").contains(q, ignoreCase = true) }
+                .sortedBy { it.offset ?: Long.MAX_VALUE }
+            val fieldSlotList = if (fieldSlots.size > limit) fieldSlots.subList(0, limit) else fieldSlots
             buildJsonObject {
                 put("found", true)
                 put("classId", cls.id)
@@ -1459,7 +1667,119 @@ name = "get_pp_entry",
                             put("description", descByOffset[pp]?.description ?: "")
                             put("hitCount", list.size)
                             put("methods", list.map { it.methodId }.distinct().joinToString(",", transform = { it.toString() }))
-                            put("methodNames", list.map { "${it.className}.${it.methodName}" }.distinct().take(5).joinToString(";"))
+                            put("methodNames", list.map { DartNameDisplay.displayFullName(it.className, it.methodName, it.methodVaddr) }.distinct().take(5).joinToString(";"))
+                        }
+                    }
+                }
+                put("fieldSlotCount", fieldSlotList.size)
+                putJsonArray("fieldSlots") {
+                    fieldSlotList.forEach { fs ->
+                        addJsonObject {
+                            put("vmOffset", fs.vmOffset)
+                            put("name", fs.displayName)
+                            put("fieldName", fs.fieldName)
+                            put("owner", fs.ownerPlain)
+                            put("modifier", fs.modifierText)
+                            put("isStatic", fs.isStatic)
+                            put("isFinal", fs.isFinal)
+                            put("isLate", fs.isLate)
+                            if (fs.offset != null) put("offset", fs.offset)
+                            put("description", fs.description ?: "")
+                        }
+                    }
+                }
+            }
+        },
+        McpTool(
+            name = "closure_map",
+            description = "匿名闭包槽映射（反混淆）：解析 Blutter pp_entries 的 AnonymousClosure 槽，建立「闭包 vaddr → 归属类/方法名/父方法」表。混淆包中方法名是 sub_<vaddr>，用本工具能把 vaddr 映射回业务语义（如 0x90f900 → of [Ofa]，即 Ofa 类里的闭包）。支持三种查询：1) vaddr 查单个（如 0x12be2c0）；2) owner 查某类的全部闭包（如 Ofa/_Kya）；3) query 子串过滤。analysisId 可省略（缺省 use_analysis 当前分析）",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选）") }
+                    putJsonObject("vaddr") { put("type", "integer"); put("description", "闭包 vaddr（hex 或十进制），查单个（可选）") }
+                    putJsonObject("owner") { put("type", "string"); put("description", "归属类名子串，查该类闭包（可选）") }
+                    putJsonObject("query") { put("type", "string"); put("description", "value 内容子串过滤（可选）") }
+                    putJsonObject("maxResults") { put("type", "integer"); put("description", "返回上限 1..500（默认 100）") }
+                }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "closure_map")
+            val vaddr = p.long("vaddr")
+            val owner = p.str("owner")
+            val q = p.str("query")
+            val limit = (p.int("maxResults") ?: 100).coerceIn(1, 500)
+            val slots = ClosureSlotResolver.parseAll(ppEntryDao.getByAnalysisIdList(id))
+            val matched = when {
+                vaddr != null -> slots.filter { it.closureVaddr == vaddr }
+                owner != null -> slots.filter {
+                    it.owner.contains(owner, ignoreCase = true) ||
+                        (it.library?.contains(owner, ignoreCase = true) == true)
+                }
+                else -> slots
+            }.filter { q.isNullOrBlank() || it.rawValue.contains(q, ignoreCase = true) }
+            val top = if (matched.size > limit) matched.subList(0, limit) else matched
+            buildJsonObject {
+                put("found", true)
+                put("closureSlotCount", slots.size)
+                put("matchCount", matched.size)
+                put("truncated", matched.size > top.size)
+                putJsonArray("closures") {
+                    top.forEach { cs ->
+                        addJsonObject {
+                            put("vmOffset", cs.vmOffset)
+                            put("vaddr", cs.closureVaddr)
+                            put("owner", cs.owner)
+                            if (cs.library != null) put("library", cs.library)
+                            if (cs.parentVaddr != null) put("parentVaddr", cs.parentVaddr)
+                            put("isStatic", cs.isStatic)
+                            put("displayName", cs.displayName)
+                            put("rawValue", cs.rawValue.take(200))
+                        }
+                    }
+                }
+            }
+        },
+        McpTool(
+            name = "resolve_entry",
+            description = "Dart 函数入口探测器（通用，不依赖固定偏移）：Blutter 对匿名闭包恢复的 functionOffset 往往是对象池槽 vaddr（stub/trampoline 区），真实代码入口与其距离因 app/版本而异。本工具用「验证 + 序言扫描」把任意疑似函数地址解析为真实入口：直接验证（stp x29,x30,[x15,#-0x10]! 等标准序言）→ 向高地址扫描第一个序言 → leaf 兜底。输入 vaddr（如 get_method 的 functionOffset），返回 entryVaddr/offset/confidence/原因/入口头指令。analysisId 可省略（缺省 use_analysis）",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选）") }
+                    putJsonObject("vaddr") { put("type", "integer"); put("description", "疑似函数地址（hex/十进制，必填）") }
+                    putJsonObject("scanBytes") { put("type", "integer"); put("description", "向高地址扫描上限 256..16384（默认 4096）") }
+                }
+                putJsonArray("required") { add("vaddr") }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "resolve_entry")
+            val vaddr = p.long("vaddr") ?: throw McpToolException("vaddr 缺失或非法")
+            val scanBytes = (p.int("scanBytes") ?: 4096).coerceIn(256, 16384)
+            val so = libappPathOf(id) ?: throw McpToolException("分析无 libappPath")
+            val text = textSection(so)
+            val entry = withContext(kotlinx.coroutines.Dispatchers.IO) { DartEntryResolver.resolve(so, vaddr, text, scanBytes) }
+            if (entry == null) {
+                buildJsonObject {
+                    put("found", false)
+                    put("vaddr", vaddr)
+                    put("reason", "无法解析入口（反汇编失败或 4KB 内无标准序言）")
+                }
+            } else {
+                buildJsonObject {
+                    put("found", true)
+                    put("sourceVaddr", vaddr)
+                    put("entryVaddr", entry.entryVaddr)
+                    put("offset", entry.offset)
+                    put("confidence", entry.confidence)
+                    put("reason", entry.reason)
+                    putJsonArray("firstInsns") {
+                        entry.firstInsns.forEach { ins ->
+                            addJsonObject {
+                                put("address", ins.address)
+                                put("mnemonic", ins.mnemonic)
+                                put("opStr", ins.opStr)
+                            }
                         }
                     }
                 }
@@ -1518,6 +1838,7 @@ name = "get_pp_entry",
                 val methodId: Long,
                 val className: String,
                 val methodName: String,
+                val functionVaddr: Long,
                 val functionSize: Long,
                 val refCount: Int,
                 val firstString: String,
@@ -1529,7 +1850,7 @@ name = "get_pp_entry",
                 val strings = list.mapNotNull { descByOffset[it.ppOffset]?.description }.distinct()
                 val firstStr = strings.firstOrNull() ?: ""
                 val size = m?.functionSize ?: 0L
-                cands.add(Cand(methodId, m?._className ?: "", m?.methodName ?: "", size, list.size, firstStr))
+                cands.add(Cand(methodId, m?._className ?: "", m?.methodName ?: "", m?.functionOffset ?: 0L, size, list.size, firstStr))
             }
             cands.sortWith(
                 compareByDescending<Cand> { it.functionSize in 1..512 }
@@ -1546,7 +1867,8 @@ name = "get_pp_entry",
                         addJsonObject {
                             put("methodId", c.methodId)
                             put("className", c.className)
-                            put("methodName", c.methodName)
+                            put("methodName", DartNameDisplay.displayMethodName(c.methodName, c.functionVaddr))
+                            put("functionOffset", c.functionVaddr)
                             put("functionSize", c.functionSize)
                             put("refCount", c.refCount)
                             put("firstString", c.firstString)
@@ -1575,69 +1897,57 @@ name = "get_pp_entry",
             val methodName = p.str("methodName")
             val m = when {
                 methodId != null -> funcs.all.firstOrNull { it.id == methodId }
-                methodName != null -> funcs.all.firstOrNull { it.methodName == methodName }
+                methodName != null -> {
+                    val subVaddr = DartNameDisplay.parseSubName(methodName)
+                    if (subVaddr != null) funcs.all.firstOrNull { it.functionOffset == subVaddr }
+                    else funcs.all.firstOrNull { it.methodName == methodName }
+                }
                 else -> null
             } ?: return@McpTool buildJsonObject {
-                put("found", false); put("reason", "方法不存在（methodId 或 methodName 精确匹配）")
+                put("found", false); put("reason", "方法不存在（methodId 或 methodName 精确匹配，sub_<vaddr> 亦可）")
             }
             val vaddr = m.functionOffset ?: 0L
             val declaredSize = m.functionSize
             val forceSize = p.int("forceSize")
+            val text = textSection(so)
+                ?: return@McpTool buildJsonObject { put("found", false); put("reason", "无法定位 .text 节") }
+
+            // functionSize=0 时先用 DartEntryResolver 探测真实入口，避免把相邻方法
+            // 误扫进来（匿名闭包 methods.address 可能是槽地址，真实 body 大小未知）。
+            val entry = if ((declaredSize ?: 0) > 0) {
+                vaddr
+            } else {
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    DartEntryResolver.resolve(so, vaddr, text, 4096)?.entryVaddr ?: vaddr
+                }
+            }
             val bodySize = when {
-                forceSize != null -> forceSize.coerceIn(64, 4096)
-                declaredSize != null && declaredSize > 0 -> declaredSize.coerceIn(16, 4096).toInt()
-                else -> 512
+                forceSize != null -> forceSize.coerceIn(64, 65536)
+                declaredSize != null && declaredSize > 0 -> declaredSize.coerceIn(16, 65536).toInt()
+                else -> 65536
             }
             if (vaddr <= 0) return@McpTool buildJsonObject { put("found", false); put("reason", "方法无 functionOffset") }
-            val fileOffset = fileOffsetOf(so, vaddr)
+            val fileOffset = fileOffsetOf(so, entry)
                 ?: return@McpTool buildJsonObject { put("found", false); put("reason", "无法把方法 vaddr 换算成文件偏移") }
-            val bytes = readFileBytes(so, fileOffset, bodySize.toLong())
-            if (bytes.isEmpty()) return@McpTool buildJsonObject { put("found", false); put("reason", "方法体读取失败（文件偏移越界）") }
-            val insns = CapstoneBindings.disassembleWithCapstone(bytes, vaddr)
-                ?: return@McpTool buildJsonObject { put("found", false); put("reason", "Capstone 反汇编不可用") }
-            // 识别返回路径与「最后写 w0/x0」的指令
-            data class RetSite(val retVaddr: Long, val lastWriter: String, val writerVaddr: Long, val writerHex: String)
-            val returns = ArrayList<RetSite>()
-            var lastW0: String? = null
-            var lastW0Vaddr = 0L
-            var lastW0Bytes: ByteArray? = null
-            var pathCount = 0
-            for (ins in insns) {
-                val op = ins.opStr.trim()
-                val writesW0 = ins.mnemonic.startsWith("mov") && (op.startsWith("w0") || op.startsWith("x0")) ||
-                    (ins.mnemonic.startsWith("ldr") || ins.mnemonic.startsWith("ldur") || ins.mnemonic.startsWith("ldrb") || ins.mnemonic.startsWith("ldur")) && op.startsWith("w0") ||
-                    (ins.mnemonic == "cset" || ins.mnemonic == "csetm" || ins.mnemonic == "csinc" || ins.mnemonic == "csinv") && op.startsWith("w0")
-                if (writesW0) {
-                    lastW0 = "${ins.mnemonic} $op"
-                    lastW0Vaddr = ins.address
-                    lastW0Bytes = ins.bytes
-                }
-                val isRet = ins.mnemonic == "ret" || (ins.mnemonic == "br" && op == "lr")
-                if (isRet) {
-                    pathCount++
-                    returns.add(
-                        RetSite(
-                            retVaddr = ins.address,
-                            lastWriter = lastW0 ?: "",
-                            writerVaddr = lastW0Vaddr,
-                            writerHex = lastW0Bytes?.joinToString(" ") { b -> b.toUByte().toString(16).uppercase().padStart(2, '0') } ?: "",
-                        )
-                    )
-                    lastW0 = null; lastW0Vaddr = 0L; lastW0Bytes = null
-                }
-            }
-            if (returns.isEmpty() && pathCount == 0) {
-                // 没有 ret/br lr：可能是 tail-call 结构，退化报告方法整体形状
+            val endVaddr = entry + bodySize
+            val cfg = MethodCfg.build(so, text, entry, endVaddr, maxBytes = bodySize.toLong())
+                ?: return@McpTool buildJsonObject { put("found", false); put("reason", "方法体反汇编失败") }
+            val returns = cfg.returns
+            if (returns.isEmpty()) {
+                // 无 ret 也无尾调用返回：可能是纯数据/switch 表，退化报告块形状
                 buildJsonObject {
                     put("found", true)
-                    put("note", "方法无显式 ret/br lr（可能是尾调用/switch 表），返回全部指令摘要")
-                    put("className", m._className); put("methodName", m.methodName)
-                    put("vaddr", vaddr); put("size", insns.size)
-                    putJsonArray("instructions") {
-                        insns.take(64).forEach { ins ->
+                    put("note", "未识别到 ret/尾调用返回路径（可能是纯数据区或极端混淆），返回基本块划分")
+                    put("className", m._className); put("methodName", DartNameDisplay.displayMethodName(m.methodName, m.functionOffset))
+                    put("vaddr", vaddr); put("functionSize", declaredSize ?: 0L)
+                    put("scanSize", bodySize); put("fileOffset", fileOffset)
+                    put("blockCount", cfg.blocks.size)
+                    putJsonArray("blocks") {
+                        cfg.blocks.take(48).forEach { b ->
                             addJsonObject {
-                                put("vaddr", ins.address)
-                                put("asm", "${ins.mnemonic} ${ins.opStr}")
+                                put("startVaddr", b.startVaddr); put("endVaddr", b.endVaddr)
+                                put("terminator", b.terminator)
+                                put("isTailCall", b.isTailCall)
                             }
                         }
                     }
@@ -1645,16 +1955,17 @@ name = "get_pp_entry",
             } else {
                 buildJsonObject {
                     put("found", true)
-                    put("className", m._className); put("methodName", m.methodName)
-                    put("vaddr", vaddr); put("functionSize", declaredSize ?: 0L)
+                    put("className", m._className); put("methodName", DartNameDisplay.displayMethodName(m.methodName, m.functionOffset))
+                    put("vaddr", vaddr); put("entryVaddr", entry); put("functionSize", declaredSize ?: 0L)
                     put("scanSize", bodySize); put("fileOffset", fileOffset)
-                    put("returnPathCount", pathCount)
+                    put("returnPathCount", returns.size)
                     putJsonArray("returns") {
                         returns.forEach { r ->
                             addJsonObject {
-                                put("retVaddr", r.retVaddr)
-                                put("retFileOffset", fileOffsetOf(so, r.retVaddr) ?: -1L)
-                                put("lastWriter", r.lastWriter)
+                                put("retVaddr", r.vaddr)
+                                put("retFileOffset", fileOffsetOf(so, r.vaddr) ?: -1L)
+                                put("isTailCall", r.isTailCall)
+                                put("lastWriter", r.lastWriteW0 ?: "")
                                 put("writerVaddr", r.writerVaddr)
                                 put("writerFileOffset", fileOffsetOf(so, r.writerVaddr) ?: -1L)
                                 put("writerHex", r.writerHex)
@@ -1662,6 +1973,131 @@ name = "get_pp_entry",
                         }
                     }
                     put("hint", "要强制返回 true：把每个 returns[].writerVaddr 换成 mov w0, #1（patch_instruction 接受 siteFileOffset）；false 则 mov w0, #0")
+                }
+            }
+        },
+        McpTool(
+            name = "method_cfg",
+            description = "方法级控制流图：反汇编单个 Dart 方法 body，按分支/返回指令划分基本块，输出块表（startVaddr/endVaddr/succs/isReturn/isTailCall）与返回路径（ret 地址 + 该路径最后一次写 w0/x0 的指令）。适合理解混淆方法控制流、定位所有返回点。analysisId 可省略（缺省 use_analysis）",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选）") }
+                    putJsonObject("methodId") { put("type", "integer"); put("description", "方法 ID（与 methodName 二选一）") }
+                    putJsonObject("methodName") { put("type", "string"); put("description", "方法名（与 methodId 二选一，精确匹配，sub_<vaddr> 亦可）") }
+                    putJsonObject("maxBytes") { put("type", "integer"); put("description", "方法体扫描上限字节 64..65536（默认 65536）") }
+                }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "method_cfg")
+            val so = libappPathOf(id) ?: throw McpToolException("分析无 libappPath")
+            val funcs = functionIndex.build(id)
+            val methodId = p.long("methodId")
+            val methodName = p.str("methodName")
+            val m = when {
+                methodId != null -> funcs.all.firstOrNull { it.id == methodId }
+                methodName != null -> {
+                    val subVaddr = DartNameDisplay.parseSubName(methodName)
+                    if (subVaddr != null) funcs.all.firstOrNull { it.functionOffset == subVaddr }
+                    else funcs.all.firstOrNull { it.methodName == methodName }
+                }
+                else -> null
+            } ?: return@McpTool buildJsonObject {
+                put("found", false); put("reason", "方法不存在（methodId 或 methodName 精确匹配，sub_<vaddr> 亦可）")
+            }
+            val vaddr = m.functionOffset ?: 0L
+            if (vaddr <= 0) return@McpTool buildJsonObject { put("found", false); put("reason", "方法无 functionOffset") }
+            val text = textSection(so)
+                ?: return@McpTool buildJsonObject { put("found", false); put("reason", "无法定位 .text 节") }
+            val maxBytes = (p.long("maxBytes") ?: 65536L).coerceIn(64, 65536)
+            val endVaddr = if ((m.functionSize ?: 0) > 0) vaddr + (m.functionSize ?: 0) else vaddr + 512
+            val cfg = MethodCfg.build(so, text, vaddr, endVaddr, maxBytes)
+                ?: return@McpTool buildJsonObject { put("found", false); put("reason", "方法体反汇编失败") }
+            buildJsonObject {
+                put("found", true)
+                put("className", m._className)
+                put("methodName", DartNameDisplay.displayMethodName(m.methodName, m.functionOffset))
+                put("vaddr", vaddr)
+                put("endVaddr", cfg.endVaddr)
+                put("blockCount", cfg.blocks.size)
+                put("returnPathCount", cfg.returns.size)
+                put("truncated", cfg.truncated)
+                putJsonArray("blocks") {
+                    cfg.blocks.forEach { b ->
+                        addJsonObject {
+                            put("startVaddr", b.startVaddr)
+                            put("endVaddr", b.endVaddr)
+                            put("instrCount", b.size)
+                            putJsonArray("succs") { b.succs.forEach { add(JsonPrimitive(it)) } }
+                            put("isReturn", b.isReturn)
+                            put("isTailCall", b.isTailCall)
+                        }
+                    }
+                }
+                putJsonArray("returns") {
+                    cfg.returns.forEach { r ->
+                        addJsonObject {
+                            put("retVaddr", r.vaddr)
+                            put("lastWriter", r.lastWriteW0 ?: "")
+                        }
+                    }
+                }
+            }
+        },
+        McpTool(
+            name = "blr_call_sites",
+            description = "间接调用点（blr/br）扫描：反汇编方法 body，识别所有 blr/br 间接跳转并标注来源形态——isolate（线程槽闭包调度，Dart 间接调用主形态）、pool（ldr [poolReg,#imm] 池槽加载调用，给出槽偏移与描述）、field（对象字段虚调用）、dynamic（寄存器动态来源）。目标通常静态不可解析，本工具用于判断方法里有多少间接调用及其形态。analysisId 可省略（缺省 use_analysis）",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选）") }
+                    putJsonObject("methodId") { put("type", "integer"); put("description", "方法 ID（与 methodName 二选一）") }
+                    putJsonObject("methodName") { put("type", "string"); put("description", "方法名（与 methodId 二选一，精确匹配，sub_<vaddr> 亦可）") }
+                }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "blr_call_sites")
+            val so = libappPathOf(id) ?: throw McpToolException("分析无 libappPath")
+            val funcs = functionIndex.build(id)
+            val methodId = p.long("methodId")
+            val methodName = p.str("methodName")
+            val m = when {
+                methodId != null -> funcs.all.firstOrNull { it.id == methodId }
+                methodName != null -> {
+                    val subVaddr = DartNameDisplay.parseSubName(methodName)
+                    if (subVaddr != null) funcs.all.firstOrNull { it.functionOffset == subVaddr }
+                    else funcs.all.firstOrNull { it.methodName == methodName }
+                }
+                else -> null
+            } ?: return@McpTool buildJsonObject {
+                put("found", false); put("reason", "方法不存在（methodId 或 methodName 精确匹配，sub_<vaddr> 亦可）")
+            }
+            val vaddr = m.functionOffset ?: 0L
+            if (vaddr <= 0) return@McpTool buildJsonObject { put("found", false); put("reason", "方法无 functionOffset") }
+            val text = textSection(so)
+                ?: return@McpTool buildJsonObject { put("found", false); put("reason", "无法定位 .text 节") }
+            val endVaddr = if ((m.functionSize ?: 0) > 0) vaddr + (m.functionSize ?: 0) else vaddr + 512
+            val sites = indirectCallScanner.scanSites(id, so, text, vaddr, endVaddr)
+            buildJsonObject {
+                put("found", true)
+                put("className", m._className)
+                put("methodName", DartNameDisplay.displayMethodName(m.methodName, m.functionOffset))
+                put("vaddr", vaddr)
+                put("count", sites.size)
+                putJsonArray("sites") {
+                    sites.forEach { s ->
+                        addJsonObject {
+                            put("vaddr", s.vaddr)
+                            put("kind", s.kind)
+                            put("reg", s.reg)
+                            put("source", s.source)
+                            if (s.kind == "pool") {
+                                put("poolReg", s.poolReg)
+                                put("poolImm", s.poolImm)
+                                if (s.poolDescription.isNotEmpty()) put("poolDescription", s.poolDescription)
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -1673,13 +2109,65 @@ name = "get_pp_entry",
     /**
      * 获取分析的「字符串池槽」集合。
      * 优先 type='String' 条目（Blutter strings 表）；若空则回退：从 pp_entries 全量里
-     * 挑 description 含引号字符串（形如 `[pp+0x2328] "Amd"`）的条目——部分 APK 的 Blutter
-     * 分析未把字符串写入 strings 表，但文本仍在 pp 槽 description 中。
+     * 挑 description 或 type 含引号字符串（形如 `[pp+0x2328] "Amd"`）的条目——部分 APK 的
+     * Blutter 分析未把字符串写入 strings 表，但文本仍在 pp 槽 description/type 中。
+     * 注意：实测发现混淆包存在「内容在 type 字段、description 只剩引号」的错位形态，
+     * 因此回退同时检查两列。
      */
     private suspend fun stringPoolTargets(analysisId: Long): List<com.ai.fler.data.entity.PpEntry> {
         val typed = ppEntryDao.getStringsByAnalysisIdList(analysisId)
         if (typed.isNotEmpty()) return typed
-        return ppEntryDao.getByAnalysisIdList(analysisId).filter { it.description?.contains('"') == true }
+        return ppEntryDao.getByAnalysisIdList(analysisId).filter {
+            it.description?.contains('"') == true || it.type?.contains('"') == true
+        }
+    }
+
+    // ========== 闭包槽（AnonymousClosure pp_entries）解析缓存 ==========
+    private val closureMapCache = HashMap<Long, Map<Long, ClosureSlotResolver.ClosureSlot>>()
+
+    /**
+     * 解析该分析的 AnonymousClosure 槽，建立「闭包 vaddr → 槽」映射（每 analysisId 缓存一次）。
+     * Blutter pp_entries 里这些槽的 value 形如 `(0x90f900), of [zuq] Ofa`，把匿名方法
+     * vaddr 与归属类/方法名精确关联。
+     */
+    private suspend fun closureSlotsOf(analysisId: Long): Map<Long, ClosureSlotResolver.ClosureSlot> {
+        closureMapCache[analysisId]?.let { return it }
+        val all = ppEntryDao.getByAnalysisIdList(analysisId)
+        val map = ClosureSlotResolver.buildVaddrMap(ClosureSlotResolver.parseAll(all))
+        if (map.isNotEmpty()) closureMapCache[analysisId] = map
+        return map
+    }
+
+    /** 查某方法 vaddr 对应的闭包槽（该方法若是匿名闭包）。 */
+    private suspend fun closureSlotFor(analysisId: Long, vaddr: Long?): ClosureSlotResolver.ClosureSlot? {
+        if (vaddr == null || vaddr <= 0) return null
+        return closureSlotsOf(analysisId)[vaddr]
+    }
+
+    /** 字符串槽的「可搜索文本」：description 与 type 拼接，覆盖内容落在任一字段的形态。 */
+    private fun stringSlotText(e: com.ai.fler.data.entity.PpEntry): String =
+        listOfNotNull(e.description, e.type).joinToString(" ")
+
+    /** 字符串槽的子串匹配：description 或 type 任一字段命中即算命中。 */
+    private fun stringSlotContains(e: com.ai.fler.data.entity.PpEntry, query: String): Boolean =
+        stringSlotText(e).contains(query, ignoreCase = true)
+
+    /**
+     * 分析内的「字符串池槽」搜索（SQL 下推优先；无 String 类型条目时回退内存过滤）。
+     * 与 [stringPoolTargets] 的回退语义一致，供 search_strings/list_strings 复用，
+     * 修复混淆包（无 type='String' 条目）下 search 恒 0 的问题。
+     */
+    private suspend fun searchStringSlots(
+        analysisId: Long,
+        query: String,
+        limit: Int,
+    ): List<com.ai.fler.data.entity.PpEntry> {
+        if (ppEntryDao.countStringsByAnalysisId(analysisId) > 0) {
+            return ppEntryDao.searchStrings(analysisId, query, limit)
+        }
+        return ppEntryDao.getByAnalysisIdList(analysisId)
+            .filter { stringSlotContains(it, query) }
+            .take(limit)
     }
 
     /** 用 ELF 解析器取 .text 节区间。 */
