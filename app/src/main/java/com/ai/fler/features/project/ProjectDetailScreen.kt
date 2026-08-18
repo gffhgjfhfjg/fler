@@ -159,13 +159,13 @@ fun ProjectDetailScreen(
                         ProjectInfoCard(project = p)
                     }
 
-                    // 引擎未安装引导卡片
+                    // 引擎未安装提示卡片（分析时会自动下载，仅作提示）
                     if (engineMissing) {
                         item {
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.errorContainer
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer
                                 )
                             ) {
                                 Column(
@@ -175,13 +175,13 @@ fun ProjectDetailScreen(
                                     Text(
                                         text = "检测到 Dart ${p.dartVersion}，设备未安装对应引擎",
                                         style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
                                         fontWeight = FontWeight.Medium,
                                     )
                                     Text(
-                                        text = "请先到设置页下载引擎，安装完成后再手动运行分析",
+                                        text = "运行分析时将自动下载该引擎（需联网），也可到设置页提前下载",
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     TextButton(
@@ -211,10 +211,9 @@ fun ProjectDetailScreen(
                                     projectViewModel.startAnalysis(p.id)
                                 }
                             },
-                            enabled = !engineMissing &&
-                                (progress.stage == AnalysisStage.Idle ||
-                                    progress.stage == AnalysisStage.Completed ||
-                                    progress.stage == AnalysisStage.Failed),
+                            enabled = progress.stage == AnalysisStage.Idle ||
+                                progress.stage == AnalysisStage.Completed ||
+                                progress.stage == AnalysisStage.Failed,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(
@@ -225,8 +224,8 @@ fun ProjectDetailScreen(
                             Spacer(modifier = Modifier.width(8.dp))
                             if (progress.stage in listOf(
                                     AnalysisStage.Extracting, AnalysisStage.DetectingVersion,
-                                    AnalysisStage.LoadingEngine, AnalysisStage.Analyzing,
-                                    AnalysisStage.SavingResults
+                                    AnalysisStage.DownloadingEngine, AnalysisStage.LoadingEngine,
+                                    AnalysisStage.Analyzing, AnalysisStage.SavingResults
                                 )
                             ) {
                                 CircularProgressIndicator(
@@ -236,7 +235,7 @@ fun ProjectDetailScreen(
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("分析中...")
                             } else if (engineMissing) {
-                                Text("需先安装 Dart ${p.dartVersion} 引擎")
+                                Text("运行分析（自动下载引擎）")
                             } else {
                                 Text("运行分析")
                             }
@@ -244,8 +243,8 @@ fun ProjectDetailScreen(
                         // 内嵌分析进度条
                         if (progress.stage in listOf(
                                 AnalysisStage.Extracting, AnalysisStage.DetectingVersion,
-                                AnalysisStage.LoadingEngine, AnalysisStage.Analyzing,
-                                AnalysisStage.SavingResults
+                                AnalysisStage.DownloadingEngine, AnalysisStage.LoadingEngine,
+                                AnalysisStage.Analyzing, AnalysisStage.SavingResults
                             )
                         ) {
                             Spacer(modifier = Modifier.height(4.dp))

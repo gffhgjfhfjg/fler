@@ -81,6 +81,7 @@ Flutter App 的 Dart AOT 恢复依赖 Blutter 引擎，但该引擎**不在本�
 - **职责分离**：`fler-dart` 通过 CI 按 Dart 版本交叉编译 Blutter 的 `dartvm.so`，并把 `blutter_entry.cpp`（把 Blutter 分析结果写入 SQLite 的入口）打进引擎，产出发行包（如 `fler-engines.7z` / `dartvm-<dartVersion>.7z`）上传到 GitHub Releases。
 - **运行期分发**：App 从 `fler-dart` main 分支的 `manifest.json`（`https://raw.githubusercontent.com/myfler/fler-dart/main/manifest.json`）读取可用 Dart 版本清单，经 `EngineLoader` 按需下载对应 `dartvm_<dartVersion>.so`，由 JNI `blutter_analyze()` 执行分析，结果写入 SQLite（表结构由引擎决定）。
 - **默认源**：`EngineSourceConfig` 内置 manifest 地址 + GitHub 加速前缀（`https://gh-proxy.com`，可在设置页修改/清空），缺失或不可用时可在设置页改自定义源。
+- **分析时自动下载**：导入 Flutter 应用后运行分析，若检测到的 Dart 版本对应的引擎未安装，会自动走「manifest → 下载 → 7z/SHA256 校验 → 解压」流程安装（运行库缺失时先自动补装），无需再手动去设置页下载；分析进度中会显示「正在下载引擎」阶段。
 
 > 引擎包为独立版本（当前 `v0.4.0`），与 App 版本解耦；升级引擎只要重下对应 Dart 版本的 `dartvm_*.so`，无需重装 App。
 

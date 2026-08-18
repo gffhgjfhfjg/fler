@@ -392,33 +392,17 @@ private fun ProjectCard(
                 project.status != Project.STATUS_EXTRACTING &&
                 !isAnalyzing) {
                 Spacer(modifier = Modifier.height(12.dp))
-                if (engineMissing) {
-                    // 引擎未安装：禁用分析，引导去设置下载
-                    TextButton(
-                        onClick = onOpenSettings,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Download,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("引擎未安装（去设置下载 Dart ${project.dartVersion}）")
-                    }
-                } else {
-                    TextButton(
-                        onClick = onAnalyze,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Analytics,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("开始分析")
-                    }
+                TextButton(
+                    onClick = onAnalyze,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Analytics,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(if (engineMissing) "开始分析（自动下载引擎）" else "开始分析")
                 }
             }
         }
@@ -795,6 +779,7 @@ private fun getStageTitle(stage: AnalysisStage): String {
     return when (stage) {
         AnalysisStage.Extracting -> "正在提取文件"
         AnalysisStage.DetectingVersion -> "正在检测版本"
+        AnalysisStage.DownloadingEngine -> "正在下载引擎"
         AnalysisStage.LoadingEngine -> "正在加载引擎"
         AnalysisStage.Analyzing -> "正在分析"
         AnalysisStage.SavingResults -> "正在保存结果"

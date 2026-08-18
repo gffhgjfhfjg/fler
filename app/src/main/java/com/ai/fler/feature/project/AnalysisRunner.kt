@@ -11,6 +11,7 @@ import com.ai.fler.core.service.EngineLoader
 import com.ai.fler.core.service.EngineNotReadyException
 import com.ai.fler.core.service.EnginePackManager
 import com.ai.fler.core.service.WorkDirectory
+import com.ai.fler.core.log.AppLogger
 import com.ai.fler.data.AppDatabase
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.DartClassDao
@@ -69,7 +70,8 @@ class AnalysisRunner @Inject constructor(
     private val engineLoader: EngineLoader,
     private val analysisImporter: AnalysisImporter,
     private val addressTranslator: AddressTranslator,
-    private val workDirectory: WorkDirectory
+    private val workDirectory: WorkDirectory,
+    private val appLogger: AppLogger
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -280,8 +282,15 @@ class AnalysisRunner @Inject constructor(
         // ====================================================================
         // 阶段 3: 加载引擎
         // 必须 System.load dartvm_<dartVersion>.so，否则 dlsym 找不到 blutter_analyze 符号
+        // 引擎缺失时先自动下载（复用设置页的安装流程），无需用户手动去设置页
         // ====================================================================
         try {
+            val downloadError = ensureEngineInstalled(projectId, dartVersion)
+            if (downloadError != null) {
+                Log.e(TAG, "阶段 3/5 引擎自动下载失败: $downloadError")
+                failAnalysis(analysisId, "引擎自动下载失败: $downloadError")
+                return
+            }
             updateProgress(projectId, AnalysisStage.LoadingEngine, 0.5f, "Loading engine $dartVersion...")
             Log.i(TAG, "阶段 3/5: 加载引擎 dartvm_${dartVersion}.so")
             engineLoader.loadEngine(dartVersion)
@@ -371,6 +380,55 @@ class AnalysisRunner @Inject constructor(
                 status = Project.STATUS_COMPLETED
             )
         )
+    }
+
+    /**
+     * 确保指定 Dart 版本的引擎已安装；缺失时自动下载。
+     *
+     * 复用 [EnginePackManager.installEngineVersion] 的完整安装流程
+     * （manifest 获取 → 下载 → 7z/SHA256 校验 → 解压，运行库缺失时自动补装），
+     * 并把安装进度映射到分析进度 [0.30, 0.49] 区间，供进度对话框实时展示。
+     *
+     * @return 安装失败的错误信息；null 表示成功（或引擎已就绪）
+     */
+    private suspend fun ensureEngineInstalled(projectId: Long, dartVersion: String): String? {
+        if (enginePackManager.isRuntimeReady() && enginePackManager.isEngineVersionReady(dartVersion)) {
+            return null
+        }
+
+        Log.i(TAG, "引擎 Dart $dartVersion 未安装，开始自动下载")
+        appLogger.info(TAG, "分析时自动下载引擎: Dart $dartVersion")
+        var terminalPhase = EnginePackManager.EngineProgress.Phase.IDLE
+        var error: String? = "引擎下载未完成"
+        enginePackManager.installEngineVersion(dartVersion).collect { p ->
+            if (p.phase != EnginePackManager.EngineProgress.Phase.IDLE) {
+                terminalPhase = p.phase
+            }
+            if (p.errorMessage != null) error = p.errorMessage
+            val message = when (p.phase) {
+                EnginePackManager.EngineProgress.Phase.DOWNLOADING -> {
+                    val pct = if (p.totalBytes > 0) "${(p.downloadProgress * 100).toInt()}%" else "${p.downloadedBytes / 1024}KB"
+                    "Downloading engine Dart $dartVersion... $pct ${p.speed}".trim()
+                }
+                EnginePackManager.EngineProgress.Phase.VERIFYING ->
+                    "Verifying engine Dart $dartVersion..."
+                EnginePackManager.EngineProgress.Phase.EXTRACTING ->
+                    "Extracting engine Dart $dartVersion... ${(p.extractProgress * 100).toInt()}%"
+                else -> "Preparing engine Dart $dartVersion..."
+            }
+            updateProgress(
+                projectId, AnalysisStage.DownloadingEngine,
+                0.30f + p.overallProgress * 0.19f, message
+            )
+        }
+        return if (terminalPhase == EnginePackManager.EngineProgress.Phase.COMPLETED &&
+            enginePackManager.isEngineVersionReady(dartVersion)
+        ) {
+            Log.i(TAG, "引擎 Dart $dartVersion 自动下载完成")
+            null
+        } else {
+            "Dart $dartVersion 引擎安装未成功（${error ?: "未知原因"}）"
+        }
     }
 
     /**

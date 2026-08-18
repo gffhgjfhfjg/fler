@@ -32,6 +32,7 @@ enum class AnalysisStage {
     Idle,
     Extracting,
     DetectingVersion,
+    DownloadingEngine,
     LoadingEngine,
     Analyzing,
     SavingResults,

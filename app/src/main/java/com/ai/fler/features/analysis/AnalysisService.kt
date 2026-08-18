@@ -96,6 +96,7 @@ class AnalysisService : Service() {
         val text = when (progress?.stage) {
             AnalysisStage.Extracting -> "正在提取 so 文件"
             AnalysisStage.DetectingVersion -> "正在检测 Dart 版本"
+            AnalysisStage.DownloadingEngine -> "正在下载引擎"
             AnalysisStage.LoadingEngine -> "正在加载引擎"
             AnalysisStage.Analyzing -> "正在分析 (${(progress.progress * 100).toInt()}%)"
             AnalysisStage.SavingResults -> "正在保存结果"
