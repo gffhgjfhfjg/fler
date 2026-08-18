@@ -33,6 +33,9 @@ concurrency:
 
 env:
   FLER_NATIVE_VER: v1
+  # 原生静态库资产固定取上游 myfler/fler 的 native-libs-v1 release
+  # （本仓库未发布该资产；prepare-native-libs.sh 默认按 GITHUB_REPOSITORY 拼 URL 会 404）
+  FLER_NATIVE_URL: https://github.com/myfler/fler/releases/download/native-libs-v1/fler-native-libs-v1.tar.xz
   FLER_NATIVE_SHA: 79c25d84941456de18189f53eac0a052dfc971e4c6328d10adc67fc840ebff43
   ORG_GRADLE_JVMARGS: -Xmx4g -Dfile.encoding=UTF-8
 
