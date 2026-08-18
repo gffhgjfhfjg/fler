@@ -151,7 +151,13 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun mcpSetBindMode(mode: McpConfig.BindMode) {
+        val wasRunning = mcpServerManager.isRunning()
         mcpConfig.setBindMode(mode)
+        // 运行中切换绑定模式：热重启重新绑定 socket（127.0.0.1 ↔ 0.0.0.0）
+        // 并立即刷新连接 URL。否则旧绑定仍在生效，界面也拿不到局域网地址。
+        if (wasRunning) {
+            mcpServerManager.restart()
+        }
     }
 
     fun mcpSetPort(port: Int) {

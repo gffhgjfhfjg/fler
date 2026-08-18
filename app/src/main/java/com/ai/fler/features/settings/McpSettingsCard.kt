@@ -102,6 +102,13 @@ fun McpSettingsCard(
                     UrlLine("局域网 /mcp", state.lanUrl)
                     UrlLine("局域网 /sse", state.sseLanUrl)
                     UrlLine("局域网 /export", exportUrlFrom(state.lanUrl))
+                } else if (state.bindMode == McpConfig.BindMode.LAN) {
+                    // 局域网模式运行中但未取到 IP：明确提示而非静默不显示
+                    Text(
+                        text = "未获取到局域网 IP：请确认设备已连接 WiFi（蜂窝网络无局域网地址），连接后会自动刷新",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
                 Text(
                     text = "/mcp: MCP Inspector/通用客户端 · /sse: Claude Desktop · /export: 下载工作目录内的 so",

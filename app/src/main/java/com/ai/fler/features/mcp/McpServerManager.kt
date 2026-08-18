@@ -69,11 +69,14 @@ class McpServerManager @Inject constructor(
     val status: StateFlow<McpStatus> = _status.asStateFlow()
 
     init {
-        // 运行期间周期性刷新活动连接数
+        // 运行期间周期性刷新活动连接数 + 局域网地址（WiFi 重连/IP 变化后自动更新）
         scope.launch {
             while (isActive) {
                 if (httpServer.isRunning()) {
                     _status.value = _status.value.copy(activeSessions = sessions.size())
+                    if (config.bindMode.value == McpConfig.BindMode.LAN) {
+                        refreshLanUrls()
+                    }
                 }
                 delay(3000)
             }
@@ -107,8 +110,9 @@ class McpServerManager @Inject constructor(
                 sseLocalUrl = "http://127.0.0.1:$port/sse",
                 sseLanUrl = if (lanIp != null) "http://$lanIp:$port/sse" else "",
             )
-            logger.info("MCP 服务器已启动: 127.0.0.1:$port（${config.bindMode.value}）")
-            appLogger.info("McpServer", "MCP 服务器已启动: 127.0.0.1:$port（${config.bindMode.value}）")
+            val lanSuffix = lanIp?.let { "，局域网 $it:$port" } ?: if (config.bindMode.value == McpConfig.BindMode.LAN) "，未获取到局域网 IP" else ""
+            logger.info("MCP 服务器已启动: 127.0.0.1:$port（${config.bindMode.value}$lanSuffix）")
+            appLogger.info("McpServer", "MCP 服务器已启动: 127.0.0.1:$port（${config.bindMode.value}$lanSuffix）")
             return true
         }
         _status.value = McpStatus(errorMessage = "端口 ${base}..${base + MAX_PORT_ATTEMPTS - 1} 均被占用")
@@ -126,24 +130,85 @@ class McpServerManager @Inject constructor(
 
     fun isRunning(): Boolean = httpServer.isRunning()
 
+    /**
+     * 关键配置（绑定模式）变更后的热重启。
+     *
+     * 仅运行中生效：按最新配置重新绑定 socket（127.0.0.1 ↔ 0.0.0.0）
+     * 并刷新连接 URL；未运行时 no-op。前台服务不受影响。
+     */
+    fun restart() {
+        if (!httpServer.isRunning()) return
+        httpServer.stop()
+        start()
+    }
+
+    /** 依据当前网络重算 LAN URL（IP 变化后自动更新显示；无变化不发射）。 */
+    private fun refreshLanUrls() {
+        val current = _status.value
+        if (!current.isRunning) return
+        val lanIp = localIpv4()
+        val lanUrl = if (lanIp != null) "http://$lanIp:${current.port}/mcp" else ""
+        val sseLanUrl = if (lanIp != null) "http://$lanIp:${current.port}/sse" else ""
+        if (lanUrl != current.lanUrl || sseLanUrl != current.sseLanUrl) {
+            _status.value = current.copy(lanUrl = lanUrl, sseLanUrl = sseLanUrl)
+            if (lanIp != null) {
+                logger.info("局域网地址已更新: $lanIp:${current.port}")
+                appLogger.info("McpServer", "局域网地址已更新: $lanIp:${current.port}")
+            }
+        }
+    }
+
+    /**
+     * 获取局域网 IPv4（优先 WiFi/以太网接口的私网地址）。
+     *
+     * 排除蜂窝（rmnet/ccmni）、VPN（tun/tap）、dummy 接口——其地址在局域网内
+     * 不可达，作为「局域网地址」展示会误导。选择优先级：
+     * 1. wlan*/eth*/ap* 接口的 RFC1918 私网地址（典型 WiFi/热点/以太网）
+     * 2. wlan*/eth*/ap* 接口的任意 IPv4
+     * 3. 其他接口的私网地址
+     * 无合适地址返回 null（UI 显示「未获取到局域网 IP」提示）。
+     */
     private fun localIpv4(): String? {
         return try {
             val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
+            var wlanPrivate: String? = null
+            var wlanAny: String? = null
+            var otherPrivate: String? = null
             while (interfaces.hasMoreElements()) {
                 val ni = interfaces.nextElement()
                 if (!ni.isUp || ni.isLoopback) continue
+                val name = ni.name.lowercase()
+                if (name.startsWith("rmnet") || name.startsWith("ccmni") ||
+                    name.startsWith("tun") || name.startsWith("tap") ||
+                    name.startsWith("dummy")
+                ) continue
+                val isWlanLike = name.startsWith("wlan") || name.startsWith("eth") ||
+                    name.startsWith("ap") || name.startsWith("swlan")
                 val addrs = ni.inetAddresses ?: continue
                 while (addrs.hasMoreElements()) {
                     val addr = addrs.nextElement()
-                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                        return addr.hostAddress
+                    if (addr !is Inet4Address || addr.isLoopbackAddress) continue
+                    val ip = addr.hostAddress ?: continue
+                    if (isWlanLike) {
+                        if (isPrivateLanAddress(ip)) wlanPrivate = wlanPrivate ?: ip
+                        wlanAny = wlanAny ?: ip
+                    } else if (isPrivateLanAddress(ip)) {
+                        otherPrivate = otherPrivate ?: ip
                     }
                 }
             }
-            null
+            wlanPrivate ?: wlanAny ?: otherPrivate
         } catch (e: Exception) {
             null
         }
+    }
+
+    /** 是否 RFC1918 私网地址（10/8、172.16/12、192.168/16）。 */
+    private fun isPrivateLanAddress(ip: String): Boolean {
+        val first = ip.substringBefore('.').toIntOrNull() ?: return false
+        val second = ip.substringAfter('.', "").substringBefore('.').toIntOrNull() ?: return false
+        return ip.startsWith("192.168.") || ip.startsWith("10.") ||
+            (first == 172 && second in 16..31)
     }
 
     companion object {
