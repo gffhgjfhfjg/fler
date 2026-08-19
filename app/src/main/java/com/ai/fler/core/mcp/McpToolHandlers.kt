@@ -35,6 +35,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonArrayBuilder
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -79,6 +80,7 @@ class McpToolHandlers @Inject constructor(
     private val methodStringLabels: MethodStringLabels,
     private val indirectCallScanner: IndirectCallScanner,
     private val fridaTools: FridaMcpToolRegistry,
+    private val semanticIndexManager: SemanticIndexManager,
     private val reportGenerator: com.ai.fler.core.analysis.AnalysisReportGenerator,
     private val workDirectory: WorkDirectory,
     @SuppressLint("StaticFieldLeak")
@@ -181,6 +183,7 @@ class McpToolHandlers @Inject constructor(
             addAll(buildDisasmTools())
             addAll(buildPatchTools())
             addAll(buildDeobfTools())
+            addAll(buildSemanticTools())
         }.forEach { this[it.name] = it }
         // Engine 能力自动暴露的工具（带 engine_ 前缀）
         engineMcp.buildTools().forEach { (k, v) -> this[k] = v }
@@ -2324,6 +2327,121 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
                 StringXrefScanner.TextRange(it.offset, it.size, it.address)
             }
         }
+
+    // ========== 语义搜索工具（本地向量索引 + 外部 embedding API） ==========
+
+    private fun buildSemanticTools(): List<McpTool> = listOf(
+        McpTool(
+            name = "semantic_search",
+            description = "语义搜索：用自然语言在字符串常量、方法名、反编译伪代码中查找语义相近的内容（余弦相似度 Top-K，优于关键词子串匹配的 search_strings）。索引三类文档：string=字符串常量 / method=方法签名 / code=方法伪代码。需先调用 semantic_index_build 建索引。analysisId 可省略（缺省 use_analysis）",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("query") { put("type", "string"); put("description", "自然语言查询，如「会员到期校验逻辑」「用户登录相关接口」") }
+                    putJsonObject("topK") { put("type", "integer"); put("description", "返回条数 1..50（默认 10）") }
+                    putJsonObject("types") {
+                        put("type", "array")
+                        put("items", buildJsonObject { put("type", "string"); put("enum", JsonArray(listOf("string", "method", "code").map { JsonPrimitive(it) })) })
+                        put("description", "限定文档类型子集（string/method/code；缺省全部）")
+                    }
+                }
+                putJsonArray("required") { add("query") }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "semantic_search")
+            val q = p.str("query")?.takeIf { it.isNotBlank() } ?: throw McpToolException("query 缺失")
+            val topK = (p.int("topK") ?: 10).coerceIn(1, 50)
+            val types = (p["types"] as? JsonArray)
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                ?.filter { it in setOf("string", "method", "code") }
+                ?.toSet()
+                ?: emptySet()
+            val hits = try {
+                semanticIndexManager.search(id, q, topK, types)
+            } catch (e: EmbeddingClient.EmbeddingException) {
+                throw McpToolException(e.message ?: "语义检索失败")
+            }
+            val soPath = libAppPath(id)
+            buildJsonObject {
+                put("analysisId", id)
+                put("query", q)
+                put("count", hits.size)
+                putJsonArray("hits") {
+                    hits.forEach { (doc, score) ->
+                        addJsonObject {
+                            put("score", score)
+                            put("type", doc.type)
+                            put("text", doc.text.take(600))
+                            put("className", doc.className)
+                            put("methodName", doc.methodName)
+                            if (doc.vaddr > 0) {
+                                put("functionOffset", doc.vaddr)
+                                fileOffsetOf(soPath, doc.vaddr)?.let { put("fileOffset", it) }
+                            }
+                            if (doc.ppOffset > 0) put("ppOffset", doc.ppOffset)
+                            if (doc.description.isNotBlank()) put("description", doc.description.take(600))
+                        }
+                    }
+                }
+            }
+        },
+        McpTool(
+            name = "semantic_index_build",
+            description = "构建（或断点续建）某次分析的语义向量索引：对字符串常量、方法签名、反编译伪代码调用外部 embedding API 向量化并落盘。分批执行（默认单次 2000 条），大索引可反复调用续建直至 complete=true；构建失败保留进度可重试。需先在设置页配置 embedding API Key",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("maxNewDocs") { put("type", "integer"); put("description", "本次最多新嵌入文档数 1..5000（默认 2000，限流保护）") }
+                }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "semantic_index_build")
+            val maxNew = (p.int("maxNewDocs") ?: 2000).coerceIn(1, 5000)
+            val st = try {
+                semanticIndexManager.build(id, maxNew)
+            } catch (e: EmbeddingClient.EmbeddingException) {
+                throw McpToolException(e.message ?: "索引构建失败")
+            }
+            if (!st.exists) throw McpToolException("分析 $id 不存在")
+            buildJsonObject {
+                put("analysisId", id)
+                put("model", st.model)
+                put("dim", st.dim)
+                put("done", st.done)
+                put("total", st.total)
+                put("complete", st.complete)
+                put("remaining", (st.total - st.done).coerceAtLeast(0))
+                putJsonArray("docTypes") {
+                    add("string"); add("method"); add("code")
+                }
+            }
+        },
+        McpTool(
+            name = "semantic_index_status",
+            description = "查询某次分析的语义索引状态：是否存在 / embedding 模型 / 维度 / 已建与总文档数 / 是否完成。未建索引时 exists=false，可据此决定是否调用 semantic_index_build",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "semantic_index_status")
+            val st = semanticIndexManager.status(id)
+            buildJsonObject {
+                put("analysisId", id)
+                put("exists", st.exists)
+                put("model", st.model)
+                put("dim", st.dim)
+                put("done", st.done)
+                put("total", st.total)
+                put("complete", st.complete)
+                put("remaining", (st.total - st.done).coerceAtLeast(0))
+            }
+        },
+    )
 
     private fun buildPatchTools(): List<McpTool> = listOf(
         McpTool(

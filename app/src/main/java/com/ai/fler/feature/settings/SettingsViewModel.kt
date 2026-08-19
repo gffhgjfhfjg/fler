@@ -7,6 +7,7 @@ import android.os.PowerManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ai.fler.core.frida.FridaEngine
+import com.ai.fler.core.mcp.EmbeddingConfig
 import com.ai.fler.core.mcp.McpConfig
 import com.ai.fler.core.mcp.McpToolHandlers
 import com.ai.fler.core.service.EnginePackManager
@@ -24,6 +25,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -44,6 +47,7 @@ class SettingsViewModel @Inject constructor(
     private val mcpConfig: McpConfig,
     private val mcpServerManager: McpServerManager,
     private val toolHandlers: McpToolHandlers,
+    private val embeddingConfig: EmbeddingConfig,
     private val fridaEngine: FridaEngine,
     private val workDirectory: WorkDirectory,
 ) : ViewModel() {
@@ -83,6 +87,20 @@ class SettingsViewModel @Inject constructor(
     /** MCP 工具列表（名称 + 解释）。 */
     val mcpTools: List<McpToolHandlers.McpTool>
         get() = toolHandlers.tools.values.sortedBy { it.name }
+
+    /** 语义搜索 embedding 配置（API Key / 模型 / API 地址）。 */
+    val embeddingState: StateFlow<EmbeddingUiState> = combine(
+        embeddingConfig.apiKey,
+        embeddingConfig.model,
+        embeddingConfig.baseUrl,
+    ) { apiKey, model, baseUrl ->
+        EmbeddingUiState(
+            apiKey = apiKey,
+            model = model,
+            baseUrl = baseUrl,
+            configured = apiKey.isNotBlank(),
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, EmbeddingUiState())
 
     init {
         loadInstalledVersions()
@@ -174,6 +192,20 @@ class SettingsViewModel @Inject constructor(
 
     fun mcpSetEmuToolsEnabled(value: Boolean) {
         mcpConfig.setEmuToolsEnabled(value)
+    }
+
+    // ========== 语义搜索 embedding 配置 ==========
+
+    fun embeddingSetApiKey(value: String) {
+        embeddingConfig.setApiKey(value.trim())
+    }
+
+    fun embeddingSetModel(value: String) {
+        embeddingConfig.setModel(value)
+    }
+
+    fun embeddingSetBaseUrl(value: String) {
+        embeddingConfig.setBaseUrl(value)
     }
 
     // ========== 工作目录（App 级设置） ==========
@@ -427,6 +459,14 @@ data class McpUiState(
     val sseLocalUrl: String = "",
     val sseLanUrl: String = "",
     val errorMessage: String? = null,
+)
+
+/** 语义搜索 embedding 配置 UI 状态。 */
+data class EmbeddingUiState(
+    val apiKey: String = "",
+    val model: String = EmbeddingConfig.DEFAULT_MODEL,
+    val baseUrl: String = EmbeddingConfig.DEFAULT_BASE_URL,
+    val configured: Boolean = false,
 )
 
 /** MCP 配置快照（combine 中间值）。 */
