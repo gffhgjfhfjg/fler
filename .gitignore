@@ -32,6 +32,9 @@ fler-engines/
 # ── unicorn 源码与构建产物（scripts/build-unicorn.ps1 交叉编译）──
 /vendor/
 
+# ── 临时验证脚本（JVM 端镜像验证回打逻辑，仅本地）──
+/.tmp_test/
+
 # ── 开发/调研/工具目录或文档（不入库）──
 # 根目录除 README.md 外的其他 md（开发测试、调研、方案计划）全部忽略
 /*.md

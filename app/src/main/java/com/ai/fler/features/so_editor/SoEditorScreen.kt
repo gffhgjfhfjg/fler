@@ -157,6 +157,71 @@ fun SoEditorScreen(
         }
     }
 
+    // ==================== 回打 APK ====================
+    var showRepackDialog by remember { mutableStateOf(false) }
+    var pendingRepack by remember { mutableStateOf<RepackSelection?>(null) }
+
+    // SAF OpenDocument：导入自定义签名密钥库
+    val pickKeyLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let {
+            viewModel.importCustomKey(it) { ok ->
+                scope.launch {
+                    snackbarHostState.showSnackbar(if (ok) "密钥库已导入" else "密钥库导入失败")
+                }
+            }
+        }
+    }
+
+    // SAF CreateDocument：回打 APK 输出位置（APK MIME）
+    val createRepackApkLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/vnd.android.package-archive")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            pendingRepack?.let { sel ->
+                viewModel.repackApkToUri(
+                    uri = uri,
+                    sign = sel.sign,
+                    v1 = sel.v1,
+                    v2 = sel.v2,
+                    v3 = sel.v3,
+                    useCustomKey = sel.useCustomKey,
+                    alias = sel.alias,
+                    storePass = sel.storePass,
+                    keyPass = sel.keyPass,
+                )
+            }
+        }
+        pendingRepack = null
+    }
+
+    // 回打结果：成功 → Snackbar + 关弹窗；失败 → 弹窗内展示错误
+    val repackState by viewModel.repackState.collectAsStateWithLifecycle()
+    LaunchedEffect(repackState.successMessage) {
+        repackState.successMessage?.let {
+            snackbarHostState.showSnackbar(it)
+            showRepackDialog = false
+            viewModel.consumeRepackResult()
+        }
+    }
+
+    val repackInfo by viewModel.repackInfo.collectAsStateWithLifecycle()
+    val hasCustomKey by viewModel.hasCustomKey.collectAsStateWithLifecycle()
+    if (showRepackDialog) {
+        RepackApkDialog(
+            info = repackInfo,
+            state = repackState,
+            hasCustomKey = hasCustomKey,
+            onImportKey = { pickKeyLauncher.launch(arrayOf("*/*")) },
+            onRepack = { sel ->
+                pendingRepack = sel
+                createRepackApkLauncher.launch(sel.suggestedName)
+            },
+            onDismiss = { showRepackDialog = false },
+        )
+    }
+
     // 上下文进入（filePath 非空）：自动打开文件并定位到 initialOffset。
     // 方法模式下汇编只加载方法范围内的字节；已打开同一文件（Tab 间切换回来）只重新定位不重复加载。
     LaunchedEffect(filePath, initialOffset, methodLength) {
@@ -371,6 +436,15 @@ fun SoEditorScreen(
                                     val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
                                         .format(java.util.Date())
                                     createSoLauncher.launch("${name}_patched_$ts.so")
+                                }
+                            )
+                            // 回打 APK：补丁后的 SO 替换回 APK + 对齐 + 可选重签名
+                            DropdownMenuItem(
+                                text = { Text("回打 APK (对齐+重签名)") },
+                                onClick = {
+                                    showExportMenu = false
+                                    showRepackDialog = true
+                                    viewModel.loadRepackInfo()
                                 }
                             )
                             DropdownMenuItem(

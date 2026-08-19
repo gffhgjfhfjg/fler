@@ -41,6 +41,7 @@
    - 用 `assemble_instruction` 预览机器码，先问用户确认补丁内容；
    - 写 `patch_bytes`/`patch_instruction` 后可 `undo_patch` 回滚；`list_patches` 查看已打补丁；
    - 导出用 `export_patched_so`，然后提示用户从 `http://<host>:<port>/export/<文件名>` 下载（或 `GET /export` 列出）。
+   - **直接回打 APK**：`repack_apk(soPath=…)` 把补丁后的 so 替换回源 APK（16KB/4B 自动对齐 + 重签名，默认 v1+v2+v3 + 内置 debug 密钥；`sign=false` 可不签，`useCustomKey/alias/storePass` 换自定义密钥），输出同 export_patched_so。提示用户下载后需先卸载原 App 再安装（debug 重签名与原签名不一致）。
 7. **引擎/仿真按需开启**：`engine_*`（open/analyze/disassemble/xrefs/read_bytes 等 20 个）与 `emu_*`（xxx_open/call_function/run/step，默认关闭）仅在对 so 运行态/汇编级分析时使用；用完 `engine_close`/`emu_close` 释放。**注意**：对超大 `libapp.so` 跑 `engine_analyze`（Rizin 全量 aaa）内存/耗时都高、有 OOM 风险，函数定位优先 `engine_list_functions`/`engine_find_function_at`（内置 Blutter 合并结果）。
 8. **调用图**：真实交叉引用（`dart_call_edges`）在后台构建，`get_method_callers`/`callees`/`analyze_method` 返回 `graphBuilt/edgeCount/isBuilding`；图未就绪时不要断言「无调用者」。需要强制重建（建图逻辑升级/边异常）用 `dart_rebuild_call_graph`（先清空旧边再重建，同步等待返回边数）。
 

@@ -39,7 +39,7 @@ description: 分析目标 App 的单个 Dart 方法（逻辑、调用关系、�
      - 混淆方法控制流：`method_cfg(methodId=…)` 划基本块找所有返回点；`blr_call_sites(methodId=…)` 看间接跳转形态（isolate 属正常，静态不可解析）。
    - 字符串可能走 fallback：`list_strings` 返回非 0（甚至几万条）即 fallback 生效（未建 strings 表时从 pp_entries 挑引号字符串），别误判无字符串。
 5. **反汇编原始字节/确认指令**：`disassemble_range(soPath=…, offset=fileOffset, size=…, compact=true)`；或用引擎会话 `engine_open` → `engine_disassemble`/`engine_read_bytes`（Dart 库函数定位优先 `engine_find_function_at`）。
-6. **改补丁**（用户明确要求才做）：`read_so_bytes` → `assemble_instruction` 预览 → 向用户确认 → `patch_bytes`/`patch_instruction` → `export_patched_so`，并给出 `http://<host>:<port>/export/<文件名>` 下载地址。
+6. **改补丁**（用户明确要求才做）：`read_so_bytes` → `assemble_instruction` 预览 → 向用户确认 → `patch_bytes`/`patch_instruction` → `export_patched_so`，并给出 `http://<host>:<port>/export/<文件名>` 下载地址。用户要直接装回手机时改用 `repack_apk(soPath=…)`：补丁 so 替换回源 APK + 自动对齐 + 重签名（默认 v1+v2+v3/debug 密钥，可选自定义密钥或不签名），产物同 export 下载；提醒需卸载原 App 后再安装（签名不一致）。
 
 ## 输出格式
 

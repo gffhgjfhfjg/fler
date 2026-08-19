@@ -17,6 +17,7 @@ import com.ai.fler.core.jni.CapstoneBindings
 import com.ai.fler.core.jni.ElfParserBindings
 import com.ai.fler.core.jni.KeystoneBindings
 import com.ai.fler.core.service.AddressTranslator
+import com.ai.fler.core.service.ApkRepacker
 import com.ai.fler.core.service.WorkDirectory
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.AsmBlockDao
@@ -83,6 +84,7 @@ class McpToolHandlers @Inject constructor(
     private val semanticIndexManager: SemanticIndexManager,
     private val reportGenerator: com.ai.fler.core.analysis.AnalysisReportGenerator,
     private val workDirectory: WorkDirectory,
+    private val apkRepacker: ApkRepacker,
     @SuppressLint("StaticFieldLeak")
     @ApplicationContext private val context: Context,
 ) : McpResourceProvider {
@@ -215,6 +217,15 @@ class McpToolHandlers @Inject constructor(
 
     private fun JsonObject.str(key: String): String? =
         (this[key] as? JsonPrimitive)?.contentOrNull
+
+    private fun JsonObject.bool(key: String): Boolean? =
+        (this[key] as? JsonPrimitive)?.contentOrNull?.let {
+            when (it.lowercase()) {
+                "true", "1" -> true
+                "false", "0" -> false
+                else -> null
+            }
+        }
 
     // ========== 分析工具 ==========
 
@@ -2570,6 +2581,93 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
                 put("size", result.size)
                 put("destPath", result.path)
                 put("message", result.message)
+            }
+        },
+        McpTool(
+            name = "repack_apk",
+            description = "把（已补丁的）so 回打进所属项目的源 APK：替换 lib/<abi>/ 下对应条目 + 未压缩条目 16KB/4B 自动对齐 + 重签名（默认 v1+v2+v3、内置 debug 密钥；可关签名或换自定义密钥）。输出位置同 export_patched_so：优先设置的工作目录，兜底 cacheDir/so_export（经 GET /export/<文件名> 可下载）。so 必须属于某个已导入项目（libraries/analyses 反查源 APK）",
+            inputSchema = buildJsonObject {
+                putJsonObject("properties") {
+                    putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径（需已应用补丁）") }
+                    putJsonObject("sign") { put("type", "boolean"); put("description", "是否重签名（默认 true）") }
+                    putJsonObject("v1") { put("type", "boolean"); put("description", "v1 JAR 签名（默认 true）") }
+                    putJsonObject("v2") { put("type", "boolean"); put("description", "v2 APK 签名（默认 true）") }
+                    putJsonObject("v3") { put("type", "boolean"); put("description", "v3 APK 签名（默认 true，依赖 v2）") }
+                    putJsonObject("useCustomKey") { put("type", "boolean"); put("description", "使用 App 内已导入的自定义密钥（默认 false 用内置 debug 密钥）") }
+                    putJsonObject("alias") { put("type", "string"); put("description", "自定义密钥别名（可选，空=自动选择）") }
+                    putJsonObject("storePass") { put("type", "string"); put("description", "自定义密钥库密码") }
+                    putJsonObject("keyPass") { put("type", "string"); put("description", "自定义密钥密码（可选，缺省同密钥库密码）") }
+                    putJsonObject("destDir") { put("type", "string"); put("description", "目标目录绝对路径（可选，覆盖默认导出位置）") }
+                    putJsonObject("destName") { put("type", "string"); put("description", "导出 APK 文件名（可选，默认 <原APK名>_patched.apk）") }
+                }
+                putJsonArray("required") { add("soPath") }
+            }
+        ) { p ->
+            val so = p.str("soPath") ?: throw McpToolException("soPath 缺失")
+            val src = java.io.File(so)
+            if (!src.exists() || !src.isFile) throw McpToolException("源 so 不存在: $so")
+
+            val progress = currentProgress()
+            progress.report(0.02f, "定位源 APK")
+            val apkPath = apkRepacker.resolveApkPathForSo(so)
+                ?: throw McpToolException("未找到该 so 所属项目的源 APK（SAF 直接打开的游离 so 不支持回打）")
+            val apkFile = java.io.File(apkPath)
+            if (!apkFile.isFile) throw McpToolException("源 APK 文件不存在: $apkPath")
+
+            val useCustomKey = p.bool("useCustomKey") ?: false
+            val keySource = if (useCustomKey) {
+                if (apkRepacker.customKeystoreFile.length() == 0L) {
+                    throw McpToolException("未导入自定义密钥（请先在 SO 编辑器「回打 APK」弹窗导入）")
+                }
+                ApkRepacker.KeySource.Custom(
+                    storeFile = apkRepacker.customKeystoreFile,
+                    storePassword = p.str("storePass").orEmpty(),
+                    keyAlias = p.str("alias").orEmpty(),
+                    keyPassword = p.str("keyPass").orEmpty(),
+                )
+            } else {
+                ApkRepacker.KeySource.Debug
+            }
+
+            val sign = p.bool("sign") ?: true
+            val options = ApkRepacker.SignOptions(
+                enabled = sign,
+                v1 = p.bool("v1") ?: true,
+                v2 = p.bool("v2") ?: true,
+                v3 = p.bool("v3") ?: true,
+            )
+
+            val output = apkRepacker.repackToTempFile(
+                apkFile = apkFile,
+                patchedSo = src,
+                signOptions = options,
+                keySource = keySource,
+            ) { frac, stage ->
+                progress.report(rangeProgress(frac, 0.05f, 0.7f), stage)
+            }
+            if (!output.result.ok) {
+                output.file.delete()
+                throw McpToolException(output.result.error ?: "回打失败")
+            }
+
+            try {
+                val destName = p.str("destName")?.takeIf { it.isNotBlank() }
+                    ?: apkFile.name.removeSuffix(".apk") + "_patched.apk"
+                progress.report(0.75f, "导出 $destName")
+                val result = exportPatchedSo(output.file, destName, p.str("destDir").orEmpty())
+                buildJsonObject {
+                    put("ok", result.ok)
+                    put("fileName", destName)
+                    put("size", result.size)
+                    put("destPath", result.path)
+                    put("apkEntry", output.result.entryName)
+                    put("signed", output.result.signed)
+                    putJsonArray("schemes") { output.result.schemes.forEach { add(it) } }
+                    put("durationMs", output.result.durationMs)
+                    put("message", result.message)
+                }
+            } finally {
+                output.file.delete()
             }
         },
     )

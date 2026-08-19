@@ -127,6 +127,9 @@ dependencies {
     // DocumentFile (SAF)
     implementation(libs.androidx.documentfile)
 
+    // APK 重签名（apksig，自包含 PKCS7/ASN.1 实现，无 BouncyCastle 依赖）
+    implementation(libs.apksig)
+
     // kotlinx-serialization（MCP JSON-RPC）
     implementation(libs.kotlinx.serialization.json)
 

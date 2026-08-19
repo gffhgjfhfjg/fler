@@ -21,4 +21,8 @@ interface LibraryDao {
 
     @Query("SELECT * FROM libraries WHERE analysis_id = :analysisId ORDER BY library_name")
     suspend fun getByAnalysisIdList(analysisId: Long): List<Library>
+
+    /** 按 so 绝对路径反查库记录（APK 回打时定位所属分析/项目）。 */
+    @Query("SELECT * FROM libraries WHERE path = :path LIMIT 1")
+    suspend fun getByPath(path: String): Library?
 }

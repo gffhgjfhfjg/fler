@@ -20,6 +20,7 @@ import com.ai.fler.core.analysis.SymbolInfo
 import com.ai.fler.core.analysis.Xref
 import com.ai.fler.core.analysis.XrefType
 import com.ai.fler.core.analysis.assembler.KeystoneAssembler
+import com.ai.fler.core.service.ApkRepacker
 import com.ai.fler.core.service.BackupManager
 import com.ai.fler.core.service.PatchExporter
 import com.ai.fler.data.dao.AnalysisDao
@@ -45,12 +46,13 @@ import javax.inject.Inject
 
 @HiltViewModel
 class SoEditorViewModel @Inject constructor(
-    savedStateHandle: SavedStateHandle,
+    private val savedStateHandle: SavedStateHandle,
     @ApplicationContext private val appContext: Context,
     private val session: AnalysisSession,
     private val backupManager: BackupManager,
     private val keystoneAssembler: KeystoneAssembler,
     private val patchExporter: PatchExporter,
+    private val apkRepacker: ApkRepacker,
     private val dartMethodDao: DartMethodDao,
     private val soEditorCache: SoEditorCache,
     private val sessionHolder: SoEditorSessionHolder,
@@ -1145,6 +1147,177 @@ class SoEditorViewModel @Inject constructor(
         if (!_uiState.value.isFileOpen) return false
         if (backupManager.getPatchRecords().isEmpty()) return false
         return patchExporter.exportSoToWorkDir(File(_uiState.value.filePath))
+    }
+
+    // ==================================================================
+    // 回打 APK（补丁后的 SO → APK + 对齐 + 可选重签名）
+    // ==================================================================
+
+    /** 回打前置信息（弹窗展示 + 可用性判断）。 */
+    data class RepackInfo(
+        val loading: Boolean = false,
+        val apkPath: String = "",
+        val apkName: String = "",
+        val apkSize: Long = 0L,
+        val soEntryName: String = "",
+        val patchCount: Int = 0,
+        /** 无补丁 / 找不到源 APK / APK 文件缺失 时不可用。 */
+        val available: Boolean = false,
+        val reason: String = "",
+    )
+
+    /** 回打执行状态。 */
+    data class RepackState(
+        val running: Boolean = false,
+        val stage: String = "",
+        val progress: Float = 0f,
+        val error: String? = null,
+        /** 一次性成功消息（UI 消费后调 consumeRepackResult 清空）。 */
+        val successMessage: String? = null,
+    )
+
+    private val _repackInfo = MutableStateFlow(RepackInfo())
+    val repackInfo: StateFlow<RepackInfo> = _repackInfo.asStateFlow()
+
+    private val _repackState = MutableStateFlow(RepackState())
+    val repackState: StateFlow<RepackState> = _repackState.asStateFlow()
+
+    /** 自定义密钥是否已导入。 */
+    private val _hasCustomKey = MutableStateFlow(false)
+    val hasCustomKey: StateFlow<Boolean> = _hasCustomKey.asStateFlow()
+
+    /** 加载回打前置信息（打开弹窗时调用）。 */
+    fun loadRepackInfo() {
+        val soPath = _uiState.value.filePath
+        val patchCount = backupManager.getPatchRecords().size
+        if (!_uiState.value.isFileOpen || soPath.isBlank()) {
+            _repackInfo.value = RepackInfo(patchCount = patchCount, reason = "未打开文件")
+            return
+        }
+        if (patchCount == 0) {
+            _repackInfo.value = RepackInfo(patchCount = 0, reason = "无补丁记录，无内容可回打")
+            return
+        }
+        _repackInfo.value = _repackInfo.value.copy(loading = true, patchCount = patchCount)
+        viewModelScope.launch {
+            val apkPath = apkRepacker.resolveApkPathForSo(soPath)
+            val info = if (apkPath == null) {
+                RepackInfo(
+                    patchCount = patchCount,
+                    reason = "未找到该 SO 所属项目的源 APK（SAF 直接打开的游离 SO 不支持回打）",
+                )
+            } else {
+                val apkFile = File(apkPath)
+                val entry = apkRepacker.resolveSoEntry(
+                    apkFile, File(soPath).name, soFileLen(soPath)
+                )
+                RepackInfo(
+                    apkPath = apkPath,
+                    apkName = apkFile.name,
+                    apkSize = apkFile.length(),
+                    soEntryName = entry ?: "",
+                    patchCount = patchCount,
+                    available = entry != null,
+                    reason = if (entry == null) "APK 内未找到 ${File(soPath).name} 对应条目" else "",
+                )
+            }
+            _repackInfo.value = info
+            _hasCustomKey.value = apkRepacker.customKeystoreFile.length() > 0
+        }
+    }
+
+    /** 当前 SO 工作文件大小（条目匹配用；补丁不改大小）。 */
+    private fun soFileLen(soPath: String): Long = runCatching { File(soPath).length() }.getOrDefault(0L)
+
+    /** 导入自定义签名密钥库（SAF 选中后复制到私有目录）。 */
+    fun importCustomKey(uri: Uri, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val ok = runCatching {
+                appContext.contentResolver.openInputStream(uri)?.use { input ->
+                    apkRepacker.importCustomKeystore(input)
+                } != null
+            }.getOrDefault(false)
+            _hasCustomKey.value = ok && apkRepacker.customKeystoreFile.length() > 0
+            onResult(ok)
+        }
+    }
+
+    /**
+     * 回打 APK 并写入 SAF 目标。
+     *
+     * @param uri CreateDocument 返回的 APK 输出 Uri
+     * @param sign 是否签名
+     * @param v1/v2/v3 签名方案开关
+     * @param useCustomKey 使用自定义密钥（否则内置 debug 密钥）
+     * @param alias/storePass/keyPass 自定义密钥参数
+     */
+    fun repackApkToUri(
+        uri: Uri,
+        sign: Boolean,
+        v1: Boolean,
+        v2: Boolean,
+        v3: Boolean,
+        useCustomKey: Boolean,
+        alias: String,
+        storePass: String,
+        keyPass: String,
+    ) {
+        val info = _repackInfo.value
+        if (!info.available) return
+        val soFile = File(_uiState.value.filePath)
+        if (!soFile.exists()) return
+
+        _repackState.value = RepackState(running = true, stage = "准备回打")
+        viewModelScope.launch {
+            try {
+                val keySource = if (useCustomKey) {
+                    ApkRepacker.KeySource.Custom(
+                        storeFile = apkRepacker.customKeystoreFile,
+                        storePassword = storePass,
+                        keyAlias = alias,
+                        keyPassword = keyPass,
+                    )
+                } else {
+                    ApkRepacker.KeySource.Debug
+                }
+
+                val output = apkRepacker.repackToTempFile(
+                    apkFile = File(info.apkPath),
+                    patchedSo = soFile,
+                    signOptions = ApkRepacker.SignOptions(enabled = sign, v1 = v1, v2 = v2, v3 = v3),
+                    keySource = keySource,
+                ) { p, stage ->
+                    _repackState.value = _repackState.value.copy(progress = p, stage = stage)
+                }
+
+                if (!output.result.ok) {
+                    _repackState.value = RepackState(error = output.result.error)
+                    return@launch
+                }
+
+                _repackState.value = _repackState.value.copy(
+                    progress = 0.95f, stage = "写出 APK"
+                )
+                val size = appContext.contentResolver.openOutputStream(uri)?.use { os ->
+                    apkRepacker.copyToStream(output.file, os)
+                } ?: throw IllegalStateException("无法打开输出流")
+
+                output.file.delete()
+                val r = output.result
+                val schemeText = if (r.signed) r.schemes.joinToString("+") else "未签名"
+                _repackState.value = RepackState(
+                    successMessage = "回打完成（${schemeText}，${size / 1024 / 1024}MB，${r.durationMs / 1000}s）",
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "回打 APK 失败", e)
+                _repackState.value = RepackState(error = "回打失败: ${e.message}")
+            }
+        }
+    }
+
+    /** 消费一次性回打结果消息。 */
+    fun consumeRepackResult() {
+        _repackState.value = RepackState()
     }
 
     // ==================================================================

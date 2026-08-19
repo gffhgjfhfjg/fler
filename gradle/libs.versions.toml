@@ -15,6 +15,8 @@ okhttp = "4.12.0"
 commonsCompress = "1.26.1"
 xz = "1.10"
 documentfile = "1.0.1"
+# 与 AGP 版本保持一致（Google Maven 独立发布，自包含无 BouncyCastle 依赖）
+apksig = "9.3.1"
 junit = "4.13.2"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
@@ -51,6 +53,8 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 commons-compress = { group = "org.apache.commons", name = "commons-compress", version.ref = "commonsCompress" }
 xz = { group = "org.tukaani", name = "xz", version.ref = "xz" }
 androidx-documentfile = { group = "androidx.documentfile", name = "documentfile", version.ref = "documentfile" }
+# APK 重签名（v1/v2/v3），设备端回打 APK 用
+apksig = { group = "com.android.tools.build", name = "apksig", version.ref = "apksig" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
