@@ -4,6 +4,9 @@ import android.util.Log
 import com.ai.fler.core.jni.FridaBindings
 import com.ai.fler.core.log.AppLogger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -15,10 +18,11 @@ import javax.inject.Singleton
  * 生命周期：
  * - [ensureReady]：校验 frida-core 客户端可用 → root 设备上把 frida-server
  *   部署/拉起（[RootAccess]）→ [FridaBindings.initialize] 启动本地客户端 worker
- * - [attach] / [spawnAndAttach]：得到 sessionHandle
+ * - [attach] / [spawnAndAttach]：得到 sessionHandle；成功后自动开始采集目标进程
+ *   logcat（[TargetLogCollector]，detach/kill 时停止）
  * - [runHook]：在 session 上创建 + 加载 Interceptor 脚本（[FridaScriptBuilder]）
- * - 脚本 send() 事件经 [FridaBindings.messageListener] 进入本引擎 [EventRing]，
- *   MCP 侧 [events] 拉取
+ * - 脚本 send() 事件经 [FridaBindings.messageListener] 进入本引擎事件环形缓冲，
+ *   MCP 侧 [events] 拉取，UI 侧观察 [eventsVersion] 后拉取
  *
  * 全部 JNI/部署调用在 Dispatchers.IO；事件回调由 native marshal 线程触发，
  * 环形缓冲线程安全，UI/MCP 可任意线程消费。
@@ -26,6 +30,7 @@ import javax.inject.Singleton
 @Singleton
 class FridaEngine @Inject constructor(
     private val rootAccess: RootAccess,
+    private val targetLogCollector: TargetLogCollector,
     private val appLogger: AppLogger,
 ) {
     companion object {
@@ -72,6 +77,10 @@ class FridaEngine @Inject constructor(
     private val lock = Any()
     private var initialized = false
     private var totalEvents = 0L
+
+    /** 事件缓冲版本号：新增/清空事件时 +1，UI 观察后调 [events] 拉取。 */
+    private val _eventsVersion = MutableStateFlow(0L)
+    val eventsVersion: StateFlow<Long> = _eventsVersion.asStateFlow()
 
     init {
         // native marshal 线程 → 事件缓冲（只读队列，无同步负担）
@@ -147,13 +156,16 @@ class FridaEngine @Inject constructor(
 
     // ---------- 会话 ----------
 
-    /** attach 到已运行进程，返回 sessionHandle（0=失败）。 */
+    /** attach 到已运行进程，返回 sessionHandle（0=失败）。成功后自动开始采集目标 logcat。 */
     suspend fun attach(pid: Long): Long = withContext(Dispatchers.IO) {
         ensureReady()
         val h = FridaBindings.attach(pid)
         if (h != 0L) {
             sessions[h] = SessionInfo(h, pid, null, System.currentTimeMillis())
             appLogger.info(TAG, "attach pid=$pid -> session=$h")
+            // 自动采集目标应用 logcat（失败不影响会话本身）
+            runCatching { targetLogCollector.start(pid) }
+                .onFailure { appLogger.warn(TAG, "目标日志采集启动失败: ${it.message}") }
         }
         h
     }
@@ -223,20 +235,27 @@ class FridaEngine @Inject constructor(
     /** 清空事件环形缓冲（便于聚焦新一轮命中）。 */
     fun clearEvents() {
         synchronized(lock) { events.clear() }
+        _eventsVersion.value = _eventsVersion.value + 1
     }
 
     // ---------- 收尾 ----------
 
     suspend fun detach(sessionHandle: Long): Boolean = withContext(Dispatchers.IO) {
         ensureReady()
+        val pid = sessions[sessionHandle]?.pid
         val ok = FridaBindings.detach(sessionHandle)
-        if (ok) sessions.remove(sessionHandle)
+        if (ok) {
+            sessions.remove(sessionHandle)
+            pid?.let { targetLogCollector.stopFor(it) }
+        }
         ok
     }
 
     suspend fun kill(pid: Long): Boolean = withContext(Dispatchers.IO) {
         ensureReady()
-        FridaBindings.kill(pid)
+        val ok = FridaBindings.kill(pid)
+        if (ok) targetLogCollector.stopFor(pid)
+        ok
     }
 
     /** 当前记录的会话列表。 */
@@ -274,5 +293,6 @@ class FridaEngine @Inject constructor(
             )
             while (events.size > MAX_EVENTS) events.removeFirst()
         }
+        _eventsVersion.value = _eventsVersion.value + 1
     }
 }

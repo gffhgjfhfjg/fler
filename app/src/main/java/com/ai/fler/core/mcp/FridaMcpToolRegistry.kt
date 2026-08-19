@@ -5,6 +5,7 @@ import com.ai.fler.core.frida.FridaEngine
 import com.ai.fler.core.frida.FridaScriptBuilder
 import com.ai.fler.core.frida.HookScriptRepository
 import com.ai.fler.core.frida.RootAccess
+import com.ai.fler.core.frida.TargetLogCollector
 import com.ai.fler.core.jni.FridaBindings
 import com.ai.fler.data.dao.DartMethodDao
 import kotlinx.coroutines.flow.first
@@ -18,6 +19,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import kotlinx.serialization.json.putJsonArray
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -27,10 +29,10 @@ import javax.inject.Singleton
  * 工作流：
  * 1. frida_ready：确保 root + frida-server + 本地客户端就绪
  * 2. frida_list_processes / frida_list_apps：选目标
- * 3. frida_attach(pid) 或 frida_spawn(pkg) → sessionHandle
+ * 3. frida_attach(pid) 或 frida_spawn(pkg) → sessionHandle（成功后自动开始采集目标 logcat）
  * 4. frida_hook(session, analysisId, methodName) → 自动从静态分析库取 vaddr 插桩；
  *    或 frida_use_script(session, scriptId) 加载「Hook 脚本」页里落地的自定义 JS
- * 5. frida_events：拉取 hook 命中事件
+ * 5. frida_events：拉取 hook 命中事件；frida_target_logs：拉取目标应用 logcat
  * 6. frida_resume/kill/detach：生命周期收尾
  */
 @Singleton
@@ -39,6 +41,7 @@ class FridaMcpToolRegistry @Inject constructor(
     private val rootAccess: RootAccess,
     private val dartMethodDao: DartMethodDao,
     private val hookScriptRepository: HookScriptRepository,
+    private val targetLogCollector: TargetLogCollector,
 ) {
 
     fun buildTools(): List<McpToolHandlers.McpTool> = listOf(
@@ -369,6 +372,40 @@ class FridaMcpToolRegistry @Inject constructor(
             description = "清空事件环形缓冲，便于聚焦新一轮命中（之后 frida_events 只返回新事件）",
         ) { _ ->
             engine.clearEvents()
+            buildJsonObject { put("cleared", true) }
+        },
+        tool(
+            name = "frida_target_logs",
+            description = "拉取目标应用（被 hook 进程）的 logcat 日志（frida_attach/frida_spawn 成功后自动开始采集，detach/kill 自动停止；环形缓冲 3000 条）。用途：观察目标 App 的 print/debugPrint/native 日志，配合 hook 事件定位业务行为。返回 {collecting,pid,count,logs:[{ts,level,tag,message}]}",
+            schema = mapOf(
+                "limit" to "返回条数上限（默认 200，最大 3000）",
+                "level" to "可选级别过滤 V/D/I/W/E（缺省全部）"
+            )
+        ) { p ->
+            val limit = p["limit"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()?.coerceIn(1, 3000) ?: 200
+            val level = p["level"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            val logs = targetLogCollector.snapshot(limit, level)
+            buildJsonObject {
+                put("collecting", targetLogCollector.isCollecting())
+                put("pid", targetLogCollector.activePid())
+                put("count", logs.size)
+                putJsonArray("logs") {
+                    logs.forEach { e ->
+                        addJsonObject {
+                            put("ts", e.timestamp)
+                            put("level", e.level)
+                            put("tag", e.tag)
+                            put("message", e.message)
+                        }
+                    }
+                }
+            }
+        },
+        tool(
+            name = "frida_target_log_clear",
+            description = "清空目标应用 logcat 采集缓冲（不动采集进程，之后 frida_target_logs 只返回新日志）",
+        ) { _ ->
+            targetLogCollector.clear()
             buildJsonObject { put("cleared", true) }
         },
         tool(

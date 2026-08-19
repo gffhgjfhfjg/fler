@@ -44,17 +44,23 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ai.fler.core.frida.FridaEngine
+import com.ai.fler.core.frida.TargetLogCollector
 import com.ai.fler.core.log.AppLogEntry
 import com.ai.fler.core.mcp.McpLogEntry
+import org.json.JSONObject
 
 /**
- * 日志页：双 Tab。
+ * 日志页：四 Tab。
  *
  * 1. MCP 日志：MCP 服务器连接 / 工具调用 / 错误（[McpLogger] 内存队列）
- * 2. 应用日志：本进程 logcat 全量日志——工具更新、Flutter 解析、
- *    SO 分析、Rizin/Capstone/Keystone/Unicorn 引擎分析等所有模块输出
+ * 2. 应用日志：fler 自身各模块输出（引擎下载、Flutter 解析、SO 分析等，
+ *    [AppLogger] 内存队列）
+ * 3. Frida：hook 命中 / 脚本 send() 事件（[FridaEngine] 事件环形缓冲）
+ * 4. 目标应用：被 hook 进程的 logcat（attach/spawn 后自动采集，
+ *    [TargetLogCollector] 环形缓冲）
  *
- * 共通交互：级别过滤、新日志自动滚底、顶栏清空按钮（作用于当前 Tab）。
+ * 共通交互：级别过滤（按 Tab）、新日志自动滚底、顶栏清空按钮（作用于当前 Tab）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,6 +68,8 @@ fun McpLogScreen(
     onBack: (() -> Unit)? = null,
     viewModel: McpLogViewModel = hiltViewModel(),
     appLogViewModel: AppLogViewModel = hiltViewModel(),
+    fridaLogViewModel: FridaLogViewModel = hiltViewModel(),
+    targetLogViewModel: TargetLogViewModel = hiltViewModel(),
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
 
@@ -78,7 +86,12 @@ fun McpLogScreen(
                 },
                 actions = {
                     IconButton(onClick = {
-                        if (selectedTab == 0) viewModel.clear() else appLogViewModel.clear()
+                        when (selectedTab) {
+                            0 -> viewModel.clear()
+                            1 -> appLogViewModel.clear()
+                            2 -> fridaLogViewModel.clear()
+                            else -> targetLogViewModel.clear()
+                        }
                     }) {
                         Icon(Icons.Default.Delete, contentDescription = "清空")
                     }
@@ -102,11 +115,23 @@ fun McpLogScreen(
                     onClick = { selectedTab = 1 },
                     text = { Text("应用日志") }
                 )
+                Tab(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    text = { Text("Frida") }
+                )
+                Tab(
+                    selected = selectedTab == 3,
+                    onClick = { selectedTab = 3 },
+                    text = { Text("目标应用") }
+                )
             }
 
             when (selectedTab) {
                 0 -> McpLogContent(viewModel)
-                else -> AppLogContent(appLogViewModel)
+                1 -> AppLogContent(appLogViewModel)
+                2 -> FridaLogContent(fridaLogViewModel)
+                else -> TargetLogContent(targetLogViewModel)
             }
         }
     }
@@ -172,7 +197,7 @@ private fun McpLogContent(viewModel: McpLogViewModel) {
 }
 
 // ==================================================================
-// Tab 2：应用日志（本进程 logcat）
+// Tab 2：应用日志（fler 自身模块输出）
 // ==================================================================
 
 @Composable
@@ -251,6 +276,135 @@ private fun AppLogContent(viewModel: AppLogViewModel) {
 }
 
 // ==================================================================
+// Tab 3：Frida 事件日志（hook 命中 / 脚本 send()）
+// ==================================================================
+
+@Composable
+private fun FridaLogContent(viewModel: FridaLogViewModel) {
+    val entries by viewModel.entries.collectAsStateWithLifecycle()
+    val listState = rememberLazyListState()
+
+    // 新事件自动滚底
+    LaunchedEffect(entries.size) {
+        if (entries.isNotEmpty()) {
+            listState.scrollToItem(entries.size - 1)
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (entries.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = "暂无 Frida 事件\nattach 目标并加载 hook 脚本后，命中/脚本输出在此显示",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(vertical = 4.dp)
+            ) {
+                items(entries, key = { it.ts.toString() + it.scriptHandle + it.json.hashCode() }) { entry ->
+                    FridaLogRow(entry)
+                }
+            }
+        }
+    }
+}
+
+// ==================================================================
+// Tab 4：目标应用日志（被 hook 进程的 logcat）
+// ==================================================================
+
+@Composable
+private fun TargetLogContent(viewModel: TargetLogViewModel) {
+    val entries by viewModel.entries.collectAsStateWithLifecycle()
+    val activePid by viewModel.activePid.collectAsStateWithLifecycle()
+    val filter by viewModel.filter.collectAsStateWithLifecycle()
+    val query by viewModel.query.collectAsStateWithLifecycle()
+    val listState = rememberLazyListState()
+
+    val filtered = remember(entries, filter, query) {
+        var list = if (filter == "ALL") entries else entries.filter { it.level == filter }
+        if (query.isNotBlank()) {
+            list = list.filter {
+                it.tag.contains(query, true) || it.message.contains(query, true)
+            }
+        }
+        list
+    }
+
+    // 新日志自动滚底
+    LaunchedEffect(filtered.size) {
+        if (filtered.isNotEmpty()) {
+            listState.scrollToItem(filtered.size - 1)
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // 采集状态条
+        Text(
+            text = if (activePid > 0) "采集中 · pid=$activePid" else "未采集：attach/spawn 目标后自动开始",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (activePid > 0) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf("ALL" to "全部", "E" to "错误", "W" to "警告", "I" to "信息", "D" to "调试", "V" to "Verbose")
+                .forEach { (value, label) ->
+                    FilterChip(
+                        selected = filter == value,
+                        onClick = { viewModel.setFilter(value) },
+                        label = { Text(label) }
+                    )
+                }
+        }
+
+        OutlinedTextField(
+            value = query,
+            onValueChange = { viewModel.setQuery(it) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .height(52.dp),
+            placeholder = { Text("搜索 tag 或内容…", style = MaterialTheme.typography.bodySmall) },
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodySmall,
+        )
+
+        if (filtered.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = if (entries.isEmpty()) "暂无目标应用日志" else "无匹配日志",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(vertical = 4.dp)
+            ) {
+                items(filtered, key = { it.seq }) { entry ->
+                    TargetLogRow(entry)
+                }
+            }
+        }
+    }
+}
+
+// ==================================================================
 // 日志行
 // ==================================================================
 
@@ -314,6 +468,103 @@ private fun McpLogRow(entry: McpLogEntry) {
 
 @Composable
 private fun AppLogRow(entry: AppLogEntry) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 1.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = entry.level,
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = levelColor(entry.level),
+            modifier = Modifier.padding(end = 6.dp)
+        )
+        Text(
+            text = remember(entry.timestamp) {
+                SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
+                    .format(Date(entry.timestamp))
+            },
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(end = 6.dp)
+        )
+        Text(
+            text = entry.tag,
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(end = 6.dp)
+        )
+        Text(
+            text = entry.message,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+@Composable
+private fun FridaLogRow(entry: FridaEngine.FridaEvent) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            // 事件类型（enter/leave/hook/system/…），未知则显示 script 句柄
+            val type = remember(entry.json) {
+                runCatching { JSONObject(entry.json).optString("type") }.getOrNull().orEmpty()
+                    .ifBlank { "msg" }
+            }
+            Text(
+                text = type,
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = levelColor(when (type) {
+                    "error", "leave" -> "E"
+                    "enter", "hook" -> "I"
+                    else -> "D"
+                }),
+                modifier = Modifier.padding(end = 8.dp)
+            )
+            Text(
+                text = timeFormat.format(Date(entry.ts)),
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 8.dp)
+            )
+            Text(
+                text = "s=${entry.sessionHandle} scr=${entry.scriptHandle}",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 8.dp)
+            )
+        }
+        Text(
+            text = entry.json,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 8.dp, top = 1.dp)
+        )
+    }
+}
+
+@Composable
+private fun TargetLogRow(entry: TargetLogCollector.TargetLogEntry) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
