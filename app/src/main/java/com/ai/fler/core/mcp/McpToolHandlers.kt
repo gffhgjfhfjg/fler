@@ -32,6 +32,7 @@ import com.ai.fler.data.dao.EnumMapDao
 import com.ai.fler.features.mcp.McpPatchService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonArrayBuilder
@@ -2705,7 +2706,7 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
             if (methods.size > 50) sb.append("- …另有 ${methods.size - 50} 个方法（略，用 get_class 查全量）\n")
             sb.append("\n")
         }
-        sb.toString()
+        return sb.toString()
     }
 
     companion object {

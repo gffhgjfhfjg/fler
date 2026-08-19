@@ -6,6 +6,7 @@ import com.ai.fler.data.dao.DartMethodDao
 import com.ai.fler.data.dao.DartClassDao
 import com.ai.fler.data.dao.PpEntryDao
 import com.ai.fler.data.dao.ProjectDao
+import com.ai.fler.data.dao.MethodWithClass
 import com.ai.fler.data.entity.PpEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -208,7 +209,7 @@ class AnalysisReportGenerator @Inject constructor(
         sb.append("按命名特征（aes/des/rc4/rsa/md5/sha/hmac/sign/cipher/crypt/base64…）扫描类名与方法名。\n\n")
 
         // 用已有的 SQL LIKE 搜索逐个模式查（复用索引与下推，避免全量载入方法表）
-        val seen = LinkedHashMap<Long, DartMethodDao.MethodWithClass>()
+        val seen = LinkedHashMap<Long, MethodWithClass>()
         for (pattern in cryptoPatterns) {
             val rows = dartMethodDao.searchMethodsWithClass(analysisId, pattern, null, 100, 0)
             rows.forEach { if (seen.size < max * 2) seen.putIfAbsent(it.method.id, it) }
