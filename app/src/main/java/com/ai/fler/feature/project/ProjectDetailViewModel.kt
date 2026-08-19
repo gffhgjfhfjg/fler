@@ -5,7 +5,9 @@ import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ai.fler.core.analysis.AnalysisReportGenerator
 import com.ai.fler.core.analysis.DartCallGraphBuilder
+import com.ai.fler.core.service.WorkDirectory
 import com.ai.fler.data.AppDatabase
 import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.ProjectDao
@@ -35,7 +37,9 @@ class ProjectDetailViewModel @Inject constructor(
     private val analysisDao: AnalysisDao,
     private val appDatabase: AppDatabase,
     private val callGraphBuilder: DartCallGraphBuilder,
-    private val analysisRunner: AnalysisRunner
+    private val analysisRunner: AnalysisRunner,
+    private val reportGenerator: AnalysisReportGenerator,
+    private val workDirectory: WorkDirectory,
 ) : ViewModel() {
 
     val projectId: Long = savedStateHandle["projectId"] ?: 0L
@@ -52,6 +56,68 @@ class ProjectDetailViewModel @Inject constructor(
     /** 错误消息（一次性事件，UI 层 snackbar 消费后可清空）。 */
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    /** 报告生成状态：null=空闲，true=生成中，Pair<文件名,字符数>=完成。 */
+    private val _reportState = MutableStateFlow<Any?>(null)
+    val reportState: StateFlow<Any?> = _reportState.asStateFlow()
+
+    /** 消费报告状态（UI 展示后调用）。 */
+    fun consumeReportState() {
+        _reportState.value = null
+    }
+
+    /**
+     * 一键生成 Markdown 逆向报告（最新一条成功分析）。
+     * 生成后写入工作目录（未设置则 App 缓存 so_export）。
+     */
+    fun generateReport() {
+        viewModelScope.launch {
+            _reportState.value = true
+            try {
+                val latest = _analyses.value.firstOrNull { it.resultCode == Analysis.RESULT_SUCCESS }
+                if (latest == null) {
+                    _reportState.value = null
+                    _errorMessage.value = "暂无可报告的分析（需先完成一次成功分析）"
+                    return@launch
+                }
+                val report = reportGenerator.generate(latest.id)
+                if (report == null) {
+                    _reportState.value = null
+                    _errorMessage.value = "报告生成失败：分析 ${latest.id} 不存在"
+                    return@launch
+                }
+                val saved = saveReportToWorkDir(latest.id, report)
+                _reportState.value = saved to report.length
+                Log.i(TAG, "报告已生成: analysis=${latest.id}, ${report.length} chars, saved=$saved")
+            } catch (e: Exception) {
+                Log.e(TAG, "报告生成失败", e)
+                _reportState.value = null
+                _errorMessage.value = "报告生成失败: ${e.message}"
+            }
+        }
+    }
+
+    /** 报告落盘工作目录（SAF，未设置回退 cacheDir/so_export）。返回落盘文件名或 null。 */
+    private suspend fun saveReportToWorkDir(analysisId: Long, content: String): String? =
+        withContext(Dispatchers.IO) {
+            val fileName = "fler_report_$analysisId.md"
+            runCatching {
+                val doc = workDirectory.asDocumentFile()
+                if (doc != null && doc.canWrite()) {
+                    doc.findFile(fileName)?.delete()
+                    val child = doc.createFile("text/markdown", fileName) ?: return@runCatching null
+                    context.contentResolver.openOutputStream(child.uri)?.use { os ->
+                        os.write(content.toByteArray(Charsets.UTF_8))
+                        os.flush()
+                    }
+                    fileName
+                } else {
+                    val dir = File(context.cacheDir, "so_export").apply { mkdirs() }
+                    File(dir, fileName).writeText(content, Charsets.UTF_8)
+                    fileName
+                }
+            }.getOrNull()
+        }
 
     init {
         load()

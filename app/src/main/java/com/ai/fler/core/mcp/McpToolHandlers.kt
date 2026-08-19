@@ -78,6 +78,7 @@ class McpToolHandlers @Inject constructor(
     private val methodStringLabels: MethodStringLabels,
     private val indirectCallScanner: IndirectCallScanner,
     private val fridaTools: FridaMcpToolRegistry,
+    private val reportGenerator: com.ai.fler.core.analysis.AnalysisReportGenerator,
     private val workDirectory: WorkDirectory,
     @SuppressLint("StaticFieldLeak")
     @ApplicationContext private val context: Context,
@@ -296,6 +297,49 @@ class McpToolHandlers @Inject constructor(
                 put("classesCount", a.classesCount)
                 put("methodsCount", a.methodsCount)
                 put("ppEntriesCount", a.ppEntriesCount)
+            }
+        },
+        McpTool(
+            name = "generate_report",
+            description = "一键生成某次分析的 Markdown 逆向报告，含四大板块：1) 分析概览（应用/Dart 版本/计数）；2) 类统计（方法数 Top 20 类、抽象/final 占比、类名前缀库分布）；3) 可疑字符串（URL/密钥鉴权/支付会员/调试对抗四类敏感模式扫描）；4) 加解密函数定位（aes/des/rc4/rsa/md5/sha/hmac/sign/cipher 等命名特征，附 vaddr）。save=true 时同时落盘到工作目录（未设置则 App 缓存 so_export），可经 /export/<文件名> 下载。analysisId 可省略（缺省 use_analysis）。报告同样可作为 MCP Resource 读取：fler://analysis/<id>/report",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("analysisId") { put("type", "integer"); put("description", "分析记录 ID（可选，缺省用 use_analysis 设定的当前分析）") }
+                    putJsonObject("maxSuspicious") { put("type", "integer"); put("description", "可疑字符串条目上限（默认 200）") }
+                    putJsonObject("maxCrypto") { put("type", "integer"); put("description", "加解密函数条目上限（默认 100）") }
+                    putJsonObject("save") { put("type", "boolean"); put("description", "是否落盘到工作目录（默认 true）") }
+                }
+            }
+        ) { p ->
+            val id = resolveAnalysisId(p, "generate_report")
+            val maxSuspicious = (p.int("maxSuspicious") ?: 200).coerceIn(10, 1000)
+            val maxCrypto = (p.int("maxCrypto") ?: 100).coerceIn(10, 500)
+            val save = p.str("save")?.toBooleanStrictOrNull() ?: true
+
+            val report = reportGenerator.generate(id, maxSuspicious, maxCrypto)
+                ?: return@McpTool buildJsonObject {
+                    put("found", false)
+                    put("reason", "分析 $id 不存在，请用 list_analyses 获取有效 id")
+                }
+
+            var savedPath: String? = null
+            if (save) {
+                savedPath = saveReportFile(id, report)
+            }
+
+            // 内联返回报告全文（超长截断提示走 Resource 读取完整版）
+            val inline: String = if (report.length > INLINE_REPORT_LIMIT) {
+                report.take(INLINE_REPORT_LIMIT) + "\n\n…（已截断，完整报告 ${report.length} 字符，请读 resource fler://analysis/$id/report 或下载文件）"
+            } else report
+
+            buildJsonObject {
+                put("found", true)
+                put("analysisId", id)
+                put("length", report.length)
+                put("saved", savedPath != null)
+                put("savedPath", savedPath ?: "")
+                put("report", inline)
             }
         },
         McpTool(
@@ -2244,6 +2288,33 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
             .take(limit)
     }
 
+    /**
+     * 把报告写入工作目录（SAF，未设置时回退 cacheDir/so_export）。
+     * 返回落盘文件名（供 /export/<name> 下载）；失败返回 null。
+     */
+    private suspend fun saveReportFile(analysisId: Long, content: String): String? =
+        withContext(Dispatchers.IO) {
+            val fileName = "fler_report_$analysisId.md"
+            runCatching {
+                val doc = workDirectory.asDocumentFile()
+                if (doc != null && doc.canWrite()) {
+                    // SAF：同名覆盖（先找旧文件再建新）
+                    doc.findFile(fileName)?.delete()
+                    val child = doc.createFile("text/markdown", fileName) ?: return@runCatching null
+                    context.contentResolver.openOutputStream(child.uri)?.use { os ->
+                        os.write(content.toByteArray(Charsets.UTF_8))
+                        os.flush()
+                    }
+                    fileName
+                } else {
+                    val dir = java.io.File(context.cacheDir, "so_export").apply { mkdirs() }
+                    val f = java.io.File(dir, fileName)
+                    f.writeText(content, Charsets.UTF_8)
+                    fileName
+                }
+            }.getOrNull()
+        }
+
     /** 用 ELF 解析器取 .text 节区间。 */
     private fun textSection(soPath: String): StringXrefScanner.TextRange? =
         ElfParserBindings().use { parser ->
@@ -2508,17 +2579,49 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
     // ========== MCP resources 数据源 ==========
 
     override suspend fun listResources(): List<McpResource> {
-        return analysisDao.getRecentList(200).map { a ->
-            McpResource(
-                uri = "fler://analysis/${a.id}",
-                name = "analysis-${a.id}",
-                mimeType = "application/json",
-            )
+        val analyses = analysisDao.getRecentList(200)
+        return buildList {
+            analyses.forEach { a ->
+                add(
+                    McpResource(
+                        uri = "fler://analysis/${a.id}",
+                        name = "analysis-${a.id}",
+                        mimeType = "application/json",
+                    )
+                )
+                // 分析快照（概览/计数/库清单，JSON）
+                add(
+                    McpResource(
+                        uri = "fler://analysis/${a.id}/snapshot",
+                        name = "analysis-${a.id}-snapshot",
+                        mimeType = "application/json",
+                    )
+                )
+                // 类结构（类层级 + 方法数，Markdown 大纲）
+                add(
+                    McpResource(
+                        uri = "fler://analysis/${a.id}/classes",
+                        name = "analysis-${a.id}-classes",
+                        mimeType = "text/markdown",
+                    )
+                )
+                // 一键 Markdown 逆向报告
+                add(
+                    McpResource(
+                        uri = "fler://analysis/${a.id}/report",
+                        name = "analysis-${a.id}-report",
+                        mimeType = "text/markdown",
+                    )
+                )
+            }
         }
     }
 
     override suspend fun readResource(uri: String): String? {
         val analysisMatch = Regex("^fler://analysis/(\\d+)$").find(uri)
+        val snapshotMatch = Regex("^fler://analysis/(\\d+)/snapshot$").find(uri)
+        val classesMatch = Regex("^fler://analysis/(\\d+)/classes$").find(uri)
+        val reportMatch = Regex("^fler://analysis/(\\d+)/report$").find(uri)
         val methodMatch = Regex("^fler://method/(\\d+)/(\\d+)$").find(uri)
         return when {
             analysisMatch != null -> {
@@ -2526,6 +2629,18 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
                 val a = cachedAnalysis(id) ?: return null
                 "analysis $id\nprojectId=${a.projectId}\nlibapp=${a.libappPath ?: ""}\n" +
                     "resultCode=${a.resultCode}\nclasses=${a.classesCount} methods=${a.methodsCount} pp=${a.ppEntriesCount}"
+            }
+            snapshotMatch != null -> {
+                val id = snapshotMatch.groupValues[1].toLongOrNull() ?: return null
+                readSnapshot(id)
+            }
+            classesMatch != null -> {
+                val id = classesMatch.groupValues[1].toLongOrNull() ?: return null
+                readClassOutline(id)
+            }
+            reportMatch != null -> {
+                val id = reportMatch.groupValues[1].toLongOrNull() ?: return null
+                reportGenerator.generate(id)
             }
             methodMatch != null -> {
                 val methodId = methodMatch.groupValues[2].toLongOrNull() ?: return null
@@ -2536,8 +2651,68 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
         }
     }
 
+    /** 分析快照（JSON）：概览 + 计数 + 库清单。 */
+    private suspend fun readSnapshot(analysisId: Long): String? {
+        val a = cachedAnalysis(analysisId) ?: return null
+        val project = projectDao.getById(a.projectId)
+        val libs = libraryDao.getByAnalysisIdList(analysisId)
+        return buildJsonObject {
+            put("analysisId", a.id)
+            put("projectId", a.projectId)
+            put("app", project?.name ?: "")
+            put("packageName", project?.packageName ?: "")
+            put("apkVersion", project?.apkVersion ?: "")
+            put("dartVersion", project?.dartVersion ?: "")
+            put("libappPath", a.libappPath ?: "")
+            put("libflutterPath", a.libflutterPath ?: "")
+            put("resultCode", a.resultCode)
+            put("errorMessage", a.errorMessage ?: "")
+            put("classesCount", a.classesCount)
+            put("methodsCount", a.methodsCount)
+            put("ppEntriesCount", a.ppEntriesCount)
+            put("startedAt", a.startedAt)
+            put("completedAt", a.completedAt ?: 0L)
+            putJsonArray("libraries") {
+                libs.forEach { l ->
+                    addJsonObject {
+                        put("name", l.libraryName)
+                        put("path", l.path)
+                        put("isDartSnapshot", l.isDartSnapshot)
+                    }
+                }
+            }
+        }.toString()
+    }
+
+    /** 类结构大纲（Markdown）：按类分组列方法名与 vaddr，供 LLM 快速浏览结构。 */
+    private suspend fun readClassOutline(analysisId: Long): String? {
+        cachedAnalysis(analysisId) ?: return null
+        val classes = dartClassDao.getByAnalysisIdList(analysisId)
+        if (classes.isEmpty()) return null
+        val sb = StringBuilder("# 分析 $analysisId 类结构\n\n")
+        sb.append("共 ${classes.size} 个类。\n\n")
+        // 方法数降序全量列出（大类在前）；单类方法超过 50 个截断
+        classes.sortedByDescending { it.methodCount }.forEach { c ->
+            val mods = buildList { if (c.isAbstract) add("abstract"); if (c.isFinal) add("final") }
+                .joinToString(" ").let { if (it.isEmpty()) "" else " ($it)" }
+            sb.append("## ${c.className}$mods — ${c.methodCount} 方法\n")
+            c.superClass?.let { sb.append("- extends: `$it`\n") }
+            val methods = dartMethodDao.getMethodsByClassIdWithClass(analysisId, c.id)
+            methods.take(50).forEach { m ->
+                val display = DartNameDisplay.displayMethodName(m.method.methodName, m.method.functionOffset)
+                sb.append("- `$display` @ 0x${(m.method.functionOffset ?: 0).toString(16)} (${m.method.functionSize ?: 0}B)\n")
+            }
+            if (methods.size > 50) sb.append("- …另有 ${methods.size - 50} 个方法（略，用 get_class 查全量）\n")
+            sb.append("\n")
+        }
+        sb.toString()
+    }
+
     companion object {
         private const val MAX_SRC = 100_000
+
+        /** generate_report 内联返回的报告长度上限（超出截断，完整版走 Resource/文件）。 */
+        private const val INLINE_REPORT_LIMIT = 60_000
     }
 }
 

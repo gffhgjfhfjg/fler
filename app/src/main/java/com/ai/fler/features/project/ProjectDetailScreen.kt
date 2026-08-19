@@ -34,6 +34,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -91,6 +92,7 @@ fun ProjectDetailScreen(
     val progress by projectViewModel.analysisProgress.collectAsStateWithLifecycle()
     val installedVersions by projectViewModel.installedVersions.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val reportState by viewModel.reportState.collectAsStateWithLifecycle()
 
     // 引擎门禁：Flutter 项目已检测出版本但本机未安装对应引擎
     val projectDartVersion = project?.dartVersion
@@ -104,6 +106,22 @@ fun ProjectDetailScreen(
         errorMessage?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.consumeErrorMessage()
+        }
+    }
+
+    // 报告生成完成提示（Pair<文件名, 字符数>）
+    LaunchedEffect(reportState) {
+        val rs = reportState
+        if (rs is Pair<*, *>) {
+            val name = rs.first as? String
+            val chars = rs.second as? Int ?: 0
+            val msg = if (name != null) {
+                "报告已生成：$name（${chars} 字符），已保存到工作目录"
+            } else {
+                "报告已生成（${chars} 字符），保存到 App 缓存 so_export"
+            }
+            snackbarHostState.showSnackbar(msg)
+            viewModel.consumeReportState()
         }
     }
 
@@ -249,6 +267,32 @@ fun ProjectDetailScreen(
                         ) {
                             Spacer(modifier = Modifier.height(4.dp))
                             com.ai.fler.features.project.InlineAnalysisProgress(progress = progress)
+                        }
+
+                        // 一键 Markdown 报告（类统计/可疑字符串/加解密定位）
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val hasSuccess = analyses.any { it.resultCode == Analysis.RESULT_SUCCESS }
+                        OutlinedButton(
+                            onClick = { viewModel.generateReport() },
+                            enabled = hasSuccess && reportState !is Boolean,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            if (reportState is Boolean) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("报告生成中...")
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Description,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("生成 Markdown 报告")
+                            }
                         }
                     }
                 }

@@ -20,6 +20,8 @@
   - SSE 端点 `http://127.0.0.1:8765/sse`（Claude Desktop 用）
   - 可选 LAN 绑定 + Bearer Token 鉴权
   - `/export/<file>` 导出下载，SAF 工作目录 / App 缓存落地
+  - `generate_report` 工具一键产出 Markdown 逆向报告（分析概览 / 类统计 / 可疑字符串扫描 / 加解密函数定位），可落盘经 `/export` 下载
+  - MCP Resources：`fler://analysis/<id>/snapshot`（分析快照 JSON）、`fler://analysis/<id>/classes`（类结构大纲）、`fler://analysis/<id>/report`（Markdown 报告）
 - **Hook 脚本管理**：内置预设 + 自定义 Frida JS 脚本增删改查。
 
 ---
