@@ -194,9 +194,10 @@ class ProjectViewModel @Inject constructor(
      * 启动完整分析流程（委托给应用级 [AnalysisRunner]，可后台执行）。
      *
      * @param projectId 项目 ID
+     * @param exportProducts 是否把 Blutter 产物打包 zip 导出到工作目录（分析启动时用户选择）
      */
-    fun startAnalysis(projectId: Long) {
-        analysisRunner.startAnalysis(projectId)
+    fun startAnalysis(projectId: Long, exportProducts: Boolean = true) {
+        analysisRunner.startAnalysis(projectId, exportProducts)
     }
 
     companion object {

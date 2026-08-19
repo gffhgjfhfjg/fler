@@ -89,8 +89,9 @@ class AnalysisRunner @Inject constructor(
      * 启动前台服务（[AnalysisService]）保活 + 持有 WakeLock，防止进程被杀/锁屏 CPU 休眠中断分析。
      *
      * @param projectId 项目 ID
+     * @param exportProducts 是否把 Blutter 产物打包 zip 导出到工作目录（用户在分析启动时选择）
      */
-    fun startAnalysis(projectId: Long) {
+    fun startAnalysis(projectId: Long, exportProducts: Boolean = true) {
         activeJob?.cancel()
         releaseWakeLock()
         // 前台服务保活：分析期间进程不被回收
@@ -104,7 +105,7 @@ class AnalysisRunner @Inject constructor(
         activeProjectId = projectId
         activeJob = scope.launch {
             try {
-                analyzeProject(projectId)
+                analyzeProject(projectId, exportProducts)
             } catch (e: CancellationException) {
                 Log.i(TAG, "分析任务已取消: project=$projectId, msg=${e.message}")
                 throw e
@@ -163,8 +164,10 @@ class AnalysisRunner @Inject constructor(
      *
      * 每个阶段独立 try-catch，失败时通过 [failAnalysis] 切换进度状态到 Failed，
      * 并把异常详情打到 logcat（TAG = "AnalysisRunner"）。
+     *
+     * @param exportProducts 是否把 Blutter 产物打包 zip 导出到工作目录
      */
-    private suspend fun analyzeProject(projectId: Long) {
+    private suspend fun analyzeProject(projectId: Long, exportProducts: Boolean) {
         val project = projectDao.getById(projectId)
         if (project == null) {
             Log.e(TAG, "startAnalysis: project $projectId not found")
@@ -347,7 +350,7 @@ class AnalysisRunner @Inject constructor(
         // ====================================================================
         try {
             updateProgress(projectId, AnalysisStage.SavingResults, 0.8f, "Saving results...")
-            saveAnalysisResults(analysisId, projectId, analyzeOutcome)
+            saveAnalysisResults(analysisId, projectId, analyzeOutcome, exportProducts)
             completeAnalysis(analysisId, extractResult, analyzeOutcome.result)
 
             // 构建地址映射（产物 ↔ SO 联动）
@@ -514,18 +517,19 @@ class AnalysisRunner @Inject constructor(
      * 通过 [AnalysisImporter] 把 Blutter 生成的 SQLite 中的
      * classes/methods/pp_entries/strings 读入 Room；统计计数由 [AnalysisImporter] 内部回写。
      *
-     * 分析成功后还会把引擎产物（outDir 目录）打包 zip 拷贝到用户设置的工作目录，
-     * 产物仍在 App 缓存保留（blutter_tmp/analysis_<id>/），供 MCP 读取。
+     * [exportProducts] 为 true 时（用户在分析启动时勾选），把引擎产物（outDir 目录）
+     * 打包 zip 拷贝到用户设置的工作目录；产物仍在 App 缓存保留（blutter_tmp/analysis_<id>/），供 MCP 读取。
      */
     private suspend fun saveAnalysisResults(
         analysisId: Long,
         projectId: Long,
-        outcome: RunOutcome
+        outcome: RunOutcome,
+        exportProducts: Boolean
     ) {
         if (outcome.result.success && outcome.dbPath.isNotBlank()) {
             analysisImporter.import(analysisId, outcome.dbPath)
         }
-        if (outcome.result.success && outcome.outDir.isNotBlank()) {
+        if (exportProducts && outcome.result.success && outcome.outDir.isNotBlank()) {
             archiveAndExportProducts(projectId, analysisId, outcome.outDir)
         }
     }

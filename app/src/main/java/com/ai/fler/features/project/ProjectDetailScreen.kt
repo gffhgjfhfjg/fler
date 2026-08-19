@@ -100,6 +100,7 @@ fun ProjectDetailScreen(
         projectDartVersion !in installedVersions
 
     val snackbarHostState = remember { SnackbarHostState() }
+    var showStartAnalysisDialog by remember { mutableStateOf(false) }
 
     // 删除失败时弹 Snackbar 提示
     LaunchedEffect(errorMessage) {
@@ -226,7 +227,7 @@ fun ProjectDetailScreen(
                                     progress.stage == AnalysisStage.Completed ||
                                     progress.stage == AnalysisStage.Failed
                                 ) {
-                                    projectViewModel.startAnalysis(p.id)
+                                    showStartAnalysisDialog = true
                                 }
                             },
                             enabled = progress.stage == AnalysisStage.Idle ||
@@ -353,6 +354,20 @@ fun ProjectDetailScreen(
             }
 
             // 分析进度已内嵌到按钮下方，不再需要对话框和浮动指示器
+        }
+    }
+
+    // 分析启动确认对话框（选择是否导出 Blutter 产物到工作目录）
+    if (showStartAnalysisDialog) {
+        project?.let { p ->
+            StartAnalysisConfirmDialog(
+                projectName = p.name,
+                onDismiss = { showStartAnalysisDialog = false },
+                onConfirm = { exportProducts ->
+                    projectViewModel.startAnalysis(p.id, exportProducts)
+                    showStartAnalysisDialog = false
+                },
+            )
         }
     }
 }

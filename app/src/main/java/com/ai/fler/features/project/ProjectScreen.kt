@@ -34,6 +34,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -57,6 +58,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,6 +102,7 @@ fun ProjectScreen(
     val probeResult by viewModel.probeResult.collectAsStateWithLifecycle()
     val installedVersions by viewModel.installedVersions.collectAsStateWithLifecycle()
     var showNewProjectDialog by remember { mutableStateOf(false) }
+    var pendingAnalyzeProject by remember { mutableStateOf<Project?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     // 分析完成后自动重置进度状态，并弹出 Snackbar 通知
@@ -157,7 +160,7 @@ fun ProjectScreen(
                         installedVersions = installedVersions,
                         onProjectClick = onProjectClick,
                         onDeleteClick = { project -> viewModel.deleteProject(project) },
-                        onAnalyzeClick = { project -> viewModel.startAnalysis(project.id) },
+                        onAnalyzeClick = { project -> pendingAnalyzeProject = project },
                         onOpenSettings = onOpenSettings,
                     )
                 }
@@ -185,6 +188,70 @@ fun ProjectScreen(
             }
         )
     }
+
+    // 分析启动确认对话框（选择是否导出 Blutter 产物）
+    pendingAnalyzeProject?.let { project ->
+        StartAnalysisConfirmDialog(
+            projectName = project.name,
+            onDismiss = { pendingAnalyzeProject = null },
+            onConfirm = { exportProducts ->
+                viewModel.startAnalysis(project.id, exportProducts)
+                pendingAnalyzeProject = null
+            },
+        )
+    }
+}
+
+/**
+ * 分析启动确认对话框：开始前选择是否把 Blutter 产物导出到工作目录。
+ *
+ * 勾选导出时，分析完成后会把产物目录（pp.txt / objs.txt / asm / ida_script /
+ * blutter_frida.js 等）打包为 `blutter_products_<项目名>_<analysisId>.zip`
+ * 拷贝到设置的工作目录；未设置工作目录则仅保留在 App 缓存。
+ */
+@Composable
+fun StartAnalysisConfirmDialog(
+    projectName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (exportProducts: Boolean) -> Unit,
+) {
+    var exportProducts by rememberSaveable { mutableStateOf(true) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
+        title = { Text("运行分析") },
+        text = {
+            Column {
+                Text("对项目 \"$projectName\" 执行 Blutter 逆向分析。")
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Checkbox(
+                        checked = exportProducts,
+                        onCheckedChange = { exportProducts = it },
+                    )
+                    Column {
+                        Text("导出 Blutter 产物到工作目录", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "分析完成后打包为 blutter_products_<项目名>.zip（pp.txt / objs.txt / asm / ida_script 等）。未设置工作目录时仅在 App 内保留",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(exportProducts) }) {
+                Text("开始分析")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 // ========== 加载状态 ==========
