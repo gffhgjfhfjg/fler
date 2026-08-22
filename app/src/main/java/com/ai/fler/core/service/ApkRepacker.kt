@@ -12,15 +12,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
+import java.security.KeyFactory
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.security.spec.PKCS8EncodedKeySpec
 import java.util.zip.CRC32
 import java.util.zip.Deflater
 import javax.inject.Inject
@@ -275,7 +279,7 @@ class ApkRepacker @Inject constructor(
                     ),
                 )
             } catch (e: Exception) {
-                val msg = "回打失败: ${e.message ?: e.javaClass.simpleName}"
+                val msg = "回打失败: ${rootCauseMessage(e)}"
                 Log.e(TAG, msg, e)
                 appLogger.error(TAG, "$msg (${e.javaClass.name})")
                 // 清理半成品
@@ -754,7 +758,7 @@ class ApkRepacker @Inject constructor(
                     .mapNotNull { it as? X509Certificate }
                 if (certs.isEmpty()) throw IllegalStateException("证书链为空")
 
-                return entry.privateKey to certs
+                return normalizeKeyPair(entry.privateKey, certs)
             } catch (e: Exception) {
                 lastError = e
                 if (e is IllegalStateException) throw e
@@ -764,5 +768,43 @@ class ApkRepacker @Inject constructor(
             "密钥库加载失败（支持 PKCS12；JKS 请先转换: keytool -importkeystore " +
                 "-srckeystore key.jks -destkeystore key.p12 -deststoretype PKCS12）: ${lastError?.message}"
         )
+    }
+
+    /**
+     * 重新编码密钥与证书（经 CertificateFactory/KeyFactory 解析，Android 上由 Conscrypt 原生实现）。
+     *
+     * PKCS12 KeyStore 在 Android 上由老版 BouncyCastle provider 提供，其证书对象
+     * X509CertificateObject.getIssuerX500Principal() 的 DER 编码在部分设备/证书
+     * （DN 含非 ASCII 字符等）上有缺陷。v1 签名的 PKCS7 编码恰好依赖该调用
+     * （v2/v3 不走此路径），导致 "Failed to sign using signer CERT"。
+     * 重新解析为 Conscrypt 实现后，v1 独有的编码步骤全部走原生代码，绕开 BC 缺陷。
+     */
+    private fun normalizeKeyPair(
+        key: PrivateKey,
+        certs: List<X509Certificate>,
+    ): Pair<PrivateKey, List<X509Certificate>> = try {
+        val cf = CertificateFactory.getInstance("X.509")
+        val cleanCerts = certs.map { c ->
+            ByteArrayInputStream(c.encoded).use { cf.generateCertificate(it) as X509Certificate }
+        }
+        val cleanKey = KeyFactory.getInstance(key.algorithm)
+            .generatePrivate(PKCS8EncodedKeySpec(key.encoded))
+        cleanKey to cleanCerts
+    } catch (_: Exception) {
+        // 重新编码失败则原样返回（正常设备上两种实现均可工作）
+        key to certs
+    }
+
+    /** 展开异常 cause 链，避免 apksig 顶层包装掩盖真正的失败原因。 */
+    private fun rootCauseMessage(e: Throwable, maxDepth: Int = 6): String {
+        val sb = StringBuilder(e.message ?: e.javaClass.simpleName)
+        var c = e.cause
+        var depth = 0
+        while (c != null && depth < maxDepth) {
+            sb.append(" ← ").append(c.message ?: c.javaClass.simpleName)
+            c = c.cause
+            depth++
+        }
+        return sb.toString()
     }
 }
