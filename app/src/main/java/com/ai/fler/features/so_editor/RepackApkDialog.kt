@@ -63,8 +63,6 @@ fun RepackApkDialog(
     var keyPass by rememberSaveable { mutableStateOf("") }
 
     val canStart = info.available && !state.running
-    // v3 依赖 v2：关 v2 时联动关 v3
-    val effectiveV3 = v3 && v2
 
     AlertDialog(
         onDismissRequest = { if (!state.running) onDismiss() },
@@ -118,8 +116,8 @@ fun RepackApkDialog(
                     Text("签名方案", style = MaterialTheme.typography.labelMedium)
                     Row(Modifier.fillMaxWidth()) {
                         SchemeCheck("v1 (JAR)", v1, { v1 = it }, canStart, subtitle = "Android <7")
-                        SchemeCheck("v2", v2, { v2 = it; if (!it) v3 = false }, canStart)
-                        SchemeCheck("v3", effectiveV3, { v3 = it }, canStart && v2)
+                        SchemeCheck("v2", v2, { v2 = it }, canStart, subtitle = "Android 7+")
+                        SchemeCheck("v3", v3, { v3 = it }, canStart, subtitle = "Android 9+")
                     }
 
                     HorizontalDivider()
@@ -204,7 +202,7 @@ fun RepackApkDialog(
                             sign = sign,
                             v1 = v1,
                             v2 = v2,
-                            v3 = v3 && v2,
+                            v3 = v3,
                             useCustomKey = useCustomKey && hasCustomKey,
                             alias = alias,
                             storePass = storePass,

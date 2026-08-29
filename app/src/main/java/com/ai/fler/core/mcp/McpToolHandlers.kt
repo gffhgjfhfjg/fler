@@ -2592,7 +2592,7 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
                     putJsonObject("sign") { put("type", "boolean"); put("description", "是否重签名（默认 true）") }
                     putJsonObject("v1") { put("type", "boolean"); put("description", "v1 JAR 签名（默认 true）") }
                     putJsonObject("v2") { put("type", "boolean"); put("description", "v2 APK 签名（默认 true）") }
-                    putJsonObject("v3") { put("type", "boolean"); put("description", "v3 APK 签名（默认 true，依赖 v2）") }
+                    putJsonObject("v3") { put("type", "boolean"); put("description", "v3 APK 签名（默认 true，可独立于 v2 单独启用，仅 Android 9+ 可安装）") }
                     putJsonObject("useCustomKey") { put("type", "boolean"); put("description", "使用 App 内已导入的自定义密钥（默认 false 用内置 debug 密钥）") }
                     putJsonObject("alias") { put("type", "string"); put("description", "自定义密钥别名（可选，空=自动选择）") }
                     putJsonObject("storePass") { put("type", "string"); put("description", "自定义密钥库密码") }

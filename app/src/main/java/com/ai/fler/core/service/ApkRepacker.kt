@@ -19,16 +19,21 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
+import java.math.BigInteger
 import java.security.KeyFactory
 import java.security.KeyStore
+import java.security.Principal
 import java.security.PrivateKey
+import java.security.PublicKey
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
+import java.util.Date
 import java.util.zip.CRC32
 import java.util.zip.Deflater
 import javax.inject.Inject
 import javax.inject.Singleton
+import javax.security.auth.x500.X500Principal
 
 /**
  * APK 回打器：把补丁后的 SO 替换回 APK 原条目，自动 ZIP 对齐并按所选方案重签名。
@@ -235,8 +240,7 @@ class ApkRepacker @Inject constructor(
                     onProgress(0.75f, "加载签名密钥")
                     val keyPair = loadKeyEntry(keySource)
                     val v1 = signOptions.v1
-                    // v3 依赖 v2（apksig 要求 v2 先启用），此处强制联动
-                    val v2 = signOptions.v2 || signOptions.v3
+                    val v2 = signOptions.v2
                     val v3 = signOptions.v3
 
                     onProgress(0.80f, "签名中 (v1=$v1 v2=$v2 v3=$v3)")
@@ -758,7 +762,8 @@ class ApkRepacker @Inject constructor(
                     .mapNotNull { it as? X509Certificate }
                 if (certs.isEmpty()) throw IllegalStateException("证书链为空")
 
-                return normalizeKeyPair(entry.privateKey, certs)
+                val (key, normalized) = normalizeKeyPair(entry.privateKey, certs)
+                return key to normalized.map(::IssuerFixedCertificate)
             } catch (e: Exception) {
                 lastError = e
                 if (e is IllegalStateException) throw e
@@ -778,6 +783,9 @@ class ApkRepacker @Inject constructor(
      * （DN 含非 ASCII 字符等）上有缺陷。v1 签名的 PKCS7 编码恰好依赖该调用
      * （v2/v3 不走此路径），导致 "Failed to sign using signer CERT"。
      * 重新解析为 Conscrypt 实现后，v1 独有的编码步骤全部走原生代码，绕开 BC 缺陷。
+     *
+     * 注意：本方法失败时会原样返回，不构成硬保证；真正的兜底是外层
+     * [IssuerFixedCertificate] 包装（不依赖任何 provider 行为）。
      */
     private fun normalizeKeyPair(
         key: PrivateKey,
@@ -791,7 +799,7 @@ class ApkRepacker @Inject constructor(
             .generatePrivate(PKCS8EncodedKeySpec(key.encoded))
         cleanKey to cleanCerts
     } catch (_: Exception) {
-        // 重新编码失败则原样返回（正常设备上两种实现均可工作）
+        // 重新编码失败则原样返回（IssuerFixedCertificate 会兜底）
         key to certs
     }
 
@@ -807,4 +815,154 @@ class ApkRepacker @Inject constructor(
         }
         return sb.toString()
     }
+}
+
+// ==================================================================
+// v1 签名兼容性修复（设备端 PKCS12 证书实现缺陷兜底）
+// ==================================================================
+
+/**
+ * 委托式 X509Certificate 包装基类：全部方法转发给 [delegate]，子类按需覆写。
+ *
+ * apksig 生成 v1 签名（PKCS7）时会调用 getIssuerX500Principal().getEncoded()
+ * （v2/v3 不调用该方法）。Android 上 PKCS12 KeyStore 由平台裁剪版 BouncyCastle
+ * provider 提供，其证书实现（以及个别 ROM 上的 CertificateFactory 实现）在
+ * 该方法上可能抛 CertificateEncodingException，导致回打失败：
+ * "Failed to sign using signer "CERT" ← Failed to encode signature block"。
+ *
+ * v2/v3 路径证明 getEncoded()/getPublicKey() 在设备上始终可用，因此
+ * [IssuerFixedCertificate] 只覆写 getIssuerX500Principal()——issuer 的 DER
+ * 直接从证书原始字节（getEncoded()）里按 ASN.1 结构提取后重建，不依赖
+ * 任何证书实现/provider 的行为。
+ */
+internal open class DelegatingX509Certificate(
+    @JvmField protected val delegate: X509Certificate,
+) : X509Certificate() {
+
+    override fun getEncoded(): ByteArray = delegate.encoded
+
+    override fun getPublicKey(): PublicKey = delegate.publicKey
+
+    override fun toString(): String = delegate.toString()
+
+    override fun verify(key: PublicKey) = delegate.verify(key)
+
+    override fun verify(key: PublicKey, sigProvider: String) =
+        delegate.verify(key, sigProvider)
+
+    override fun checkValidity() = delegate.checkValidity()
+
+    override fun checkValidity(date: Date) = delegate.checkValidity(date)
+
+    override fun getVersion(): Int = delegate.version
+
+    override fun getSerialNumber(): BigInteger = delegate.serialNumber
+
+    override fun getIssuerDN(): Principal = delegate.issuerDN
+
+    override fun getSubjectDN(): Principal = delegate.subjectDN
+
+    override fun getNotBefore(): Date = delegate.notBefore
+
+    override fun getNotAfter(): Date = delegate.notAfter
+
+    override fun getTBSCertificate(): ByteArray = delegate.tbsCertificate
+
+    override fun getSigAlgName(): String = delegate.sigAlgName
+
+    override fun getSigAlgOID(): String = delegate.sigAlgOID
+
+    override fun getSigAlgParams(): ByteArray? = delegate.sigAlgParams
+
+    override fun getIssuerUniqueID(): BooleanArray? = delegate.issuerUniqueID
+
+    override fun getSubjectUniqueID(): BooleanArray? = delegate.subjectUniqueID
+
+    override fun getBasicConstraints(): Int = delegate.basicConstraints
+
+    override fun getSubjectX500Principal(): X500Principal = delegate.subjectX500Principal
+
+    override fun getSubjectAlternativeNames(): MutableList<MutableList<*>>? =
+        delegate.subjectAlternativeNames
+
+    override fun getExtendedKeyUsage(): MutableList<String>? = delegate.extendedKeyUsage
+
+    override fun getCriticalExtensionOIDs(): MutableSet<String>? =
+        delegate.criticalExtensionOIDs
+
+    override fun getNonCriticalExtensionOIDs(): MutableSet<String>? =
+        delegate.nonCriticalExtensionOIDs
+
+    override fun getExtensionValue(oid: String): ByteArray? = delegate.getExtensionValue(oid)
+
+    override fun hasUnsupportedCriticalExtension(): Boolean =
+        delegate.hasUnsupportedCriticalExtension()
+}
+
+/**
+ * 修复 v1 兼容性的证书包装：getIssuerX500Principal() 用从证书 DER
+ * 直接提取的 issuer 原始字节重建（与 Conscrypt 的行为等价），其余全部委托。
+ */
+internal class IssuerFixedCertificate(delegate: X509Certificate) :
+    DelegatingX509Certificate(delegate) {
+
+    override fun getIssuerX500Principal(): X500Principal =
+        X500Principal(extractIssuerDer(delegate.encoded))
+}
+
+/**
+ * 从 X.509 证书 DER 中提取 issuer 字段的原始 DER 字节。
+ *
+ * 仅做最小 ASN.1 TLV 游走（无第三方依赖）：
+ * Certificate ::= SEQUENCE { tbsCertificate SEQUENCE, ... }
+ * TBSCertificate ::= SEQUENCE { [0] version(可选), serialNumber INTEGER,
+ *                               signature SEQUENCE, issuer SEQUENCE, ... }
+ */
+internal fun extractIssuerDer(certDer: ByteArray): ByteArray {
+    val cert = readDerElement(certDer, 0)
+    require(cert.tag == 0x30) { "证书 DER 异常：顶层不是 SEQUENCE" }
+    val tbs = readDerElement(certDer, cert.contentOffset)
+    require(tbs.tag == 0x30) { "证书 DER 异常：TBSCertificate 不是 SEQUENCE" }
+
+    var pos = tbs.contentOffset
+    // [0] EXPLICIT version（v1 证书无此字段）
+    val first = readDerElement(certDer, pos)
+    if (first.tag == 0xA0) pos = first.end
+    val serial = readDerElement(certDer, pos)
+    require(serial.tag == 0x02) { "证书 DER 异常：serialNumber 不是 INTEGER" }
+    val sigAlg = readDerElement(certDer, serial.end)
+    require(sigAlg.tag == 0x30) { "证书 DER 异常：signature 不是 SEQUENCE" }
+    val issuer = readDerElement(certDer, sigAlg.end)
+    require(issuer.tag == 0x30) { "证书 DER 异常：issuer 不是 SEQUENCE" }
+    return certDer.copyOfRange(issuer.start, issuer.end)
+}
+
+/** DER 单个 TLV 元素的位置描述。 */
+private class DerElement(
+    val tag: Int,
+    val start: Int,
+    val contentOffset: Int,
+    val end: Int,
+)
+
+/** 读取 [offset] 处的 DER 元素（tag + 长度 + 内容），返回其位置信息。 */
+private fun readDerElement(der: ByteArray, offset: Int): DerElement {
+    require(offset < der.size) { "DER 越界: $offset" }
+    val tag = der[offset].toInt() and 0xff
+    require(tag and 0x1f != 0x1f) { "DER 高 tag 号不支持（X.509 证书不会出现）" }
+    var pos = offset + 1
+    require(pos < der.size) { "DER 长度字段缺失" }
+    var len = der[pos].toInt() and 0xff
+    pos++
+    if (len >= 0x80) {
+        val lenBytes = len and 0x7f
+        require(lenBytes in 1..4 && pos + lenBytes <= der.size) { "DER 长度字段异常" }
+        len = 0
+        repeat(lenBytes) {
+            len = (len shl 8) or (der[pos].toInt() and 0xff)
+            pos++
+        }
+    }
+    require(len >= 0 && pos + len <= der.size) { "DER 内容长度越界" }
+    return DerElement(tag, offset, pos, pos + len)
 }
