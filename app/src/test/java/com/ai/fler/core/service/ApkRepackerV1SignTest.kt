@@ -4,6 +4,8 @@ import com.android.apksig.ApkSigner
 import com.android.apksig.ApkVerifier
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -187,5 +189,33 @@ class ApkRepackerV1SignTest {
         assertEquals(cert.issuerX500Principal, wrapped.issuerX500Principal)
         assertArrayEquals(cert.encoded, wrapped.encoded)
         assertEquals(cert.serialNumber, wrapped.serialNumber)
+    }
+
+    // ===== v1 签名预检 =====
+
+    @Test
+    fun `v1 预检暴露被 apksig 吞掉的真实异常`() {
+        val (_, certs) = loadKey()
+        val broken = certs.map(::BrokenIssuerCertificate)
+        val detail = v1Preflight(broken)
+        assertNotNull("损坏证书的预检应返回失败详情", detail)
+        assertTrue(
+            "应包含真实异常类名（而非被 apksig 吞掉的笼统信息）: $detail",
+            detail!!.contains("CertificateEncodingException")
+        )
+        assertTrue("应包含失败步骤: $detail", detail.contains("②"))
+        assertTrue("应包含证书实现类便于定位: $detail", detail.contains("certImpl="))
+    }
+
+    @Test
+    fun `v1 预检对修复后证书与原始证书通过`() {
+        val (_, certs) = loadKey()
+        assertNull("修复后证书应通过预检", v1Preflight(certs.map(::IssuerFixedCertificate)))
+        assertNull("原始证书应通过预检", v1Preflight(certs))
+    }
+
+    @Test
+    fun `v1 预检对空证书链返回失败`() {
+        assertEquals("v1 预检失败：证书链为空", v1Preflight(emptyList()))
     }
 }

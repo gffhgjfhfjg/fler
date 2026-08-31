@@ -7,6 +7,9 @@ import com.ai.fler.data.dao.AnalysisDao
 import com.ai.fler.data.dao.LibraryDao
 import com.ai.fler.data.dao.ProjectDao
 import com.android.apksig.ApkSigner
+import com.android.apksig.internal.apk.ApkSigningBlockUtils
+import com.android.apksig.internal.apk.v1.V1SchemeSigner
+import com.android.apksig.internal.pkcs7.AlgorithmIdentifier
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -242,6 +245,15 @@ class ApkRepacker @Inject constructor(
                     val v1 = signOptions.v1
                     val v2 = signOptions.v2
                     val v3 = signOptions.v3
+
+                    if (v1) {
+                        onProgress(0.78f, "v1 签名兼容性预检")
+                        // apksig 的 v1 失败路径会吞掉真实异常 cause（只留
+                        // "Failed to encode signature block" 一句）。预检用与 apksig
+                        // 完全相同的编码链提前跑一遍，把真实原因（R8 混淆破坏
+                        // ASN.1 反射、设备证书栈缺陷等）直接暴露出来。
+                        v1Preflight(keyPair.second)?.let { throw IllegalStateException(it) }
+                    }
 
                     onProgress(0.80f, "签名中 (v1=$v1 v2=$v2 v3=$v3)")
                     val signedFile = File(workDir, "signed.apk")
@@ -906,12 +918,68 @@ internal open class DelegatingX509Certificate(
 /**
  * 修复 v1 兼容性的证书包装：getIssuerX500Principal() 用从证书 DER
  * 直接提取的 issuer 原始字节重建（与 Conscrypt 的行为等价），其余全部委托。
+ *
+ * issuer DER 在构造期一次性提取：delegate.getEncoded() 若有问题会在包装时
+ * 暴露出明确异常，而不是在 apksig 深处变成无因的 "Failed to encode
+ * signature block"。
  */
 internal class IssuerFixedCertificate(delegate: X509Certificate) :
     DelegatingX509Certificate(delegate) {
 
-    override fun getIssuerX500Principal(): X500Principal =
-        X500Principal(extractIssuerDer(delegate.encoded))
+    private val issuerDer: ByteArray = try {
+        extractIssuerDer(delegate.encoded)
+    } catch (e: Exception) {
+        throw IllegalStateException(
+            "证书 issuer DER 提取失败: ${e.javaClass.name}: ${e.message} " +
+                "(certImpl=${delegate.javaClass.name})", e
+        )
+    }
+
+    override fun getIssuerX500Principal(): X500Principal = X500Principal(issuerDer)
+}
+
+/**
+ * v1 签名预检（诊断）：在 ApkSigner 之前完整复现 v1 的 PKCS7 编码链路。
+ *
+ * apksig 的 v1 失败路径（V1SchemeSigner.generateSignatureBlock）catch 时丢弃
+ * cause，用户只能看到 "Failed to encode signature block" 一句无从定位。
+ * 本函数用与 apksig 完全相同的调用链（issuer principal、证书 DER、
+ * generatePkcs7DerEncodedMessage 全量组装）提前执行一遍：
+ * - R8 混淆破坏 ASN.1 注解反射 → "not annotated with ..." 立即现形
+ * - 设备证书实现缺陷 → 真实异常类名 + 步骤号直接给出
+ *
+ * 返回 null = 通过；非 null = 详细失败原因（步骤 + 真实异常 + 证书实现类）。
+ */
+internal fun v1Preflight(certs: List<X509Certificate>): String? {
+    if (certs.isEmpty()) return "v1 预检失败：证书链为空"
+    val signingCert = certs.first()
+    var step = "① 证书链 getEncoded（原始 DER）"
+    try {
+        certs.forEach { check(it.encoded.isNotEmpty()) { "证书 DER 为空" } }
+        step = "② issuer X500Principal 与 DER 再编码"
+        val principal = signingCert.issuerX500Principal
+        val issuerDer = principal.encoded
+        if (issuerDer == null || issuerDer.isEmpty()) {
+            return "② issuer DER 为空 (principalImpl=${principal.javaClass.name})"
+        }
+        step = "③ 证书序列号"
+        signingCert.serialNumber
+        step = "④ PKCS7 签名块组装（与 apksig v1 相同调用）"
+        val publicKey = signingCert.publicKey
+        val digestAlg = V1SchemeSigner.getSuggestedSignatureDigestAlgorithm(publicKey, 24)
+        val digestId = AlgorithmIdentifier.getSignerInfoDigestAlgorithmOid(digestAlg)
+        val sigId = AlgorithmIdentifier.getSignerInfoSignatureAlgorithm(
+            publicKey, digestAlg, false
+        ).second
+        val block = ApkSigningBlockUtils.generatePkcs7DerEncodedMessage(
+            ByteArray(64), null, certs, digestId, sigId
+        )
+        if (block.isEmpty()) return "④ PKCS7 输出为空"
+        return null
+    } catch (e: Exception) {
+        return "v1 预检失败 @$step: ${e.javaClass.name}: " +
+            "${e.message ?: e.javaClass.simpleName} (certImpl=${signingCert.javaClass.name})"
+    }
 }
 
 /**

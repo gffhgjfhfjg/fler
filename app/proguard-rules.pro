@@ -37,6 +37,17 @@
 # ---- 版本信息读取（BuildConfig 字段）----
 -keep class com.ai.fler.BuildConfig { *; }
 
+# ---- apksig ASN.1 反射（v1/v2/v3 签名编码链，release 必需）----
+# Asn1DerEncoder/Asn1BerParser 通过反射读取 bean 的 @Asn1Class/@Asn1Field 注解
+# 与无参构造器。R8 会剥离未 keep 的注解、删除仅被反射使用的构造器，运行期报
+# "Failed to sign using signer CERT ← Failed to encode signature block"。
+# 已用 R8 classfile 模式 + 本规则对 v1/v2/v3 全组合签名与校验做过全量验证。
+-keep class com.android.apksig.internal.asn1.** { *; }
+-keepclasseswithmembers class * {
+    @com.android.apksig.internal.asn1.Asn1Field <fields>;
+    public <init>();
+}
+
 # ---- OkHttp / commons-compress 等三方库的警告静默 ----
 -dontwarn okhttp3.internal.platform.**
 -dontwarn org.apache.commons.compress.**
