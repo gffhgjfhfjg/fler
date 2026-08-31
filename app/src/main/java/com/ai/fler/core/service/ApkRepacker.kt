@@ -882,8 +882,12 @@ internal open class DelegatingX509Certificate(
 
     override fun getSubjectX500Principal(): X500Principal = delegate.subjectX500Principal
 
+    override fun getKeyUsage(): BooleanArray? = delegate.keyUsage
+
+    override fun getSignature(): ByteArray = delegate.signature
+
     override fun getSubjectAlternativeNames(): MutableList<MutableList<*>>? =
-        delegate.subjectAlternativeNames
+        @Suppress("UNCHECKED_CAST") (delegate.subjectAlternativeNames as MutableList<MutableList<*>>?)
 
     override fun getExtendedKeyUsage(): MutableList<String>? = delegate.extendedKeyUsage
 

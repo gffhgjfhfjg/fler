@@ -138,7 +138,7 @@ class ApkRepackerV1SignTest {
 
         // 不只看签名不抛异常：用 ApkVerifier 校验产物确实是有效 v1 签名
         val result = ApkVerifier.Builder(out)
-            .setMinSdkVersion(24)
+            .setMinCheckedPlatformVersion(24)
             .build()
             .verify()
         assertTrue("v1 签名未通过校验: ${result.allErrors.joinToString()}", result.isVerified)
@@ -162,7 +162,7 @@ class ApkRepackerV1SignTest {
         sign(apk, out, key, fixed, v1 = false, v2 = false, v3 = true)
 
         val result = ApkVerifier.Builder(out)
-            .setMinSdkVersion(28)
+            .setMinCheckedPlatformVersion(28)
             .build()
             .verify()
         assertTrue(
