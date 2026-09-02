@@ -316,7 +316,7 @@ class McpTunnelManager @Inject constructor(
         private const val URL_READ_TIMEOUT_MS = 20_000
         private const val URL_POLL_INTERVAL_MS = 250L
         private const val WATCH_INTERVAL_MS = 5_000L
-        private const val SERVER_ALIVE_INTERVAL_MS = 15
+        private const val SERVER_ALIVE_INTERVAL_MS = 15_000
         private const val SERVER_ALIVE_COUNT_MAX = 4
         private const val INITIAL_RETRY_MS = 5_000L
         private const val MAX_RETRY_MS = 60_000L
