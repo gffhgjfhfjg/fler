@@ -11,7 +11,8 @@
 #   fler-native-libs-<ver>.tar.xz 拉取（见 scripts/package-native-libs.ps1）。
 #
 # 内存/缓存说明：
-#   - ORG_GRADLE_JVMARGS=-Xmx4g：R8 混淆 + 原生链接内存压力大，避免 OOM
+#   - ORG_GRADLE_JVMARGS=-Xmx6g：R8 混淆 + ApkFlinger 打包（85MB .so 整体
+#     读入堆内 deflate 压缩）内存峰值大，4g 曾在 packageRelease OOM
 #     （覆盖 gradle.properties 的 -Xmx2048m）
 #   - gradle-build-action 自动缓存 ~/.gradle，加速依赖下载
 #   - actions/cache 缓存 app/libs 下的 .a，命中即跳过下载（需保持 FLER_NATIVE_SHA 一致）
@@ -37,7 +38,7 @@ env:
   # （本仓库未发布该资产；prepare-native-libs.sh 默认按 GITHUB_REPOSITORY 拼 URL 会 404）
   FLER_NATIVE_URL: https://github.com/myfler/fler/releases/download/native-libs-v1/fler-native-libs-v1.tar.xz
   FLER_NATIVE_SHA: 79c25d84941456de18189f53eac0a052dfc971e4c6328d10adc67fc840ebff43
-  ORG_GRADLE_JVMARGS: -Xmx4g -Dfile.encoding=UTF-8
+  ORG_GRADLE_JVMARGS: -Xmx6g -Dfile.encoding=UTF-8
 
 jobs:
   build-release:
