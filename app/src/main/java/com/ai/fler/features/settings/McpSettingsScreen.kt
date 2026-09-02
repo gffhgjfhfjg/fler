@@ -58,6 +58,7 @@ fun McpSettingsScreen(
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val mcpState by viewModel.mcpState.collectAsStateWithLifecycle()
+    val tunnelState by viewModel.tunnelState.collectAsStateWithLifecycle()
     val embeddingState by viewModel.embeddingState.collectAsStateWithLifecycle()
     var showToolsDialog by remember { mutableStateOf(false) }
 
@@ -92,6 +93,21 @@ fun McpSettingsScreen(
                     onStop = { viewModel.mcpStopServer() },
                     onOpenLog = onOpenLog,
                     onOpenTools = { showToolsDialog = true },
+                )
+            }
+
+            item {
+                McpTunnelCard(
+                    state = tunnelState,
+                    mcpRunning = mcpState.isRunning,
+                    tokenBlank = mcpState.token.isBlank(),
+                    onSetEnabled = { viewModel.tunnelSetEnabled(it) },
+                    onSetProvider = { viewModel.tunnelSetProvider(it) },
+                    onSetHost = { viewModel.tunnelSetHost(it) },
+                    onSetSshPort = { viewModel.tunnelSetSshPort(it) },
+                    onSetUsername = { viewModel.tunnelSetUsername(it) },
+                    onSetPassword = { viewModel.tunnelSetPassword(it) },
+                    onSetRemotePort = { viewModel.tunnelSetRemotePort(it) },
                 )
             }
 

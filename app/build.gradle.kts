@@ -120,6 +120,9 @@ dependencies {
     // OkHttp
     implementation(libs.okhttp)
 
+    // JSch（MCP 外网隧道：SSH 反向端口转发，localhost.run 中继 / 自建服务器）
+    implementation(libs.jsch)
+
     // 7z 解压
     implementation(libs.commons.compress)
     implementation(libs.xz)

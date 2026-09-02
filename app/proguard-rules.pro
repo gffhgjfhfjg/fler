@@ -52,3 +52,9 @@
 -dontwarn okhttp3.internal.platform.**
 -dontwarn org.apache.commons.compress.**
 -dontwarn org.tukaani.xz.**
+
+# ---- JSch（MCP 外网隧道）----
+# SSH 算法类（jce/bc 包）经 Class.forName 反射加载，R8 静态分析不可见，
+# 误删会导致协商失败（Algorithm negotiation fail）。保留整个库最稳妥。
+-keep class com.jcraft.jsch.** { *; }
+-dontwarn org.ietf.jgss.**

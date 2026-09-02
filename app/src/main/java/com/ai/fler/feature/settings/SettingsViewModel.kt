@@ -10,6 +10,7 @@ import com.ai.fler.core.frida.FridaEngine
 import com.ai.fler.core.mcp.EmbeddingConfig
 import com.ai.fler.core.mcp.McpConfig
 import com.ai.fler.core.mcp.McpToolHandlers
+import com.ai.fler.core.mcp.McpTunnelConfig
 import com.ai.fler.core.service.EnginePackManager
 import com.ai.fler.core.service.EngineSourceConfig
 import com.ai.fler.core.service.EngineUpdate
@@ -18,6 +19,7 @@ import com.ai.fler.core.service.WorkDirectory
 import com.ai.fler.features.mcp.McpServerManager
 import com.ai.fler.features.mcp.McpServerService
 import com.ai.fler.features.mcp.McpStatus
+import com.ai.fler.features.mcp.McpTunnelManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,6 +48,8 @@ class SettingsViewModel @Inject constructor(
     private val sourceConfig: EngineSourceConfig,
     private val mcpConfig: McpConfig,
     private val mcpServerManager: McpServerManager,
+    private val tunnelConfig: McpTunnelConfig,
+    private val tunnelManager: McpTunnelManager,
     private val toolHandlers: McpToolHandlers,
     private val embeddingConfig: EmbeddingConfig,
     private val fridaEngine: FridaEngine,
@@ -68,6 +72,10 @@ class SettingsViewModel @Inject constructor(
     /** MCP 服务器状态（配置 + 运行状态聚合）。 */
     private val _mcpState = MutableStateFlow(McpUiState())
     val mcpState: StateFlow<McpUiState> = _mcpState.asStateFlow()
+
+    /** MCP 外网隧道状态（配置 + 运行状态聚合）。 */
+    private val _tunnelState = MutableStateFlow(McpTunnelUiState())
+    val tunnelState: StateFlow<McpTunnelUiState> = _tunnelState.asStateFlow()
 
     /** Frida 动态插桩状态（客户端可用性/root/server/初始化）。 */
     private val _fridaStatus = MutableStateFlow(FridaStatusUiState())
@@ -114,6 +122,10 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             combineMcpState()
         }
+        // 聚合外网隧道配置与运行状态
+        viewModelScope.launch {
+            combineTunnelState()
+        }
         // 工作目录状态独立收集（App 级，不属于 MCP 配置）。
         // 必须单独 launch：combineMcpState 的 collect 是无限收集，
         // 若把这段放在 combineMcpState 内部，将永远执行不到（死代码），
@@ -151,6 +163,39 @@ class SettingsViewModel @Inject constructor(
                 errorMessage = status.errorMessage,
             )
         }.collect { _mcpState.value = it }
+    }
+
+    /** 聚合外网隧道配置与运行状态（combine 链式展开超过 5 个流）。 */
+    private suspend fun combineTunnelState() {
+        combine(
+            tunnelConfig.enabled,
+            tunnelConfig.provider,
+            tunnelConfig.host,
+        ) { enabled, provider, host ->
+            Triple(enabled, provider, host)
+        }.combine(tunnelConfig.sshPort) { (enabled, provider, host), sshPort ->
+            TunnelConfigSnapshot(enabled, provider, host, sshPort, "", "", 0)
+        }.combine(tunnelConfig.username) { cfg, username ->
+            cfg.copy(username = username)
+        }.combine(tunnelConfig.password) { cfg, password ->
+            cfg.copy(password = password)
+        }.combine(tunnelConfig.remotePort) { cfg, remotePort ->
+            cfg.copy(remotePort = remotePort)
+        }.combine(tunnelManager.status) { cfg, status ->
+            McpTunnelUiState(
+                enabled = cfg.enabled,
+                provider = cfg.provider,
+                host = cfg.host,
+                sshPort = cfg.sshPort,
+                username = cfg.username,
+                password = cfg.password,
+                remotePort = cfg.remotePort,
+                isRunning = status.isRunning,
+                isConnecting = status.isConnecting,
+                publicUrl = status.publicUrl,
+                errorMessage = status.errorMessage,
+            )
+        }.collect { _tunnelState.value = it }
     }
 
     // ========== MCP Server ==========
@@ -192,6 +237,36 @@ class SettingsViewModel @Inject constructor(
 
     fun mcpSetEmuToolsEnabled(value: Boolean) {
         mcpConfig.setEmuToolsEnabled(value)
+    }
+
+    // ========== MCP 外网隧道 ==========
+
+    fun tunnelSetEnabled(value: Boolean) {
+        tunnelConfig.setEnabled(value)
+    }
+
+    fun tunnelSetProvider(value: McpTunnelConfig.Provider) {
+        tunnelConfig.setProvider(value)
+    }
+
+    fun tunnelSetHost(value: String) {
+        tunnelConfig.setHost(value.trim())
+    }
+
+    fun tunnelSetSshPort(value: Int) {
+        tunnelConfig.setSshPort(value.coerceIn(1, 65535))
+    }
+
+    fun tunnelSetUsername(value: String) {
+        tunnelConfig.setUsername(value.trim())
+    }
+
+    fun tunnelSetPassword(value: String) {
+        tunnelConfig.setPassword(value)
+    }
+
+    fun tunnelSetRemotePort(value: Int) {
+        tunnelConfig.setRemotePort(value.coerceIn(0, 65535))
     }
 
     // ========== 语义搜索 embedding 配置 ==========
@@ -440,6 +515,33 @@ data class EngineSourceState(
     val manifestUrl: String = "",
     val githubProxy: String = "",
     val isCustom: Boolean = false
+)
+
+/** MCP 外网隧道 UI 状态（配置 + 运行状态聚合）。 */
+data class McpTunnelUiState(
+    val enabled: Boolean = false,
+    val provider: McpTunnelConfig.Provider = McpTunnelConfig.Provider.PUBLIC,
+    val host: String = "",
+    val sshPort: Int = McpTunnelConfig.DEFAULT_SSH_PORT,
+    val username: String = "root",
+    val password: String = "",
+    val remotePort: Int = McpTunnelConfig.DEFAULT_REMOTE_PORT,
+    val isRunning: Boolean = false,
+    val isConnecting: Boolean = false,
+    /** 外网基础 URL（https://xxx.lhr.life 或 http://host:port），空 = 未建立。 */
+    val publicUrl: String = "",
+    val errorMessage: String? = null,
+)
+
+/** 隧道配置快照（combine 中间值）。 */
+private data class TunnelConfigSnapshot(
+    val enabled: Boolean,
+    val provider: McpTunnelConfig.Provider,
+    val host: String,
+    val sshPort: Int,
+    val username: String,
+    val password: String,
+    val remotePort: Int,
 )
 
 /**
