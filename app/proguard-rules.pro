@@ -58,3 +58,10 @@
 # 误删会导致协商失败（Algorithm negotiation fail）。保留整个库最稳妥。
 -keep class com.jcraft.jsch.** { *; }
 -dontwarn org.ietf.jgss.**
+# JSch 可选依赖（编译期 classpath 缺失，R8 报 Missing class）：
+# - jna/junixsocket：Windows Pageant / Unix ssh-agent 连接器，Android 不用
+# - slf4j/log4j：可选日志门面，Android 走 java.util.logging
+-dontwarn com.sun.jna.**
+-dontwarn org.newsclub.net.unix.**
+-dontwarn org.slf4j.**
+-dontwarn org.apache.logging.log4j.**
