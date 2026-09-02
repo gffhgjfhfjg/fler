@@ -27,6 +27,11 @@ class McpServerService : Service() {
     @Inject
     lateinit var manager: McpServerManager
 
+    // 注入即实例化：隧道管理器随 MCP 前台服务存活，
+    // 依据服务器状态自动建/断外网隧道（无需用户停留在设置页）。
+    @Inject
+    lateinit var tunnelManager: McpTunnelManager
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
