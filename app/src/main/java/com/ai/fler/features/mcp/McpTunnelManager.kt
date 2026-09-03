@@ -261,14 +261,22 @@ class McpTunnelManager @Inject constructor(
         }
     }
 
-    /** 从中继输出/横幅文本提取外网 URL（优先 lhr.life / localhost.run 域名，兜底任意 https）。 */
+    /**
+     * 从中继输出/横幅文本提取外网 URL。
+     *
+     * 免费中继分配的地址只会是 *.lhr.life 子域名；会话欢迎横幅会最先出现
+     * admin.localhost.run（注册/付费管理后台）等运营文案链接，绝不能当隧道
+     * 地址返回（曾因此把管理后台地址展示为外网 URL）。故只认 lhr.life，
+     * 不做任意 https 兜底，拿不到即为失败并报错。
+     */
     private fun extractRelayUrl(text: CharSequence): String? {
         if (!text.contains("http")) return null
-        val urls = RELAY_URL_REGEX.findAll(text).map { it.value }.toList()
-        return urls.firstOrNull { u ->
-            val host = u.removePrefix("https://").removePrefix("http://").substringBefore('/')
-            host.endsWith(".lhr.life") || host.endsWith(".localhost.run") || host == "localhost.run"
-        } ?: urls.firstOrNull { it.startsWith("https://") }
+        return RELAY_URL_REGEX.findAll(text)
+            .map { it.value }
+            .firstOrNull { u ->
+                val host = u.removePrefix("https://").removePrefix("http://").substringBefore('/')
+                host.endsWith(".lhr.life")
+            }
     }
 
     /** 隧道句柄：一条 SSH 会话 +（公网中继模式下）URL 读取用的 shell 通道。 */
