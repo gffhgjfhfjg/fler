@@ -10,10 +10,13 @@
 # 依赖的 .a 静态库由 scripts/prepare-native-libs.sh 从本仓库 GitHub Release 资产
 #   fler-native-libs-<ver>.tar.xz 拉取（见 scripts/package-native-libs.ps1）。
 #
-# 内存/缓存说明：
-#   - ORG_GRADLE_JVMARGS=-Xmx8g：R8 混淆 + ApkFlinger 打包（85MB .so 整体
-#     读入堆内 deflate 压缩）内存峰值大，4g/6g 曾在 packageRelease OOM
-#     （覆盖 gradle.properties 的 -Xmx2048m；缓存未命中全量构建时峰值更高）
+# 内存/打包说明：
+#   - ORG_GRADLE_JVMARGS=-Xmx8g：覆盖 gradle.properties 的 -Xmx2048m。
+#   - 打包拆成第二次 Gradle 调用：--no-daemon 下每次调用都是全新单次性
+#     Daemon。第一次跑完 KSP/Kotlin/R8/lintVital 后堆内残留可达数 GB，
+#     packageRelease 读入 85MB .so（useLegacyPackaging=true 走 readAllBytes
+#     整体压缩）时直接 OOM（6g/8g 均秒失败，v1.9.3 两次）；第二次调用
+#     依赖全部 UP-TO-DATE、干净 8g 堆只跑打包，彻底规避残留问题。
 #   - gradle-build-action 自动缓存 ~/.gradle，加速依赖下载
 #   - actions/cache 缓存 app/libs 下的 .a，命中即跳过下载（需保持 FLER_NATIVE_SHA 一致）
 # =============================================================================
@@ -93,10 +96,24 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Assemble release
+      - name: Build all except packaging (KSP/Kotlin/R8/lintVital)
         uses: gradle/gradle-build-action@v3
         with:
-          arguments: :app:assembleRelease --no-daemon --stacktrace
+          arguments: :app:assembleRelease -x packageRelease --no-daemon --stacktrace
+
+      - name: Package release (fresh daemon, clean heap)
+        uses: gradle/gradle-build-action@v3
+        with:
+          arguments: :app:packageRelease --no-daemon --stacktrace
+
+      - name: Build diagnostics (native libs / APK sizes)
+        if: always()
+        shell: bash
+        run: |
+          echo "== merged/stripped native libs =="
+          find app/build/intermediates -name '*.so' -exec ls -la {} \; 2>/dev/null || true
+          echo "== APK outputs =="
+          find app/build/outputs/apk -name '*.apk' -exec ls -la {} \; 2>/dev/null || true
 
       - name: Compute APK name and sha256
         id: apk
