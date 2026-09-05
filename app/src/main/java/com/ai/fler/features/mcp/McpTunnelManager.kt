@@ -210,7 +210,13 @@ class McpTunnelManager @Inject constructor(
     /**
      * 打开 shell 通道读取 localhost.run 分配的外网地址。
      *
-     * 中继在通道输出中打印 Connect to https://xxx.lhr.life；
+     * localhost.run 的行为与标准 SSH 服务器不同（实测确认）：
+     * 1. 通道打开确认后立即推送公告数据（含分配的 *.lhr.life 地址）；
+     * 2. 从不回复 shell 请求确认，ch.connect() 必然以 channel request: timeout
+     *    失败——OpenSSH 客户端同样收不到该回复，只是不视为错误。
+     * 因此：必须先 getInputStream() 再 connect()（公告数据会在 connect 等待
+     * 期间到达，通道 IO 未初始化时 JSch 会把数据丢弃）；connect 的超时异常
+     * 属预期行为需容忍，之后照常从流中解析地址。
      * 解析成功后通道保持打开（中继在会话存活期间维持隧道），由句柄统一关闭。
      */
     private suspend fun readRelayUrl(session: Session): RelayChannel? {
@@ -221,8 +227,13 @@ class McpTunnelManager @Inject constructor(
             channel = ch
             // 模拟 ssh -T：不申请 pty，避免终端转义序列干扰 URL 解析
             ch.setPty(false)
-            ch.connect(CHANNEL_CONNECT_TIMEOUT_MS)
+            // 顺序关键：必须在 connect 之前取流，否则等待期间到达的数据被 JSch 丢弃
             val input = ch.getInputStream()
+            try {
+                ch.connect(CHANNEL_CONNECT_TIMEOUT_MS)
+            } catch (_: JSchException) {
+                // shell 请求无回复是 localhost.run 的预期行为，通道实际可用
+            }
             val text = StringBuilder()
             val deadline = System.currentTimeMillis() + URL_READ_TIMEOUT_MS
             while (System.currentTimeMillis() < deadline) {
@@ -320,7 +331,7 @@ class McpTunnelManager @Inject constructor(
         private const val RELAY_REMOTE_PORT = 80
 
         private const val CONNECT_TIMEOUT_MS = 25_000
-        private const val CHANNEL_CONNECT_TIMEOUT_MS = 10_000
+        private const val CHANNEL_CONNECT_TIMEOUT_MS = 3_000
         private const val URL_READ_TIMEOUT_MS = 20_000
         private const val URL_POLL_INTERVAL_MS = 250L
         private const val WATCH_INTERVAL_MS = 5_000L
