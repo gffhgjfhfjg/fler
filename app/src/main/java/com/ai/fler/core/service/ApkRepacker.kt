@@ -106,7 +106,7 @@ class ApkRepacker @Inject constructor(
         /** 内置 debug 密钥（assets/debug.keystore，密码 android）。 */
         data object Debug : KeySource
 
-        /** 用户导入的自定义密钥库（PKCS12；JKS 部分设备不支持，建议转换）。 */
+        /** 用户导入的自定义密钥库（PKCS12 / JKS）。 */
         data class Custom(
             val storeFile: File,
             val storePassword: String,
@@ -741,8 +741,9 @@ class ApkRepacker @Inject constructor(
     /**
      * 从密钥库加载私钥与证书链。
      *
-     * 密钥库类型按 PKCS12 → JKS 顺序尝试（Android 平台不提供 JKS，
-     * 报错时提示转换：keytool -importkeystore ... -deststoretype PKCS12）。
+     * 按容器魔数分发：JKS（Android 平台无 KeyStore 实现）由 [JksKeystoreReader]
+     * 按 OpenJDK 字节格式自行解析；其余（PKCS12 等）走平台 KeyStore。
+     * 成功后统一经 [normalizeKeyPair] + [IssuerFixedCertificate] 包装（v1 兼容）。
      */
     private fun loadFromKeystore(
         storeFile: File,
@@ -750,41 +751,58 @@ class ApkRepacker @Inject constructor(
         alias: String,
         keyPassword: String,
     ): Pair<PrivateKey, List<X509Certificate>> {
-        var lastError: Exception? = null
-        for (type in listOf("PKCS12", "JKS")) {
-            try {
-                val ks = KeyStore.getInstance(type)
-                storeFile.inputStream().use { ks.load(it, storePassword.toCharArray()) }
-
-                val keyAlias = alias.ifBlank {
-                    ks.aliases().toList().firstOrNull { a ->
-                        runCatching {
-                            val e = ks.getEntry(a, KeyStore.PasswordProtection(keyPassword.toCharArray()))
-                            e is KeyStore.PrivateKeyEntry
-                        }.getOrDefault(false)
-                    } ?: throw IllegalStateException("密钥库中未找到私钥条目")
-                }
-
-                val entry = ks.getEntry(
-                    keyAlias, KeyStore.PasswordProtection(keyPassword.toCharArray())
-                ) as? KeyStore.PrivateKeyEntry
-                    ?: throw IllegalStateException("别名 \"$keyAlias\" 不是私钥条目")
-
-                val certs = (entry.certificateChain ?: arrayOf(entry.certificate))
-                    .mapNotNull { it as? X509Certificate }
-                if (certs.isEmpty()) throw IllegalStateException("证书链为空")
-
-                val (key, normalized) = normalizeKeyPair(entry.privateKey, certs)
-                return key to normalized.map(::IssuerFixedCertificate)
-            } catch (e: Exception) {
-                lastError = e
-                if (e is IllegalStateException) throw e
+        val data = storeFile.readBytes()
+        val (key, certs) = when {
+            JksKeystoreReader.isJks(data) -> {
+                val m = JksKeystoreReader.loadPrivateKey(data, storePassword, alias, keyPassword)
+                m.privateKey to m.certificateChain
             }
+            JksKeystoreReader.isJceks(data) -> throw IllegalStateException(
+                "JCEKS 密钥库暂不支持，请先转换: keytool -importkeystore " +
+                    "-srckeystore key.jceks -destkeystore key.p12 -deststoretype PKCS12"
+            )
+            else -> loadFromPkcs12(data, storePassword, alias, keyPassword)
         }
-        throw IllegalStateException(
-            "密钥库加载失败（支持 PKCS12；JKS 请先转换: keytool -importkeystore " +
-                "-srckeystore key.jks -destkeystore key.p12 -deststoretype PKCS12）: ${lastError?.message}"
-        )
+        val (normalizedKey, normalizedCerts) = normalizeKeyPair(key, certs)
+        return normalizedKey to normalizedCerts.map(::IssuerFixedCertificate)
+    }
+
+    /** PKCS12（平台 KeyStore 实现，Android 由裁剪版 BouncyCastle 提供）。 */
+    private fun loadFromPkcs12(
+        data: ByteArray,
+        storePassword: String,
+        alias: String,
+        keyPassword: String,
+    ): Pair<PrivateKey, List<X509Certificate>> {
+        try {
+            val ks = KeyStore.getInstance("PKCS12")
+            ByteArrayInputStream(data).use { ks.load(it, storePassword.toCharArray()) }
+
+            val keyAlias = alias.ifBlank {
+                ks.aliases().toList().firstOrNull { a ->
+                    runCatching {
+                        val e = ks.getEntry(a, KeyStore.PasswordProtection(keyPassword.toCharArray()))
+                        e is KeyStore.PrivateKeyEntry
+                    }.getOrDefault(false)
+                } ?: throw IllegalStateException("密钥库中未找到私钥条目")
+            }
+
+            val entry = ks.getEntry(
+                keyAlias, KeyStore.PasswordProtection(keyPassword.toCharArray())
+            ) as? KeyStore.PrivateKeyEntry
+                ?: throw IllegalStateException("别名 \"$keyAlias\" 不是私钥条目")
+
+            val certs = (entry.certificateChain ?: arrayOf(entry.certificate))
+                .mapNotNull { it as? X509Certificate }
+            if (certs.isEmpty()) throw IllegalStateException("证书链为空")
+
+            return entry.privateKey to certs
+        } catch (e: Exception) {
+            if (e is IllegalStateException) throw e
+            throw IllegalStateException(
+                "密钥库加载失败（支持 PKCS12 / JKS）: ${e.message}", e
+            )
+        }
     }
 
     /**

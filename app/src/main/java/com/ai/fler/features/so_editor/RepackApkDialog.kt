@@ -133,7 +133,7 @@ fun RepackApkDialog(
                     ) { useCustomKey = false }
                     KeyOption(
                         title = "自定义密钥",
-                        subtitle = if (hasCustomKey) "已导入，选择后回打时使用" else "未导入（PKCS12，JKS 需先转换）",
+                        subtitle = if (hasCustomKey) "已导入，选择后回打时使用" else "未导入（支持 PKCS12 / JKS）",
                         selected = useCustomKey,
                         enabled = canStart && hasCustomKey,
                         icon = { Icon(Icons.Default.Archive, null) }
@@ -167,7 +167,7 @@ fun RepackApkDialog(
                     }
 
                     TextButton(onClick = onImportKey, enabled = canStart) {
-                        Text(if (hasCustomKey) "重新导入密钥库…" else "导入密钥库（.p12/.keystore）…")
+                        Text(if (hasCustomKey) "重新导入密钥库…" else "导入密钥库（.p12/.jks/.keystore）…")
                     }
                 }
 
