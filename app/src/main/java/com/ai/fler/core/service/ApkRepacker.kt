@@ -87,6 +87,11 @@ class ApkRepacker @Inject constructor(
         /** v1 签名文件名（重建时剔除，签名时由 apksig 重新生成）。 */
         private val V1_SIG_SUFFIXES = listOf(".SF", ".RSA", ".DSA", ".EC")
         private const val V1_MANIFEST = "META-INF/MANIFEST.MF"
+
+        // 已导入密钥参数持久化键（signing_key prefs）
+        private const val PREF_KEY_ALIAS = "custom_key_alias"
+        private const val PREF_KEY_STORE_PASS = "custom_key_store_pass"
+        private const val PREF_KEY_KEY_PASS = "custom_key_key_pass"
     }
 
     // ==================================================================
@@ -114,6 +119,13 @@ class ApkRepacker @Inject constructor(
             val keyPassword: String, // 空 = 使用 storePassword
         ) : KeySource
     }
+
+    /** 已保存的自定义密钥参数（导入并成功使用一次后免再次输入）。 */
+    data class SavedKeyConfig(
+        val alias: String,
+        val storePassword: String,
+        val keyPassword: String,
+    )
 
     /** 回打结果。 */
     data class RepackResult(
@@ -280,6 +292,10 @@ class ApkRepacker @Inject constructor(
                 onProgress(1f, "完成")
                 val size = finalFile.length()
                 val duration = System.currentTimeMillis() - start
+                // 自定义密钥签名成功 → 记住参数，下次免再次输入
+                if (signOptions.enabled && keySource is KeySource.Custom) {
+                    runCatching { saveKeyConfig(keySource) }
+                }
                 appLogger.info(TAG, "回打完成: ${apkFile.name} 条目=$entryCount 签名=${schemes.ifEmpty { "无" }} " +
                     "输出=${size / 1024}KB 耗时=${duration}ms")
                 RepackOutput(
@@ -709,6 +725,43 @@ class ApkRepacker @Inject constructor(
     val customKeystoreFile: File
         get() = File(File(context.filesDir, "signing").apply { mkdirs() }, "custom_key.store")
 
+    /** 密钥参数持久化（App 私有目录，密码仅在签名成功后写入）。 */
+    private val signingPrefs by lazy {
+        context.getSharedPreferences("signing_key", Context.MODE_PRIVATE)
+    }
+
+    /**
+     * 读取已保存的自定义密钥参数（导入的密钥库成功签名一次后自动保存）。
+     * 未保存过（或密码为空）返回 null。
+     */
+    fun savedKeyConfig(): SavedKeyConfig? {
+        val storePass = signingPrefs.getString(PREF_KEY_STORE_PASS, null).orEmpty()
+        if (storePass.isEmpty()) return null
+        return SavedKeyConfig(
+            alias = signingPrefs.getString(PREF_KEY_ALIAS, null).orEmpty(),
+            storePassword = storePass,
+            keyPassword = signingPrefs.getString(PREF_KEY_KEY_PASS, null).orEmpty(),
+        )
+    }
+
+    /** 保存自定义密钥参数（签名成功后调用，下次使用免再次输入）。 */
+    private fun saveKeyConfig(source: KeySource.Custom) {
+        signingPrefs.edit()
+            .putString(PREF_KEY_ALIAS, source.keyAlias)
+            .putString(PREF_KEY_STORE_PASS, source.storePassword)
+            .putString(PREF_KEY_KEY_PASS, source.keyPassword)
+            .apply()
+    }
+
+    /** 清空已保存的密钥参数（换新密钥库时旧密码大概率不匹配）。 */
+    private fun clearKeyConfig() {
+        signingPrefs.edit()
+            .remove(PREF_KEY_ALIAS)
+            .remove(PREF_KEY_STORE_PASS)
+            .remove(PREF_KEY_KEY_PASS)
+            .apply()
+    }
+
     /** 导入自定义密钥库（SAF 选中后复制到私有目录），返回落盘文件。 */
     suspend fun importCustomKeystore(source: InputStream): File = withContext(Dispatchers.IO) {
         val target = customKeystoreFile
@@ -720,6 +773,8 @@ class ApkRepacker @Inject constructor(
             target.delete()
             if (!tmp.renameTo(target)) throw IllegalStateException("密钥库写入失败")
         }
+        // 换新密钥库：旧参数作废，避免预填错误密码
+        clearKeyConfig()
         target
     }
 

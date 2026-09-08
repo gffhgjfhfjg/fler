@@ -208,11 +208,13 @@ fun SoEditorScreen(
 
     val repackInfo by viewModel.repackInfo.collectAsStateWithLifecycle()
     val hasCustomKey by viewModel.hasCustomKey.collectAsStateWithLifecycle()
+    val savedKeyConfig by viewModel.savedKeyConfig.collectAsStateWithLifecycle()
     if (showRepackDialog) {
         RepackApkDialog(
             info = repackInfo,
             state = repackState,
             hasCustomKey = hasCustomKey,
+            savedKeyConfig = savedKeyConfig,
             onImportKey = { pickKeyLauncher.launch(arrayOf("*/*")) },
             onRepack = { sel ->
                 pendingRepack = sel

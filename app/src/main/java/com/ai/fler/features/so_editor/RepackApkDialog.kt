@@ -23,6 +23,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -32,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.ai.fler.core.service.ApkRepacker
 import java.util.Locale
 
 /**
@@ -48,6 +50,7 @@ fun RepackApkDialog(
     info: SoEditorViewModel.RepackInfo,
     state: SoEditorViewModel.RepackState,
     hasCustomKey: Boolean,
+    savedKeyConfig: ApkRepacker.SavedKeyConfig?,
     onImportKey: () -> Unit,
     onRepack: (options: RepackSelection) -> Unit,
     onDismiss: () -> Unit,
@@ -61,6 +64,19 @@ fun RepackApkDialog(
     var alias by rememberSaveable { mutableStateOf("") }
     var storePass by rememberSaveable { mutableStateOf("") }
     var keyPass by rememberSaveable { mutableStateOf("") }
+
+    // 已保存的密钥参数（异步加载）到达后一次性预填 + 默认选中自定义密钥。
+    // prefilled 标记保证只填一次，之后的覆盖不会吃掉用户输入。
+    var prefilled by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(savedKeyConfig) {
+        if (!prefilled && savedKeyConfig != null && hasCustomKey) {
+            prefilled = true
+            alias = savedKeyConfig.alias
+            storePass = savedKeyConfig.storePassword
+            keyPass = savedKeyConfig.keyPassword
+            useCustomKey = true
+        }
+    }
 
     val canStart = info.available && !state.running
 
@@ -133,7 +149,11 @@ fun RepackApkDialog(
                     ) { useCustomKey = false }
                     KeyOption(
                         title = "自定义密钥",
-                        subtitle = if (hasCustomKey) "已导入，选择后回打时使用" else "未导入（支持 PKCS12 / JKS）",
+                        subtitle = when {
+                            !hasCustomKey -> "未导入（支持 PKCS12 / JKS）"
+                            savedKeyConfig != null -> "已导入，参数已记住，直接回打即可"
+                            else -> "已导入，选择后回打时使用"
+                        },
                         selected = useCustomKey,
                         enabled = canStart && hasCustomKey,
                         icon = { Icon(Icons.Default.Archive, null) }

@@ -2594,8 +2594,8 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
                     putJsonObject("v2") { put("type", "boolean"); put("description", "v2 APK 签名（默认 true）") }
                     putJsonObject("v3") { put("type", "boolean"); put("description", "v3 APK 签名（默认 true，可独立于 v2 单独启用，仅 Android 9+ 可安装）") }
                     putJsonObject("useCustomKey") { put("type", "boolean"); put("description", "使用 App 内已导入的自定义密钥（PKCS12/JKS，默认 false 用内置 debug 密钥）") }
-                    putJsonObject("alias") { put("type", "string"); put("description", "自定义密钥别名（可选，空=自动选择）") }
-                    putJsonObject("storePass") { put("type", "string"); put("description", "自定义密钥库密码") }
+                    putJsonObject("alias") { put("type", "string"); put("description", "自定义密钥别名（可选，未传且已保存时用 App 内记住的别名；空=自动选择）") }
+                    putJsonObject("storePass") { put("type", "string"); put("description", "自定义密钥库密码（未传时用 App 内已保存的密码——UI 回打成功后自动记住）") }
                     putJsonObject("keyPass") { put("type", "string"); put("description", "自定义密钥密码（可选，缺省同密钥库密码）") }
                     putJsonObject("destDir") { put("type", "string"); put("description", "目标目录绝对路径（可选，覆盖默认导出位置）") }
                     putJsonObject("destName") { put("type", "string"); put("description", "导出 APK 文件名（可选，默认 <原APK名>_patched.apk）") }
@@ -2619,11 +2619,20 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
                 if (apkRepacker.customKeystoreFile.length() == 0L) {
                     throw McpToolException("未导入自定义密钥（请先在 SO 编辑器「回打 APK」弹窗导入）")
                 }
+                // 参数未传时回退 App 内已保存的密码/别名（UI 回打成功后自动记住）
+                val saved = apkRepacker.savedKeyConfig()
+                val storePass = p.str("storePass") ?: saved?.storePassword
+                if (storePass == null) {
+                    throw McpToolException(
+                        "未提供密钥库密码（传入 storePass，或先在 App「回打 APK」用自定义密钥" +
+                            "成功签名一次以保存密码）"
+                    )
+                }
                 ApkRepacker.KeySource.Custom(
                     storeFile = apkRepacker.customKeystoreFile,
-                    storePassword = p.str("storePass").orEmpty(),
-                    keyAlias = p.str("alias").orEmpty(),
-                    keyPassword = p.str("keyPass").orEmpty(),
+                    storePassword = storePass,
+                    keyAlias = p.str("alias") ?: saved?.alias.orEmpty(),
+                    keyPassword = p.str("keyPass") ?: saved?.keyPassword.orEmpty(),
                 )
             } else {
                 ApkRepacker.KeySource.Debug

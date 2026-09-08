@@ -1186,6 +1186,10 @@ class SoEditorViewModel @Inject constructor(
     private val _hasCustomKey = MutableStateFlow(false)
     val hasCustomKey: StateFlow<Boolean> = _hasCustomKey.asStateFlow()
 
+    /** 已保存的自定义密钥参数（弹窗预填，导入并成功签名一次后自动保存）。 */
+    private val _savedKeyConfig = MutableStateFlow<ApkRepacker.SavedKeyConfig?>(null)
+    val savedKeyConfig: StateFlow<ApkRepacker.SavedKeyConfig?> = _savedKeyConfig.asStateFlow()
+
     /** 加载回打前置信息（打开弹窗时调用）。 */
     fun loadRepackInfo() {
         val soPath = _uiState.value.filePath
@@ -1223,6 +1227,7 @@ class SoEditorViewModel @Inject constructor(
             }
             _repackInfo.value = info
             _hasCustomKey.value = apkRepacker.customKeystoreFile.length() > 0
+            _savedKeyConfig.value = apkRepacker.savedKeyConfig()
         }
     }
 
@@ -1238,6 +1243,8 @@ class SoEditorViewModel @Inject constructor(
                 } != null
             }.getOrDefault(false)
             _hasCustomKey.value = ok && apkRepacker.customKeystoreFile.length() > 0
+            // 换新密钥库时旧密码已作废（导入即清空），同步刷新预填状态
+            _savedKeyConfig.value = if (ok) null else _savedKeyConfig.value
             onResult(ok)
         }
     }
