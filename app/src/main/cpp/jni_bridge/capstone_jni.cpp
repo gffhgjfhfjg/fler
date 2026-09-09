@@ -22,8 +22,9 @@ struct CsInsn {
 /**
  * 用静态链接的 Capstone 做反汇编。
  *
- * capstone.a 直接编进 fler_jni.so（CMakeLists 中 capstone STATIC IMPORTED），
- * 不再依赖引擎包的 libcapstone.so，SO 编辑器反汇编零引擎依赖。
+ * capstone 代码位于共享库 libfler_capstone.so（CMakeLists 中 fler_capstone 目标），
+ * 本桥编入 libfler_asm.so（懒加载组件），不再依赖引擎包的 libcapstone.so，
+ * SO 编辑器反汇编零引擎依赖。
  *
  * @return Array<DisasmInstruction>，加载/解码失败返回 null
  */

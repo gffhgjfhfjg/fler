@@ -40,16 +40,16 @@ set_target_properties(keystone PROPERTIES
     IMPORTED_LOCATION "${FLER_LIBS_DIR}/libkeystone.a"
 )
 
-# Capstone 静态库：build-rizin workflow 产物（libcapstone.a + include/capstone），
-# 静态链接进 fler_jni，SO 编辑器反汇编不再依赖引擎包 libcapstone.so
+# Capstone 静态库：build-rizin workflow 产物（libcapstone.a + include/capstone）。
+# 由下方 fler_capstone 目标包装为共享库 libfler_capstone.so，
+# libfler_asm.so 与 libfler_rizin.so 共享同一份 capstone 代码。
 add_library(capstone STATIC IMPORTED)
 set_target_properties(capstone PROPERTIES
     IMPORTED_LOCATION "${FLER_LIBS_DIR}/libcapstone.a"
 )
 
 # Rizin 静态库（librz_*.a）：build-rizin workflow 产物。cs_open 等符号在 .a 中为
-# undefined，链接期由上面的 capstone 解析。当前 fler_jni 尚无 rizin 引用，普通
-# 链接不会被提取；等 RizinEngine JNI 就位后自动生效。
+# undefined，链接期由 libfler_capstone.so 解析（DT_NEEDED，运行时 linker 自动加载）。
 file(GLOB RIZIN_STATIC_LIBS "${FLER_LIBS_DIR}/librz_*.a")
 
 # Unicorn 仿真引擎静态库：build-unicorn workflow 产物（libunicorn.a + include/unicorn）。
@@ -71,7 +71,7 @@ endif()
 
 # Frida 动态插桩静态库：frida-core-devkit 产物（libfrida-core.a + include/frida/frida-core.h），
 # 由 app/build.gradle.kts 的 fetchFridaDevkit 任务下载解压。libfrida-core.a 体积约 260MB，
-# 静态链接为 fler_jni 的 frida-client（对端是设备端 root 常驻的 frida-server）。
+# 静态链接为 libfler_frida.so 的 frida-client（对端是设备端 root 常驻的 frida-server）。
 # 库缺失时优雅降级：不链接、不定义宏，frida_jni.cpp 退化为安全 stub（isAvailable=false）。
 option(ENABLE_FRIDA "Build with Frida dynamic instrumentation client" ON)
 set(FRIDA_LIB "${FLER_LIBS_DIR}/libfrida-core.a")
@@ -91,8 +91,32 @@ endif()
 find_library(log-lib log)
 find_library(android-lib android)
 
-# ========== 原生静态库 (供其他模块链接) ==========
-# 解码/编码：自研编码器、自研解码器、capstone、elf_writer 均移除；编码仅用 Keystone。
+# ========== 组件 so 布局 ==========
+# 原单一 libfler_jni.so 按组件拆分（目的：未用到的组件 so 不加载，降低运行内存）：
+#   libfler_jni.so      核心：elf_parser + blutter 桥（App 启动即加载，很小）
+#   libfler_capstone.so capstone 共享库（libfler_asm/libfler_rizin 的 NEEDED 依赖，
+#                       linker 自动加载，无需 Kotlin 显式加载）
+#   libfler_asm.so      capstone + keystone 桥（反汇编/汇编，懒加载）
+#   libfler_rizin.so    rizin 桥（SO 分析，懒加载）
+#   libfler_unicorn.so  unicorn 桥（仿真，懒加载）
+#   libfler_frida.so    frida 桥（动态插桩客户端，懒加载）
+# Kotlin 侧见 core/jni/NativeLoader.kt：各 *Bindings 首次调用前 ensureComponent 懒加载。
+
+# 所有 JNI 桥 so 的公共链接设置：
+# - 隐藏全部符号，仅保留 Java_* JNI 导出（visibility hidden + exclude-libs）
+# - --gc-sections 裁剪未引用函数/数据段（配合 -ffunction-sections/-fdata-sections）
+function(fler_apply_jni_link_settings target)
+    set_target_properties(${target} PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+    )
+    target_link_options(${target} PRIVATE
+        -Wl,--gc-sections
+        -Wl,--exclude-libs,ALL
+    )
+endfunction()
+
+# ========== 核心：libfler_jni.so（启动即加载） ==========
 add_library(fler_native STATIC
     elf_parser/elf_parser.cpp
 )
@@ -101,45 +125,100 @@ target_link_libraries(fler_native
     ${log-lib}
 )
 
-# ========== JNI 桥接库 ==========
 add_library(fler_jni SHARED
     jni_bridge/blutter_jni.cpp
     jni_bridge/elf_parser_jni.cpp
-    jni_bridge/capstone_jni.cpp
-    jni_bridge/keystone_jni.cpp
-    jni_bridge/rizin_jni.cpp
-    jni_bridge/unicorn_jni.cpp
-    jni_bridge/frida_jni.cpp
 )
 
 target_link_libraries(fler_jni
     fler_native
-    keystone
-    capstone
-    ${RIZIN_STATIC_LIBS}
     ${log-lib}
     ${android-lib}
 )
 
+fler_apply_jni_link_settings(fler_jni)
+
+# ========== Capstone 共享库：libfler_capstone.so ==========
+# libcapstone.a 的动态包装：
+# - libfler_asm.so（capstone_jni.cpp）与 libfler_rizin.so（librz_*.a 引用 cs_*）
+#   共享同一份 capstone 代码，避免静态拷贝两份
+# - --whole-archive 拉入全部归档成员（共享库语义：对外完整 API）
+# - 版本脚本 capstone_export.map 仅导出 cs_* 公共 API，内部符号 local，
+#   避免跨 so 符号污染
+add_library(fler_capstone SHARED
+    capstone_wrapper.cpp
+)
+
+target_link_libraries(fler_capstone
+    -Wl,--whole-archive
+    capstone
+    -Wl,--no-whole-archive
+    ${log-lib}
+)
+
+target_link_options(fler_capstone PRIVATE
+    "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/capstone_export.map"
+)
+
+# ========== 汇编组件：libfler_asm.so（懒加载） ==========
+add_library(fler_asm SHARED
+    jni_bridge/capstone_jni.cpp
+    jni_bridge/keystone_jni.cpp
+)
+
+target_link_libraries(fler_asm
+    keystone
+    fler_capstone
+    ${log-lib}
+    ${android-lib}
+)
+
+fler_apply_jni_link_settings(fler_asm)
+
+# ========== Rizin 组件：libfler_rizin.so（懒加载） ==========
+add_library(fler_rizin SHARED
+    jni_bridge/rizin_jni.cpp
+)
+
+target_link_libraries(fler_rizin
+    ${RIZIN_STATIC_LIBS}
+    fler_capstone
+    ${log-lib}
+    ${android-lib}
+)
+
+fler_apply_jni_link_settings(fler_rizin)
+
+# ========== Unicorn 组件：libfler_unicorn.so（懒加载） ==========
+add_library(fler_unicorn SHARED
+    jni_bridge/unicorn_jni.cpp
+)
+
+target_link_libraries(fler_unicorn
+    ${log-lib}
+    ${android-lib}
+)
+
+fler_apply_jni_link_settings(fler_unicorn)
+
 if(FLER_HAS_UNICORN)
-    target_compile_definitions(fler_jni PRIVATE FLER_ENABLE_UNICORN)
-    target_link_libraries(fler_jni unicorn)
+    target_compile_definitions(fler_unicorn PRIVATE FLER_ENABLE_UNICORN)
+    target_link_libraries(fler_unicorn unicorn)
 endif()
+
+# ========== Frida 组件：libfler_frida.so（懒加载） ==========
+add_library(fler_frida SHARED
+    jni_bridge/frida_jni.cpp
+)
+
+target_link_libraries(fler_frida
+    ${log-lib}
+    ${android-lib}
+)
+
+fler_apply_jni_link_settings(fler_frida)
 
 if(FLER_HAS_FRIDA)
-    target_compile_definitions(fler_jni PRIVATE FLER_ENABLE_FRIDA)
-    target_link_libraries(fler_jni frida_core)
+    target_compile_definitions(fler_frida PRIVATE FLER_ENABLE_FRIDA)
+    target_link_libraries(fler_frida frida_core)
 endif()
-
-# 导出符号可见性
-set_target_properties(fler_jni PROPERTIES
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN ON
-)
-
-# 链接期裁剪：丢弃未引用函数/数据段（需配合 -ffunction-sections/-fdata-sections），
-# 并隐藏所有静态库导出符号，仅保留 Java_* JNI 导出
-target_link_options(fler_jni PRIVATE
-    -Wl,--gc-sections
-    -Wl,--exclude-libs,ALL
-)

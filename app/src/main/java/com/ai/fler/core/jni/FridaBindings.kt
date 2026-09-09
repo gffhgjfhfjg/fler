@@ -3,8 +3,9 @@ package com.ai.fler.core.jni
 /**
  * Frida 动态调试 JNI 绑定（root 方案客户端）。
  *
- * frida-core 已静态链接进 fler_jni.so（frida_jni.cpp 直接调用 frida-* C API），
- * 对设备端 root 常驻的 frida-server 做协议客户端。仅 arm64。
+ * frida-core 静态链接进 libfler_frida.so（frida_jni.cpp 直接调用 frida-* C API，
+ * 首次使用时经 [NativeLoader] 懒加载），对设备端 root 常驻的 frida-server 做
+ * 协议客户端。仅 arm64。
  *
  * 模型：
  * - [initialize] 启动 frida worker 线程（GMainLoop 驱动同步调用），幂等。
@@ -14,15 +15,19 @@ package com.ai.fler.core.jni
  *   [messageListener]（注意总是在内部 marshal 线程触发，Listener 需自行切线程）。
  *
  * 编译期 ENABLE_FRIDA=OFF 或 libfrida-core.a 缺失时，全部 native 退化为
- * 安全 stub（[isAvailable]=false），不应有任何 UnsatisfiedLinkError。
+ * 安全 stub（[isAvailable]=false），不应有任何 UnsatisfiedLinkError；
+ * so 运行时加载失败同样降级（各方法返回失败默认值）。
  */
 object FridaBindings {
 
+    /** so 未加载（懒加载失败）时各方法返回降级默认值。 */
+    private fun ready(): Boolean = NativeLoader.tryLoadComponent(NativeLoader.Component.FRIDA)
+
     /** 引擎是否可用（frida-core 编译链接成功）。 */
-    val isAvailable: Boolean by lazy { nativeIsAvailable() }
+    val isAvailable: Boolean by lazy { ready() && nativeIsAvailable() }
 
     /** frida 版本字符串（如 "17.17.0"）；编译禁用时为 "disabled"。 */
-    val version: String by lazy { nativeVersion() }
+    val version: String by lazy { if (ready()) nativeVersion() else "disabled" }
 
     /**
      * 脚本消息回调（native marshal 线程上触发）。
@@ -40,48 +45,55 @@ object FridaBindings {
     }
 
     /** 初始化（启动 worker 线程 + 设备管理器），返回是否成功。幂等。 */
-    fun initialize(): Boolean = nativeInitialize()
+    fun initialize(): Boolean = if (ready()) nativeInitialize() else false
 
     /** 枚举设备进程（经 frida-server）→ JSON 数组。 */
-    fun enumerateProcesses(): String = nativeEnumerateProcesses()
+    fun enumerateProcesses(): String = if (ready()) nativeEnumerateProcesses() else "[]"
 
     /** 枚举已安装应用（identifier+name）→ JSON 数组。 */
-    fun enumerateApplications(): String = nativeEnumerateApplications()
+    fun enumerateApplications(): String = if (ready()) nativeEnumerateApplications() else "[]"
 
     /** attach 到 pid，返回 sessionHandle；0=失败。 */
-    fun attach(pid: Long): Long = nativeAttach(pid)
+    fun attach(pid: Long): Long = if (ready()) nativeAttach(pid) else 0L
 
     /** spawn 应用 identifier，返回 pid（0=失败）。 */
-    fun spawn(identifier: String): Long = nativeSpawn(identifier)
+    fun spawn(identifier: String): Long = if (ready()) nativeSpawn(identifier) else 0L
 
-    fun resume(pid: Long): Boolean = nativeResume(pid)
+    fun resume(pid: Long): Boolean = if (ready()) nativeResume(pid) else false
 
-    fun kill(pid: Long): Boolean = nativeKill(pid)
+    fun kill(pid: Long): Boolean = if (ready()) nativeKill(pid) else false
 
     /** 在 session 上创建脚本，返回 scriptHandle（0=失败）。 */
     fun createScript(sessionHandle: Long, source: String): Long =
-        nativeCreateScript(sessionHandle, source)
+        if (ready()) nativeCreateScript(sessionHandle, source) else 0L
 
-    fun loadScript(scriptHandle: Long): Boolean = nativeLoadScript(scriptHandle)
+    fun loadScript(scriptHandle: Long): Boolean =
+        if (ready()) nativeLoadScript(scriptHandle) else false
 
-    fun unloadScript(scriptHandle: Long): Boolean = nativeUnloadScript(scriptHandle)
+    fun unloadScript(scriptHandle: Long): Boolean =
+        if (ready()) nativeUnloadScript(scriptHandle) else false
 
     /** 向脚本发送消息（rpc 入口）。 */
-    fun post(scriptHandle: Long, json: String) = nativePost(scriptHandle, json)
+    fun post(scriptHandle: Long, json: String) {
+        if (ready()) nativePost(scriptHandle, json)
+    }
 
-    fun detach(sessionHandle: Long): Boolean = nativeDetach(sessionHandle)
+    fun detach(sessionHandle: Long): Boolean =
+        if (ready()) nativeDetach(sessionHandle) else false
 
     /** 关闭全部 session/script 并 close 设备管理器（会停止后续使用，谨慎）。 */
-    fun close() = nativeClose()
+    fun close() {
+        if (ready()) nativeClose()
+    }
 
     /** 取回并清空最近一次脚本 create/load 的原生错误文本（无错误时为空串）。 */
-    fun takeLastScriptError(): String = nativeLastScriptError()
+    fun takeLastScriptError(): String = if (ready()) nativeLastScriptError() else ""
 
     /**
      * frida worker 线程是否存活且未被看门狗标记阻塞。不经过 worker（纯原生原子量
      * 读取），worker 卡死时也能返回 false，供 frida_ready/frida_status 快速失败判定。
      */
-    val workerAlive: Boolean get() = nativeWorkerAlive()
+    val workerAlive: Boolean get() = ready() && nativeWorkerAlive()
 
     private external fun nativeIsAvailable(): Boolean
     private external fun nativeVersion(): String

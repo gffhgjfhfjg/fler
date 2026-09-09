@@ -9,7 +9,8 @@ package com.ai.fler.core.jni
  * - [cmdStr] → 执行任意 Rizin 命令，返回字符串输出
  * - [readBytes] / [writeBytes] → 直接字节 IO
  *
- * Rizin 静态链接进 libfler_jni.so（26 个 librz_*.a + libcapstone.a），
+ * Rizin 打包在 libfler_rizin.so（26 个 librz_*.a 静态链接，capstone 依赖
+ * 共享的 libfler_capstone.so），首次使用时经 [NativeLoader] 懒加载，
  * 不依赖引擎包，零引擎下载即可使用 SO 分析功能。
  *
  * 使用方式：
@@ -22,6 +23,9 @@ package com.ai.fler.core.jni
  */
 object RizinBindings {
 
+    /** so 未加载（懒加载失败）时各方法返回的降级默认值语义与 native 失败一致。 */
+    private fun ready(): Boolean = NativeLoader.tryLoadComponent(NativeLoader.Component.RIZIN)
+
     /**
      * 创建 RzCore 实例，打开文件并加载二进制信息。
      *
@@ -29,13 +33,13 @@ object RizinBindings {
      * @return RzCore* 指针（>0），失败返回 0
      */
     fun open(path: String): Long =
-        nativeOpen(path)
+        if (ready()) nativeOpen(path) else 0L
 
     /**
      * 释放 RzCore 实例。
      */
     fun close(handle: Long) {
-        nativeClose(handle)
+        if (ready()) nativeClose(handle)
     }
 
     /**
@@ -46,7 +50,7 @@ object RizinBindings {
      * @return true 成功
      */
     fun analyze(handle: Long): Boolean =
-        nativeAnalyze(handle)
+        if (ready()) nativeAnalyze(handle) else false
 
     /**
      * 执行 Rizin 命令并返回字符串输出。
@@ -58,7 +62,7 @@ object RizinBindings {
      * @return 命令输出字符串，失败返回 null
      */
     fun cmdStr(handle: Long, cmd: String): String? =
-        nativeCmdStr(handle, cmd)
+        if (ready()) nativeCmdStr(handle, cmd) else null
 
     /**
      * 直接读取字节（比 pxj 更高效，不做 hex 编码）。
@@ -68,7 +72,7 @@ object RizinBindings {
      * @return 字节数组，失败返回 null
      */
     fun readBytes(handle: Long, offset: Long, size: Int): ByteArray? =
-        nativeReadBytes(handle, offset, size)
+        if (ready()) nativeReadBytes(handle, offset, size) else null
 
     /**
      * 直接写入字节（文件偏移寻址）。
@@ -81,14 +85,14 @@ object RizinBindings {
      * @return true 成功
      */
     fun writeBytes(handle: Long, offset: Long, data: ByteArray): Boolean =
-        nativeWriteBytes(handle, offset, data)
+        if (ready()) nativeWriteBytes(handle, offset, data) else false
 
     /**
      * 文件偏移（物理地址）→ 虚拟地址（按段 map 换算，与 vp 对称）。
      * 映射外回退原值。
      */
     fun paddrToVaddr(handle: Long, paddr: Long): Long =
-        nativePaddrToVaddr(handle, paddr)
+        if (ready()) nativePaddrToVaddr(handle, paddr) else paddr
 
     /**
      * 保存 Rizin Project 到文件。
@@ -101,7 +105,7 @@ object RizinBindings {
      * @return true 成功
      */
     fun projectSave(handle: Long, path: String): Boolean =
-        nativeProjectSave(handle, path)
+        if (ready()) nativeProjectSave(handle, path) else false
 
     /**
      * 加载 Rizin Project 文件。
@@ -113,7 +117,7 @@ object RizinBindings {
      * @return true 成功
      */
     fun projectLoad(handle: Long, path: String): Boolean =
-        nativeProjectLoad(handle, path)
+        if (ready()) nativeProjectLoad(handle, path) else false
 
     // ===== JNI native 方法 =====
 

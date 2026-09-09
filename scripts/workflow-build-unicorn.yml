@@ -9,7 +9,7 @@
 #
 # 关键决策：
 #   - UNICORN_ARCH=aarch64：fler 仅 arm64-v8a ABI，只编 aarch64 后端，体积最小
-#   - BUILD_SHARED_LIBS=OFF：静态库，链接进 fler_jni.so，运行时零依赖
+#   - BUILD_SHARED_LIBS=OFF：静态库，链接进 libfler_unicorn.so，运行时零依赖
 #   - Unicorn 的 CMake 在 configure 期执行 qemu/configure（sh 脚本）+ create_config
 #     生成 config-host.h；ubuntu runner 自带 sh/pkg-config，无需额外处理
 #     （这也是本地 Windows 无法直接构建、改走 CI 交叉编译的原因）
@@ -217,7 +217,7 @@ jobs:
             lib/arm64-v8a/libunicorn.a -> app/libs/arm64-v8a/
             include/unicorn/...        -> app/src/main/cpp/include/unicorn/
 
-          Static archive: linked into fler_jni.so at build time, zero runtime deps.
+          Static archive: linked into libfler_unicorn.so at build time, zero runtime deps.
           EOF
 
           echo "=== package contents ==="
