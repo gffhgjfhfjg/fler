@@ -885,6 +885,20 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeClose(JNIEnv*, jobject) {
     });
 }
 
+// ─────────────────────────────────────────────────────────────
+// JNI_OnLoad：缓存 JavaVM + frida_init()
+// ─────────────────────────────────────────────────────────────
+// libfler_frida.so 是独立懒加载组件，System.loadLibrary("fler_frida") 时
+// 本函数被调用（原单一 fler_jni.so 时代借道 elf_parser_jni.cpp 的 JNI_OnLoad
+// 调 fridaCacheJavaVm，拆分后跨 so 引用失效，改为组件自持）。
+// worker/marshal 线程仍由 nativeInitialize 按需启动，这里只做 frida_init()
+// （幂等）与 g_vm 缓存（marshal 线程 AttachCurrentThread 需要）。
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+    g_vm = vm;
+    ensureFridaInit();
+    return JNI_VERSION_1_6;
+}
+
 #else // !FLER_ENABLE_FRIDA —— 安全 stub
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -968,20 +982,9 @@ Java_com_ai_fler_core_jni_FridaBindings_nativeLastScriptError(JNIEnv* env, jobje
     return env->NewStringUTF("");
 }
 
-#endif // FLER_ENABLE_FRIDA
-
-// ─────────────────────────────────────────────────────────────
-// JavaVM 缓存：由 elf_parser_jni.cpp 的 JNI_OnLoad 调用（避免重复 JNI_OnLoad 符号）
-// ─────────────────────────────────────────────────────────────
-extern "C" void fridaCacheJavaVm(JavaVM* vm) {
-    g_vm = vm;
-    if (vm != nullptr) {
-        ensureFridaInit();
-    } else {
-        {
-            std::lock_guard<std::mutex> lock(g_qMutex);
-            g_quitMarshal.store(true);
-        }
-        g_qCv.notify_all();
-    }
+// stub 版 JNI_OnLoad（与上方主实现对偶，保证两种编译配置下 so 均可加载）
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* /*vm*/, void* /*reserved*/) {
+    return JNI_VERSION_1_6;
 }
+
+#endif // FLER_ENABLE_FRIDA
