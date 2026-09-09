@@ -3,7 +3,8 @@ package com.ai.fler.core.jni
 /**
  * Keystone 汇编器绑定（完整 AArch64 指令编码）。
  *
- * 对应 keystone_jni.cpp：keystone 静态链接进 libfler.so，直接调用 ks_asm。
+ * 对应 keystone_jni.cpp：keystone 静态链接进 libfler_asm.so（首次使用时经
+ * [NativeLoader] 懒加载），直接调用 ks_asm。
  * 比 capstone 的 cs_asm（不支持 AArch64）更完整。
  */
 object KeystoneBindings {
@@ -17,6 +18,7 @@ object KeystoneBindings {
      */
     fun asm(assembly: String, address: Long): ByteArray? {
         if (assembly.isBlank()) return null
+        if (!NativeLoader.tryLoadComponent(NativeLoader.Component.ASM)) return null
         return nativeAsm(assembly, address)
     }
 

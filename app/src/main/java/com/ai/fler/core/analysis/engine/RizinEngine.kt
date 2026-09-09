@@ -10,8 +10,8 @@ import java.io.File
 /**
  * Rizin 分析引擎。
  *
- * 通过 JNI 调用 Rizin 静态库（librz_core.a 等 26 个 .a 静态链接进 libfler_jni.so），
- * 提供完整的二进制分析能力：
+ * 通过 JNI 调用 Rizin 静态库（librz_core.a 等 26 个 .a 静态链接进 libfler_rizin.so，
+ * 首次使用时懒加载组件 so），提供完整的二进制分析能力：
  * - ELF 结构解析（节区、符号、导入、重定位）
  * - 函数识别（aaa 自动分析）
  * - 交叉引用（xref）

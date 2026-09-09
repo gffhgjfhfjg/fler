@@ -50,7 +50,7 @@ fler
 ├── docs/                          # rikkahub 技能文档
 ```
 
-Native 代码静态链接进 `libfler_jni.so`（frida-core、rizin、capstone、keystone、unicorn、elf-parser 全部打包进单一 `.so`）。
+Native 代码按组件拆分为多个 `.so`：`libfler_jni.so`（核心：elf-parser + blutter，启动即加载）、`libfler_asm.so`（capstone + keystone）、`libfler_rizin.so`、`libfler_unicorn.so`、`libfler_frida.so`（后四者懒加载）+ 共享依赖 `libfler_capstone.so`。各引擎仍为静态链接，未用到的组件 so 不进运行内存。
 
 ---
 
@@ -67,7 +67,7 @@ Native 代码静态链接进 `libfler_jni.so`（frida-core、rizin、capstone、
 app/build/outputs/apk/.../*.apk
 ```
 
-> **体积说明**：release 对 `lib/arm64-v8a/*.so` 使用 `useLegacyPackaging=true`（deflate 压缩进 APK），`libfler_jni.so` 从 85MB 压到约 31MB，安装时解压到数据分区。分发重体积、可接受安装稍慢时用此配置。
+> **体积说明**：release 对 `lib/arm64-v8a/*.so` 使用 `useLegacyPackaging=true`（deflate 压缩进 APK），全部组件 so（原单一 `libfler_jni.so`）合计约 85MB 压到约 31MB，安装时解压到数据分区。分发重体积、可接受安装稍慢时用此配置。
 
 ### 交叉编译的第三方库
 - **keystone**：`app/src/main/cpp/keystone_include/` + `scripts/`（GitHub Actions 交叉编译产物，构建期自动拉取，`.a` 不入库）
@@ -118,7 +118,7 @@ Flutter App 的 Dart AOT 恢复依赖 Blutter 引擎，但该引擎**不在本�
 - **仅 arm64-v8a**：Native 层（capstone/keystone/rizin/frida/unicorn 静态链接进单 `.so`）只构建了 arm64。armv7 / x86_64 设备无法使用，低端 32 位机型不支持。
 - **依赖 root 才能用足 Frida**：Frida 动态插桩（attach/spawn/hook/热补丁）走 Magisk root + `frida-server` 部署，非 root 设备上仅能用静态分析面。
 - **镜像与第三方库导致构建较重**：unicorn、keystone 需交叉编译且 `.a`/`vendor` 不入库（构建期拉取/本地脚本），首次构建依赖 Google/阿里云镜像网络，断网或代理环境下易失败。
-- **`.so` 较大、安装增耗**：`libfler_jni.so` 打包 frida-core + rizin(+26 个 `.a`) + capstone + keystone + unicorn ≈ 85MB；虽用 deflate 压缩进 APK（→31MB），但安装时解压到数据分区，安装略慢、磁盘占用较高，非体积敏感分发场景不划算。
+- **`.so` 较大、安装增耗**：组件 so 合计打包 frida-core + rizin(+26 个 `.a`) + capstone + keystone + unicorn ≈ 85MB；虽用 deflate 压缩进 APK（→31MB）且未用组件懒加载不占内存，但安装时解压到数据分区，安装略慢、磁盘占用较高，非体积敏感分发场景不划算。
 - **MCP 仅本机/LAN**：Streamable HTTP 服务器绑定 `127.0.0.1`（或可选 LAN `0.0.0.0`），不支持跨网远程连接（除非另配代理/隧道）。
 - **分析结果是离线快照**：`analysisId` 是一次 Blutter 分析的结果快照；App 更新后需重新导入 `libapp.so` 并重跑分析，不自动跟踪版本差异。
 - **依赖 Rizin 的全量 `aaa` 分析对大库开销高**：对超大 `libapp.so` 做函数/CFG/xref 分析内存与耗时都大（有 OOM 风险），分析代码时建议用 Blutter 合并结果而非整库 `engine_analyze`。

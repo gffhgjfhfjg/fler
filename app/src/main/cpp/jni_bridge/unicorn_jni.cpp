@@ -2,7 +2,7 @@
 // Unicorn 仿真引擎 JNI 桥（M2 完整实现）
 //
 // 静态链接：libunicorn.a（build-unicorn workflow 产物，arm64 单架构）直接链入
-// fler_jni.so，不依赖任何外部 .so。
+// libfler_unicorn.so（懒加载组件），不依赖任何外部 .so。
 //
 // 编译开关 FLER_ENABLE_UNICORN 由 CMake 的 ENABLE_UNICORN 选项注入：
 // 关闭时本文件仍编译，但全部 JNI 方法退化为安全 stub（isAvailable=false），

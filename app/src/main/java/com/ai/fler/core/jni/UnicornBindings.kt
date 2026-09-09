@@ -3,8 +3,8 @@ package com.ai.fler.core.jni
 /**
  * Unicorn 仿真引擎绑定。
  *
- * unicorn 已静态链接进 fler_jni.so（unicorn_jni.cpp 直接调用 uc_* API），
- * 不依赖引擎包的 libunicorn.so。
+ * unicorn 打包在 libfler_unicorn.so（unicorn_jni.cpp 直接调用 uc_* API，
+ * 首次使用时经 [NativeLoader] 懒加载），不依赖引擎包的 libunicorn.so。
  *
  * 编译期可用 ENABLE_UNICORN=OFF 关闭（JNI 退化为安全 stub，isAvailable=false）。
  *
@@ -16,16 +16,19 @@ package com.ai.fler.core.jni
  */
 object UnicornBindings {
 
+    /** so 未加载（懒加载失败）时各方法返回降级默认值（与引擎不可用语义一致）。 */
+    private fun ready(): Boolean = NativeLoader.tryLoadComponent(NativeLoader.Component.UNICORN)
+
     /**
      * 引擎是否可用（aarch64 后端已编译进来）。
      * 关闭编译开关或链接缺失时返回 false，UI/引擎注册据此降级。
      */
-    val isAvailable: Boolean by lazy { nativeIsAvailable() }
+    val isAvailable: Boolean by lazy { ready() && nativeIsAvailable() }
 
     /**
      * Unicorn 版本字符串（如 "2.0"）；编译禁用时为 "disabled"。
      */
-    val version: String by lazy { nativeGetVersion() }
+    val version: String by lazy { if (ready()) nativeGetVersion() else "disabled" }
 
     // 停止原因码（与 unicorn_jni.cpp StopCode / Kotlin StopReason ordinal 对齐）
     const val STOP_NONE = 0
@@ -49,36 +52,37 @@ object UnicornBindings {
      * 打开仿真会话（uc_open ARM64 + 栈/heap/哨兵预映射 + 指令/内存钩子）。
      * @return native handle；0 表示失败
      */
-    fun open(): Long = nativeOpen()
+    fun open(): Long = if (ready()) nativeOpen() else 0L
 
     /** 关闭并释放会话。幂等（handle=0 直接返回）。 */
     fun close(handle: Long) {
-        if (handle != 0L) nativeClose(handle)
+        if (handle != 0L && ready()) nativeClose(handle)
     }
 
     /** 映射内存页。perms：1=R 2=W 4=X（与 ELF p_flags 同义）。 */
     fun mapMemory(handle: Long, address: Long, size: Long, perms: Int): Boolean =
-        nativeMapMemory(handle, address, size, perms)
+        if (ready()) nativeMapMemory(handle, address, size, perms) else false
 
     /** 读内存；未映射或越界返回 null。 */
     fun readMemory(handle: Long, address: Long, size: Long): ByteArray? =
-        nativeReadMemory(handle, address, size)
+        if (ready()) nativeReadMemory(handle, address, size) else null
 
     fun writeMemory(handle: Long, address: Long, data: ByteArray): Boolean =
-        nativeWriteMemory(handle, address, data)
+        if (ready()) nativeWriteMemory(handle, address, data) else false
 
     /** 读寄存器（"x0".."x30"/"fp"/"lr"/"sp"/"pc"/"nzcv"）；未知名返回 null。 */
     fun readRegister(handle: Long, name: String): Long? {
         // native 对未知寄存器名返回 0，与真实值 0 不可区分，先做名字合法性判断
         if (name !in REG_NAMES) return null
-        return nativeReadRegister(handle, name)
+        return if (ready()) nativeReadRegister(handle, name) else null
     }
 
     fun writeRegister(handle: Long, name: String, value: Long): Boolean =
-        nativeWriteRegister(handle, name, value)
+        if (ready()) nativeWriteRegister(handle, name, value) else false
 
     /** 批量读全部通用寄存器（一次 JNI 往返）。 */
     fun readAllRegisters(handle: Long): Map<String, Long> {
+        if (!ready()) return emptyMap()
         val entries = nativeReadAllRegisters(handle) ?: return emptyMap()
         return entries.associate { it.name to it.value }
     }
@@ -89,29 +93,36 @@ object UnicornBindings {
      * @param timeoutMs 超时毫秒，0=不限
      */
     fun run(handle: Long, instrCount: Long = 0L, timeoutMs: Long = 0L): RunResult? {
+        if (!ready()) return null
         val arr = nativeRun(handle, instrCount, timeoutMs) ?: return null
         return RunResult(arr[0].toInt(), arr[1], arr[2])
     }
 
     /** 单步一条指令。 */
     fun step(handle: Long): RunResult? {
+        if (!ready()) return null
         val arr = nativeStep(handle) ?: return null
         return RunResult(arr[0].toInt(), arr[1], arr[2])
     }
 
     /** 请求停止正在运行的会话（跨线程安全，下一指令边界生效）。 */
-    fun requestStop(handle: Long) = nativeRequestStop(handle)
+    fun requestStop(handle: Long) {
+        if (ready()) nativeRequestStop(handle)
+    }
 
-    fun setPc(handle: Long, pc: Long): Boolean = nativeSetPc(handle, pc)
+    fun setPc(handle: Long, pc: Long): Boolean =
+        if (ready()) nativeSetPc(handle, pc) else false
 
     fun addBreakpoint(handle: Long, address: Long): Boolean =
-        nativeAddBreakpoint(handle, address)
+        if (ready()) nativeAddBreakpoint(handle, address) else false
 
     fun removeBreakpoint(handle: Long, address: Long): Boolean =
-        nativeRemoveBreakpoint(handle, address)
+        if (ready()) nativeRemoveBreakpoint(handle, address) else false
 
-    fun listBreakpoints(handle: Long): List<Long> =
-        nativeListBreakpoints(handle)?.toList() ?: emptyList()
+    fun listBreakpoints(handle: Long): List<Long> {
+        if (!ready()) return emptyList()
+        return nativeListBreakpoints(handle)?.toList() ?: emptyList()
+    }
 
     private val REG_NAMES = setOf(
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",

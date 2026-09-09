@@ -2,7 +2,8 @@
 // Frida 动态桥接 JNI（root 方案 · App 内完整闭环）
 //
 // 静态链接：libfrida-core.a（frida-core-devkit 17.17.0-android-arm64 产物，
-// 与设备端 frida-server 同版本）链入 fler_jni.so，作为 frida-server 的客户端：
+// 与设备端 frida-server 同版本）链入 libfler_frida.so（懒加载组件），
+// 作为 frida-server 的客户端：
 //   - 设备端：frida-server 由 RootAccess 以 root 常驻（/data/local/tmp/frida-server）
 //   - 本库：frida-core 只跑协议客户端（local device ⇄ 127.0.0.1:27042），
 //     attach/spawn/resume/script/事件回传

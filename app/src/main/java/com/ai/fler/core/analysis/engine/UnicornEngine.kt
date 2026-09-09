@@ -18,8 +18,8 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Unicorn 仿真引擎（真实实现，替换 UnicornEnginePlaceholder）。
  *
- * 底层：静态链接进 fler_jni.so 的 libunicorn.a（arm64 单架构），
- * 通过 [UnicornBindings] JNI 桥调用。
+ * 底层：静态链接进 libfler_unicorn.so 的 libunicorn.a（arm64 单架构），
+ * 通过 [UnicornBindings] JNI 桥调用（首次使用时懒加载组件 so）。
  *
  * 会话模型：
  * - [open] 打开会话并按 PT_LOAD 段把 ELF 装载进模拟地址空间，

@@ -3,8 +3,9 @@ package com.ai.fler.core.jni
 /**
  * Capstone 反汇编引擎绑定。
  *
- * capstone 已静态链接进 fler_jni.so（capstone_jni.cpp 直接调用 Capstone API），
- * 不再依赖引擎包的 libcapstone.so，SO 编辑器反汇编零引擎依赖。
+ * capstone 打包在 libfler_asm.so（capstone_jni.cpp 直接调用 Capstone API，
+ * 首次使用时经 [NativeLoader] 懒加载），不再依赖引擎包的 libcapstone.so，
+ * SO 编辑器反汇编零引擎依赖。
  */
 object CapstoneBindings {
 
@@ -22,6 +23,7 @@ object CapstoneBindings {
         baseAddress: Long
     ): List<DisasmInstruction>? {
         if (code.isEmpty()) return emptyList()
+        if (!NativeLoader.tryLoadComponent(NativeLoader.Component.ASM)) return null
         return nativeDisasm(code, baseAddress)?.toList()
     }
 

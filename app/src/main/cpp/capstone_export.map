@@ -1,0 +1,8 @@
+# libfler_capstone.so 版本脚本：仅导出 capstone 公共 API（cs_*），
+# 其余符号（静态库内部符号）标记 local，避免跨 so 符号污染/冲突。
+{
+  global:
+    cs_*;
+  local:
+    *;
+};
