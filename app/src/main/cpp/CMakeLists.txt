@@ -90,6 +90,7 @@ endif()
 # ========== 查找 Android 系统库 ==========
 find_library(log-lib log)
 find_library(android-lib android)
+find_library(z-lib z)  # unicorn(qemu TCG) 引用 zlib crc32，系统 libz.so 提供
 
 # ========== 组件 so 布局 ==========
 # 原单一 libfler_jni.so 按组件拆分（目的：未用到的组件 so 不加载，降低运行内存）：
@@ -204,6 +205,9 @@ fler_apply_jni_link_settings(fler_unicorn)
 if(FLER_HAS_UNICORN)
     target_compile_definitions(fler_unicorn PRIVATE FLER_ENABLE_UNICORN)
     target_link_libraries(fler_unicorn unicorn)
+    # qemu TCG 引用 zlib crc32：原单一 fler_jni.so 由 rizin/frida-core 内嵌实现
+    # 顺带解析，拆分后需显式链接系统 libz.so
+    target_link_libraries(fler_unicorn ${z-lib})
 endif()
 
 # ========== Frida 组件：libfler_frida.so（懒加载） ==========
