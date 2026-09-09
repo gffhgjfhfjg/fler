@@ -1,0 +1,14 @@
+{
+  "name": "fler-gadget-antitamper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "fler 非 root Frida gadget 注入：签名校验/完整性检测对抗脚本（frida-compile 打包 frida-java-bridge）",
+  "scripts": {
+    "build": "frida-compile src/index.js -o ../../app/src/main/assets/gadget/anti_tamper.js -c"
+  },
+  "devDependencies": {
+    "@types/frida-gum": "^18.6.0",
+    "frida-compile": "^17.0.0",
+    "frida-java-bridge": "^7.0.0"
+  }
+}

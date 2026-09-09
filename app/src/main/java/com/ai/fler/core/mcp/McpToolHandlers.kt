@@ -85,6 +85,7 @@ class McpToolHandlers @Inject constructor(
     private val reportGenerator: com.ai.fler.core.analysis.AnalysisReportGenerator,
     private val workDirectory: WorkDirectory,
     private val apkRepacker: ApkRepacker,
+    private val gadgetRepacker: com.ai.fler.core.gadget.GadgetRepacker,
     @SuppressLint("StaticFieldLeak")
     @ApplicationContext private val context: Context,
 ) : McpResourceProvider {
@@ -2673,6 +2674,112 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
                     put("signed", output.result.signed)
                     putJsonArray("schemes") { output.result.schemes.forEach { add(it) } }
                     put("durationMs", output.result.durationMs)
+                    put("message", result.message)
+                }
+            } finally {
+                output.file.delete()
+            }
+        },
+
+        // ============== 非 root Frida：gadget 注入重打包 ==============
+        McpTool(
+            name = "gadget_repack_apk",
+            description = "非 root Frida：把 frida-gadget 注入任意 APK 并重签名（免 root 动态分析）。" +
+                "流程：解包 → 按 ABI 注入 libgadget.so/config/script → 入口类 <clinit> 注入 " +
+                "System.loadLibrary → AndroidManifest 强制 extractNativeLibs=true → " +
+                "v1/v2/v3 重签名。listen 模式装好后用 frida 连 127.0.0.1:port（进程名 Gadget，" +
+                "on_load=wait 时启动冻结等待 attach）；script 模式启动时自动跑签名伪装/完整性" +
+                "指纹对抗。注意：安装前需卸载原 App（签名变化）",
+            inputSchema = buildJsonObject {
+                putJsonObject("properties") {
+                    putJsonObject("apkPath") { put("type", "string"); put("description", "源 APK 绝对路径（任意 APK，无需已导入项目）") }
+                    putJsonObject("mode") { put("type", "string"); put("description", "listen（默认，attach 调试）| script（启动自对抗，无需 attach）") }
+                    putJsonObject("port") { put("type", "integer"); put("description", "listen 端口（默认 27042）") }
+                    putJsonObject("onLoad") { put("type", "string"); put("description", "listen 模式 on_load：wait（默认，冻结至 attach）| resume（启动即放行）") }
+                    putJsonObject("sign") { put("type", "boolean"); put("description", "是否重签名（默认 true）") }
+                    putJsonObject("v1") { put("type", "boolean"); put("description", "v1 签名（默认 true）") }
+                    putJsonObject("v2") { put("type", "boolean"); put("description", "v2 签名（默认 true）") }
+                    putJsonObject("v3") { put("type", "boolean"); put("description", "v3 签名（默认 true）") }
+                    putJsonObject("useCustomKey") { put("type", "boolean"); put("description", "使用已导入的自定义密钥（默认 false 用内置 debug 密钥）") }
+                    putJsonObject("storePass") { put("type", "string"); put("description", "自定义密钥库密码（未传时用 App 内已保存的密码）") }
+                    putJsonObject("alias") { put("type", "string"); put("description", "自定义密钥别名（可选）") }
+                    putJsonObject("keyPass") { put("type", "string"); put("description", "自定义密钥密码（可选，缺省同库密码）") }
+                    putJsonObject("destDir") { put("type", "string"); put("description", "目标目录绝对路径（可选，覆盖默认导出位置）") }
+                    putJsonObject("destName") { put("type", "string"); put("description", "导出文件名（默认 <原APK名>_gadget.apk）") }
+                }
+                putJsonArray("required") { add("apkPath") }
+            }
+        ) { p ->
+            val apkPath = p.str("apkPath") ?: throw McpToolException("apkPath 缺失")
+            val apkFile = java.io.File(apkPath)
+            if (!apkFile.exists() || !apkFile.isFile) throw McpToolException("源 APK 不存在: $apkPath")
+
+            val mode = p.str("mode") ?: "listen"
+            val interaction = when (mode) {
+                "script" -> com.ai.fler.core.gadget.GadgetConfig.Interaction.Script()
+                "listen" -> com.ai.fler.core.gadget.GadgetConfig.Interaction.Listen(
+                    port = p.int("port") ?: 27042,
+                    onLoad = p.str("onLoad") ?: "wait",
+                )
+                else -> throw McpToolException("mode 仅支持 listen / script")
+            }
+
+            val useCustomKey = p.bool("useCustomKey") ?: false
+            val keySource = if (useCustomKey) {
+                if (apkRepacker.customKeystoreFile.length() == 0L) {
+                    throw McpToolException("未导入自定义密钥（请先在 SO 编辑器「回打 APK」弹窗导入）")
+                }
+                val saved = apkRepacker.savedKeyConfig()
+                val storePass = p.str("storePass") ?: saved?.storePassword
+                    ?: throw McpToolException("未提供密钥库密码（传入 storePass，或先在 App 内用自定义密钥成功签名一次）")
+                ApkRepacker.KeySource.Custom(
+                    storeFile = apkRepacker.customKeystoreFile,
+                    storePassword = storePass,
+                    keyAlias = p.str("alias") ?: saved?.alias.orEmpty(),
+                    keyPassword = p.str("keyPass") ?: saved?.keyPassword.orEmpty(),
+                )
+            } else {
+                ApkRepacker.KeySource.Debug
+            }
+
+            val progress = currentProgress()
+            val output = gadgetRepacker.repack(
+                apkFile = apkFile,
+                options = com.ai.fler.core.gadget.GadgetRepacker.Options(interaction = interaction),
+                signOptions = ApkRepacker.SignOptions(
+                    enabled = p.bool("sign") ?: true,
+                    v1 = p.bool("v1") ?: true,
+                    v2 = p.bool("v2") ?: true,
+                    v3 = p.bool("v3") ?: true,
+                ),
+                keySource = keySource,
+            ) { frac, stage ->
+                progress.report(rangeProgress(frac, 0.05f, 0.85f), stage)
+            }
+            if (!output.result.ok) {
+                output.file.delete()
+                throw McpToolException(output.result.error ?: "gadget 注入失败")
+            }
+
+            try {
+                val destName = p.str("destName")?.takeIf { it.isNotBlank() }
+                    ?: apkFile.name.removeSuffix(".apk") + "_gadget.apk"
+                progress.report(0.88f, "导出 $destName")
+                val result = exportPatchedSo(output.file, destName, p.str("destDir").orEmpty())
+                buildJsonObject {
+                    put("ok", result.ok)
+                    put("fileName", destName)
+                    put("size", result.size)
+                    put("destPath", result.path)
+                    put("packageName", output.result.packageName)
+                    put("entryClass", output.result.entryClass)
+                    put("abis", JsonArray(output.result.abis.map { JsonPrimitive(it) }))
+                    put("libBase", output.result.libBase)
+                    put("mode", mode)
+                    put("alreadyInjected", output.result.alreadyInjected)
+                    put("certSpoofed", output.result.certSpoofed)
+                    put("signed", output.result.output.signed)
+                    putJsonArray("schemes") { output.result.output.schemes.forEach { add(it) } }
                     put("message", result.message)
                 }
             } finally {

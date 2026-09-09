@@ -14,6 +14,7 @@
 - **Unicorn 模拟执行**：可选开启的指令模拟（默认关闭）。
 - **ELF 解析器**：章节 / 符号 / 动态符号表浏览。
 - **Frida 动态插桩**：root 设备方案。内置 frida-server 部署/保活，支持 attach / spawn / hook / 事件流，及**运行时字节级热补丁**（`patch_code` / `read_code`）。
+- **非 root Frida（gadget 重打包）**：把 frida-gadget 注入任意 APK——按 ABI 注入 `libgadget.so / .config.so / .script.so`，入口类 `<clinit>` 注入 `System.loadLibrary`，强制 `extractNativeLibs=true`，重签名（v1/v2/v3）。listen 模式免 root attach（`127.0.0.1:27042`，进程名 `Gadget`）；script 模式启动自跑签名伪装 / 完整性指纹对抗。MCP 工具 `gadget_repack_apk`。
 - **原生补丁**：对 `.so` 写原始字节 / 汇编指令，自动备份 + CRC 校验 + 可撤销。
 - **MCP 服务器**（本机 HTTP，默认端口 `8765`）：
   - Streamable HTTP 端点 `http://127.0.0.1:8765/mcp`（LLM 客户端用）

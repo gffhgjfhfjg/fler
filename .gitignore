@@ -35,6 +35,9 @@ fler-engines/
 # ── 临时验证脚本（JVM 端镜像验证回打逻辑，仅本地）──
 /.tmp_test/
 
+# ── gadget 对抗脚本 node_modules（构建产物已检入 assets）──
+/scripts/gadget-antitamper/node_modules/
+
 # ── 开发/调研/工具目录或文档（不入库）──
 # 根目录除 README.md 外的其他 md（开发测试、调研、方案计划）全部忽略
 /*.md

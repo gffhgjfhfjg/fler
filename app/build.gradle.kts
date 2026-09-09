@@ -22,8 +22,8 @@ android {
         applicationId = "com.ai.fler"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "1.9.6"
+        versionCode = 17
+        versionName = "1.10.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -132,6 +132,10 @@ dependencies {
 
     // APK 重签名（apksig，自包含 PKCS7/ASN.1 实现，无 BouncyCastle 依赖）
     implementation(libs.apksig)
+
+    // gadget 注入：设备端 classes.dex 读写/注入（dexlib2 纯 Java，guava 为其运行时依赖）
+    implementation(libs.dexlib2)
+    implementation(libs.guava)
 
     // kotlinx-serialization（MCP JSON-RPC）
     implementation(libs.kotlinx.serialization.json)

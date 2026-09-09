@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
@@ -144,6 +145,33 @@ fun SettingsScreen(
         }
     }
 
+    // ===== gadget 注入（非 root Frida）=====
+    val gadgetViewModel: com.ai.fler.features.gadget.GadgetInjectViewModel = hiltViewModel()
+    val gadgetState by gadgetViewModel.state.collectAsStateWithLifecycle()
+    val gadgetKeyConfig = remember { gadgetViewModel.savedKeyConfig() }
+    var showGadgetDialog by remember { mutableStateOf(false) }
+    var pendingGadgetSelection by remember {
+        mutableStateOf<com.ai.fler.features.gadget.GadgetInjectViewModel.InjectSelection?>(null)
+    }
+
+    val gadgetApkPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { gadgetViewModel.pickApk(it) } }
+
+    val gadgetKeyPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { gadgetViewModel.importCustomKey(it) { _, _ -> } } }
+
+    val gadgetOutputPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/vnd.android.package-archive")
+    ) { uri ->
+        if (uri != null) {
+            // 由触发处暂存的选择参数在 Compose 状态中传递
+            pendingGadgetSelection?.let { gadgetViewModel.injectToUri(uri, it) }
+            pendingGadgetSelection = null
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(title = { Text("设置") })
@@ -217,6 +245,11 @@ fun SettingsScreen(
             )
         }
 
+        // 非 root Frida（gadget 重打包注入）
+        item {
+            GadgetInjectEntryCard(onClick = { showGadgetDialog = true })
+        }
+
         // 项目缓存清理
         item {
             CacheCleanCard(
@@ -239,6 +272,24 @@ fun SettingsScreen(
             AboutCard(onClick = onOpenAbout)
         }
         }
+    }
+
+    if (showGadgetDialog) {
+        com.ai.fler.features.gadget.GadgetInjectDialog(
+            state = gadgetState,
+            savedKeyConfig = gadgetKeyConfig,
+            onPickApk = { gadgetApkPicker.launch(arrayOf(
+                "application/vnd.android.package-archive", "application/zip")) },
+            onImportKey = { gadgetKeyPicker.launch(arrayOf("*/*")) },
+            onInject = { selection, suggestedName ->
+                pendingGadgetSelection = selection
+                gadgetOutputPicker.launch(suggestedName)
+            },
+            onDismiss = {
+                gadgetViewModel.dismissResult()
+                showGadgetDialog = false
+            },
+        )
     }
 
     if (showCacheCleanConfirm) {
@@ -1166,6 +1217,16 @@ private fun HookScriptsEntryCard(onClick: () -> Unit) {
         title = "Hook 脚本",
         subtitle = "Frida JS 落地管理：内置预设与自定义脚本增删改查",
         leadingIcon = Icons.Outlined.Code,
+        onClick = onClick,
+    )
+}
+
+@Composable
+private fun GadgetInjectEntryCard(onClick: () -> Unit) {
+    CardListTile(
+        title = "非 root Frida（gadget 注入）",
+        subtitle = "APK 重打包注入 frida-gadget：免 root attach 调试 / 启动自对抗",
+        leadingIcon = Icons.Outlined.BugReport,
         onClick = onClick,
     )
 }

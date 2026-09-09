@@ -19,6 +19,9 @@ xz = "1.10"
 documentfile = "1.0.1"
 # 与 AGP 版本保持一致（Google Maven 独立发布，自包含无 BouncyCastle 依赖）
 apksig = "9.3.1"
+# gadget 注入：dexlib2（smali/dexlib2 项目，设备端 dex clinit 注入）+ 其 guava 传递依赖
+dexlib2 = "2.5.2"
+guava = "27.1-android"
 junit = "4.13.2"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
@@ -58,6 +61,9 @@ xz = { group = "org.tukaani", name = "xz", version.ref = "xz" }
 androidx-documentfile = { group = "androidx.documentfile", name = "documentfile", version.ref = "documentfile" }
 # APK 重签名（v1/v2/v3），设备端回打 APK 用
 apksig = { group = "com.android.tools.build", name = "apksig", version.ref = "apksig" }
+# gadget 注入：dex 读写/注入（纯 Java，Android 可用）；guava 为 dexlib2 运行时依赖
+dexlib2 = { group = "org.smali", name = "dexlib2", version.ref = "dexlib2" }
+guava = { group = "com.google.guava", name = "guava", version.ref = "guava" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }

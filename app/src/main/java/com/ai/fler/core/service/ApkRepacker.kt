@@ -236,90 +236,149 @@ class ApkRepacker @Inject constructor(
                     ?: throw IllegalStateException("APK 内未找到 lib/*/$soName 条目")
 
                 // ----------------------------------------------------------
-                // 1. 重建对齐 ZIP（替换目标 SO，剔除旧 v1 签名）
+                // 重建对齐 ZIP（替换目标 SO，剔除旧 v1 签名）
                 // ----------------------------------------------------------
-                val entryCount = rebuildAlignedZip(
+                val entryCount = rebuildZip(
                     apkFile = apkFile,
-                    patchedSo = patchedSo,
-                    soEntryName = entryName,
+                    entryOverrides = mapOf(entryName to patchedSo.readBytes()),
+                    entryAdds = emptyMap(),
                     outFile = unsignedFile,
                     onProgress = onProgress,
                 )
-
-                // ----------------------------------------------------------
-                // 2. 签名（可选）
-                // ----------------------------------------------------------
-                var schemes = listOf<String>()
-                var finalFile = unsignedFile
-                if (signOptions.enabled) {
-                    onProgress(0.75f, "加载签名密钥")
-                    val keyPair = loadKeyEntry(keySource)
-                    val v1 = signOptions.v1
-                    val v2 = signOptions.v2
-                    val v3 = signOptions.v3
-
-                    if (v1) {
-                        onProgress(0.78f, "v1 签名兼容性预检")
-                        // apksig 的 v1 失败路径会吞掉真实异常 cause（只留
-                        // "Failed to encode signature block" 一句）。预检用与 apksig
-                        // 完全相同的编码链提前跑一遍，把真实原因（R8 混淆破坏
-                        // ASN.1 反射、设备证书栈缺陷等）直接暴露出来。
-                        v1Preflight(keyPair.second)?.let { throw IllegalStateException(it) }
-                    }
-
-                    onProgress(0.80f, "签名中 (v1=$v1 v2=$v2 v3=$v3)")
-                    val signedFile = File(workDir, "signed.apk")
-                    val signerConfig = ApkSigner.SignerConfig.Builder(
-                        "CERT", keyPair.first, keyPair.second
-                    ).build()
-                    val signer = ApkSigner.Builder(listOf(signerConfig))
-                        .setInputApk(unsignedFile)
-                        .setOutputApk(signedFile)
-                        .setV1SigningEnabled(v1)
-                        .setV2SigningEnabled(v2)
-                        .setV3SigningEnabled(v3)
-                        .setMinSdkVersion(24)
-                        .build()
-                    signer.sign()
-                    finalFile = signedFile
-                    schemes = buildList {
-                        if (v1) add("v1")
-                        if (v2) add("v2")
-                        if (v3) add("v3")
-                    }
-                }
-
-                onProgress(1f, "完成")
-                val size = finalFile.length()
-                val duration = System.currentTimeMillis() - start
-                // 自定义密钥签名成功 → 记住参数，下次免再次输入
-                if (signOptions.enabled && keySource is KeySource.Custom) {
-                    runCatching { saveKeyConfig(keySource) }
-                }
-                appLogger.info(TAG, "回打完成: ${apkFile.name} 条目=$entryCount 签名=${schemes.ifEmpty { "无" }} " +
-                    "输出=${size / 1024}KB 耗时=${duration}ms")
-                RepackOutput(
-                    file = finalFile,
-                    result = RepackResult(
-                        ok = true,
-                        entryName = entryName,
-                        entryCount = entryCount,
-                        signed = signOptions.enabled,
-                        schemes = schemes,
-                        outputSize = size,
-                        durationMs = duration,
-                    ),
+                finishRepack(
+                    apkFile, workDir, unsignedFile, entryCount, entryName,
+                    signOptions, keySource, start, onProgress,
                 )
             } catch (e: Exception) {
-                val msg = "回打失败: ${rootCauseMessage(e)}"
-                Log.e(TAG, msg, e)
-                appLogger.error(TAG, "$msg (${e.javaClass.name})")
-                // 清理半成品
-                unsignedFile.delete()
-                File(workDir, "signed.apk").delete()
-                RepackOutput(File(workDir, "failed.apk"), RepackResult(ok = false, error = msg))
+                failureRepack(workDir, e)
             }
         }
+    }
+
+    /**
+     * 通用条目级回打（gadget 注入等使用）：替换 / 新增任意条目后重签名。
+     *
+     * @param entryOverrides 替换条目（保持原条目压缩方式；STORED 时 16KB 对齐）
+     * @param entryAdds 新增条目（统一 DEFLATED 压缩）
+     * @param entryName 结果摘要（如注入入口类名）
+     */
+    suspend fun repackWithEntriesToTempFile(
+        apkFile: File,
+        entryOverrides: Map<String, ByteArray>,
+        entryAdds: Map<String, ByteArray>,
+        entryName: String,
+        signOptions: SignOptions,
+        keySource: KeySource,
+        onProgress: suspend (Float, String) -> Unit = { _, _ -> },
+    ): RepackOutput = repackMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val start = System.currentTimeMillis()
+            val workDir = File(context.cacheDir, "apk_repack").apply { mkdirs() }
+            workDir.listFiles()?.forEach { it.delete() }
+            val unsignedFile = File(workDir, "unsigned.apk")
+
+            try {
+                onProgress(0.05f, "重建 ZIP（${entryOverrides.size} 替换 + ${entryAdds.size} 新增）")
+                val entryCount = rebuildZip(
+                    apkFile = apkFile,
+                    entryOverrides = entryOverrides,
+                    entryAdds = entryAdds,
+                    outFile = unsignedFile,
+                    onProgress = onProgress,
+                )
+                finishRepack(
+                    apkFile, workDir, unsignedFile, entryCount, entryName,
+                    signOptions, keySource, start, onProgress,
+                )
+            } catch (e: Exception) {
+                failureRepack(workDir, e)
+            }
+        }
+    }
+
+    /** 签名（可选）+ 结果装配（[repackToTempFile] / [repackWithEntriesToTempFile] 共用）。 */
+    private suspend fun finishRepack(
+        apkFile: File,
+        workDir: File,
+        unsignedFile: File,
+        entryCount: Int,
+        entryName: String,
+        signOptions: SignOptions,
+        keySource: KeySource,
+        start: Long,
+        onProgress: suspend (Float, String) -> Unit,
+    ): RepackOutput {
+        var schemes = listOf<String>()
+        var finalFile = unsignedFile
+        if (signOptions.enabled) {
+            onProgress(0.75f, "加载签名密钥")
+            val keyPair = loadKeyEntry(keySource)
+            val v1 = signOptions.v1
+            val v2 = signOptions.v2
+            val v3 = signOptions.v3
+
+            if (v1) {
+                onProgress(0.78f, "v1 签名兼容性预检")
+                // apksig 的 v1 失败路径会吞掉真实异常 cause（只留
+                // "Failed to encode signature block" 一句）。预检用与 apksig
+                // 完全相同的编码链提前跑一遍，把真实原因（R8 混淆破坏
+                // ASN.1 反射、设备证书栈缺陷等）直接暴露出来。
+                v1Preflight(keyPair.second)?.let { throw IllegalStateException(it) }
+            }
+
+            onProgress(0.80f, "签名中 (v1=$v1 v2=$v2 v3=$v3)")
+            val signedFile = File(workDir, "signed.apk")
+            val signerConfig = ApkSigner.SignerConfig.Builder(
+                "CERT", keyPair.first, keyPair.second
+            ).build()
+            val signer = ApkSigner.Builder(listOf(signerConfig))
+                .setInputApk(unsignedFile)
+                .setOutputApk(signedFile)
+                .setV1SigningEnabled(v1)
+                .setV2SigningEnabled(v2)
+                .setV3SigningEnabled(v3)
+                .setMinSdkVersion(24)
+                .build()
+            signer.sign()
+            finalFile = signedFile
+            schemes = buildList {
+                if (v1) add("v1")
+                if (v2) add("v2")
+                if (v3) add("v3")
+            }
+        }
+
+        onProgress(1f, "完成")
+        val size = finalFile.length()
+        val duration = System.currentTimeMillis() - start
+        // 自定义密钥签名成功 → 记住参数，下次免再次输入
+        if (signOptions.enabled && keySource is KeySource.Custom) {
+            runCatching { saveKeyConfig(keySource) }
+        }
+        appLogger.info(TAG, "回打完成: ${apkFile.name} 条目=$entryCount 签名=${schemes.ifEmpty { "无" }} " +
+            "输出=${size / 1024}KB 耗时=${duration}ms")
+        return RepackOutput(
+            file = finalFile,
+            result = RepackResult(
+                ok = true,
+                entryName = entryName,
+                entryCount = entryCount,
+                signed = signOptions.enabled,
+                schemes = schemes,
+                outputSize = size,
+                durationMs = duration,
+            ),
+        )
+    }
+
+    private fun failureRepack(workDir: File, e: Exception): RepackOutput {
+        val msg = "回打失败: ${rootCauseMessage(e)}"
+        Log.e(TAG, msg, e)
+        appLogger.error(TAG, "$msg (${e.javaClass.name})")
+        // 清理半成品
+        File(workDir, "unsigned.apk").delete()
+        File(workDir, "signed.apk").delete()
+        return RepackOutput(File(workDir, "failed.apk"), RepackResult(ok = false, error = msg))
     }
 
     /** 把回打产物流式复制到输出流（带进度），用于 SAF Uri 写出。 */
@@ -373,14 +432,15 @@ class ApkRepacker @Inject constructor(
     /**
      * 重建 ZIP：
      * - 普通条目：本地头重写（对齐 extra 填充），数据按原始压缩字节流式拷贝
-     * - 目标 SO 条目：替换为补丁后内容（保留原压缩方式；STORED 时 16KB 对齐）
+     * - 替换条目（[entryOverrides]）：替换为新内容（保持原压缩方式；STORED 时 16KB 对齐）
+     * - 新增条目（[entryAdds]）：统一 DEFLATED 压缩
      * - 目录条目：原样重建
-     * 返回写入的条目数。
+     * 返回写入的条目数（含新增）。
      */
-    private suspend fun rebuildAlignedZip(
+    private suspend fun rebuildZip(
         apkFile: File,
-        patchedSo: File,
-        soEntryName: String,
+        entryOverrides: Map<String, ByteArray>,
+        entryAdds: Map<String, ByteArray>,
         outFile: File,
         onProgress: suspend (Float, String) -> Unit,
     ): Int {
@@ -394,70 +454,33 @@ class ApkRepacker @Inject constructor(
                 throw IllegalStateException("APK 含加密条目，不支持回打")
             }
 
-            // 补丁 SO 的压缩数据（若原条目为 DEFLATED）
-            val patchedBytes = patchedSo.readBytes()
-            val targetRecord = records.firstOrNull { it.name == soEntryName }
-                ?: throw IllegalStateException("目标条目不存在: $soEntryName")
-            val targetIsStored = targetRecord.method == java.util.zip.ZipEntry.STORED
+            // 替换条目必须已存在
+            val missing = entryOverrides.keys.filter { k -> records.none { it.name == k } }
+            if (missing.isNotEmpty()) {
+                throw IllegalStateException("替换条目不存在: $missing")
+            }
 
             FileOutputStream(outFile).use { fos ->
                 val counting = CountingOutputStream(fos)
                 val centralBuf = ByteArrayOutputStream()
 
                 var written = 0
-                val total = records.size
-                for (record in records) {
-                    // 剔除旧 v1 签名（重新签名时由 apksig 生成新的）
-                    if (isV1SignatureFile(record.name)) continue
+                val total = records.size + entryAdds.size
 
-                    val isTarget = record.name == soEntryName
-                    val method = if (isTarget) targetRecord.method else record.method
+                // 单条目写出（本地头 + 数据 + 中央目录记录）
+                suspend fun writeEntry(
+                    nameBytes: ByteArray,
+                    flags: Int,
+                    method: Int,
+                    record: CdRecord?,
+                    data: ByteArray,
+                    crc: Long,
+                    uncompSize: Long,
+                ) {
                     val stored = method == java.util.zip.ZipEntry.STORED
-
-                    // ------------------------------------------------------
-                    // 准备数据（内存中）与 CRC/尺寸
-                    // ------------------------------------------------------
-                    var crc = record.crc
-                    var compSize: Long
-                    var uncompSize: Long
-                    val data: ByteArray
-
-                    if (isTarget) {
-                        if (targetIsStored) {
-                            data = patchedBytes
-                            crc = crc32Of(patchedBytes)
-                            compSize = data.size.toLong()
-                            uncompSize = compSize
-                        } else {
-                            val deflated = deflate(patchedBytes)
-                            data = deflated
-                            crc = crc32Of(patchedBytes)
-                            compSize = data.size.toLong()
-                            uncompSize = patchedBytes.size.toLong()
-                        }
-                    } else {
-                        if (record.isDirectory) {
-                            data = ByteArray(0)
-                            compSize = 0L
-                            uncompSize = 0L
-                        } else {
-                            // 原始压缩字节拷贝（不重压缩，保证速度与字节一致性）
-                            val dataOffset = localDataOffset(raf, record)
-                            val rawData = ByteArray(record.compressedSize.toInt())
-                            raf.seek(dataOffset)
-                            raf.readFully(rawData)
-                            data = rawData
-                            compSize = record.compressedSize
-                            uncompSize = record.size
-                        }
-                    }
-
-                    // ------------------------------------------------------
-                    // 写本地文件头（STORED 时按 extra 填充对齐）
-                    // ------------------------------------------------------
-                    val flags = record.flags and FLAG_DATA_DESCRIPTOR.inv()
-                    val nameBytes = record.nameBytes
-                    val alignment = if (stored) alignmentFor(record.name) else 1L
+                    val compSize: Long = if (stored) uncompSize else data.size.toLong()
+                    val entryName = String(nameBytes, Charsets.UTF_8)
+                    val alignment = if (stored) alignmentFor(entryName) else 1L
                     val headerBase = 30 + nameBytes.size
                     val pad = if (alignment > 1L) {
                         ((alignment - ((counting.count + headerBase) % alignment)) % alignment).toInt()
@@ -465,11 +488,11 @@ class ApkRepacker @Inject constructor(
 
                     val newLocalOffset = counting.count
                     counting.u32(LFH_SIG.toLong() and 0xffffffffL)
-                    counting.u16(record.versionNeeded)
+                    counting.u16(record?.versionNeeded ?: 20)
                     counting.u16(flags)
                     counting.u16(method)
-                    counting.u16(record.modTime)
-                    counting.u16(record.modDate)
+                    counting.u16(record?.modTime ?: modTimeNow())
+                    counting.u16(record?.modDate ?: modDateNow())
                     counting.u32(crc)
                     counting.u32(compSize)
                     counting.u32(uncompSize)
@@ -479,17 +502,14 @@ class ApkRepacker @Inject constructor(
                     if (pad > 0) counting.bytes(ByteArray(pad))     // 对齐填充（extra）
                     counting.bytes(data)
 
-                    // ------------------------------------------------------
-                    // 中央目录记录（重定向本地头偏移到新位置）
-                    // ------------------------------------------------------
                     val cd = LeBytes(centralBuf)
                     cd.u32(CD_SIG.toLong() and 0xffffffffL)
-                    cd.u16(record.versionMadeBy)
-                    cd.u16(record.versionNeeded)
+                    cd.u16(record?.versionMadeBy ?: (20 or (0x03 shl 8)))
+                    cd.u16(record?.versionNeeded ?: 20)
                     cd.u16(flags)
                     cd.u16(method)
-                    cd.u16(record.modTime)
-                    cd.u16(record.modDate)
+                    cd.u16(record?.modTime ?: modTimeNow())
+                    cd.u16(record?.modDate ?: modDateNow())
                     cd.u32(crc)
                     cd.u32(compSize)
                     cd.u32(uncompSize)
@@ -497,23 +517,79 @@ class ApkRepacker @Inject constructor(
                     cd.u16(0)                                       // extra（中央目录不写填充）
                     cd.u16(0)                                       // comment
                     cd.u16(0)                                       // disk start
-                    cd.u16(record.internalAttr)
-                    cd.u32(record.externalAttr)
+                    cd.u16(record?.internalAttr ?: 0)
+                    cd.u32(record?.externalAttr ?: 0L)
                     cd.u32(newLocalOffset)
                     cd.bytes(nameBytes)
+                }
+
+                // ------------------------------------------------------------
+                // 原有条目：拷贝 / 替换
+                // ------------------------------------------------------------
+                for (record in records) {
+                    // 剔除旧 v1 签名（重新签名时由 apksig 生成新的）
+                    if (isV1SignatureFile(record.name)) continue
+
+                    val override = entryOverrides[record.name]
+                    if (override != null) {
+                        val stored = record.method == java.util.zip.ZipEntry.STORED
+                        if (stored) {
+                            writeEntry(
+                                record.nameBytes, record.flags and FLAG_DATA_DESCRIPTOR.inv(),
+                                record.method, record,
+                                override, crc32Of(override), override.size.toLong(),
+                            )
+                        } else {
+                            val deflated = deflate(override)
+                            writeEntry(
+                                record.nameBytes, record.flags and FLAG_DATA_DESCRIPTOR.inv(),
+                                record.method, record,
+                                deflated, crc32Of(override), override.size.toLong(),
+                            )
+                        }
+                    } else {
+                        if (record.isDirectory) {
+                            writeEntry(
+                                record.nameBytes, record.flags and FLAG_DATA_DESCRIPTOR.inv(),
+                                record.method, record,
+                                ByteArray(0), record.crc, 0L,
+                            )
+                        } else {
+                            // 原始压缩字节拷贝（不重压缩，保证速度与字节一致性）
+                            val dataOffset = localDataOffset(raf, record)
+                            val rawData = ByteArray(record.compressedSize.toInt())
+                            raf.seek(dataOffset)
+                            raf.readFully(rawData)
+                            writeEntry(
+                                record.nameBytes, record.flags and FLAG_DATA_DESCRIPTOR.inv(),
+                                record.method, record,
+                                rawData, record.crc, record.size,
+                            )
+                        }
+                    }
 
                     written++
                     if (written % 50 == 0 || written == total) {
-                        onProgress(
-                            0.05f + 0.65f * written / total,
-                            "重建 ZIP $written/$total"
-                        )
+                        onProgress(0.05f + 0.65f * written / total, "重建 ZIP $written/$total")
                     }
                 }
 
-                // ------------------------------------------------------
+                // ------------------------------------------------------------
+                // 新增条目：DEFLATED
+                // ------------------------------------------------------------
+                for ((name, bytes) in entryAdds) {
+                    val nameBytes = name.toByteArray(Charsets.UTF_8)
+                    val deflated = deflate(bytes)
+                    writeEntry(
+                        nameBytes, 0, java.util.zip.ZipEntry.DEFLATED, null,
+                        deflated, crc32Of(bytes), bytes.size.toLong(),
+                    )
+                    written++
+                }
+
+                // ------------------------------------------------------------
                 // 中央目录 + EOCD
-                // ------------------------------------------------------
+                // ------------------------------------------------------------
                 val cdBytes = centralBuf.toByteArray()
                 val cdOffset = counting.count
                 counting.bytes(cdBytes)
@@ -534,6 +610,10 @@ class ApkRepacker @Inject constructor(
             }
         }
     }
+
+    /** 新增条目缺省时间戳（DOS 时间 2020-01-01 00:00 附近）。 */
+    private fun modTimeNow(): Int = 0
+    private fun modDateNow(): Int = ((2020 - 1980) shl 9) or (1 shl 5) or 1
 
     /** 对齐粒度：.so 16KB，其余 STORED 条目 4 字节。 */
     private fun alignmentFor(entryName: String): Long =
