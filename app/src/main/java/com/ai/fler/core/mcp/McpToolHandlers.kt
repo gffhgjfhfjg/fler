@@ -2588,6 +2588,7 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
             name = "repack_apk",
             description = "把（已补丁的）so 回打进所属项目的源 APK：替换 lib/<abi>/ 下对应条目 + 未压缩条目 16KB/4B 自动对齐 + 重签名（默认 v1+v2+v3、内置 debug 密钥；可关签名或换自定义密钥）。输出位置同 export_patched_so：优先设置的工作目录，兜底 cacheDir/so_export（经 GET /export/<文件名> 可下载）。so 必须属于某个已导入项目（libraries/analyses 反查源 APK）",
             inputSchema = buildJsonObject {
+                put("type", "object")
                 putJsonObject("properties") {
                     putJsonObject("soPath") { put("type", "string"); put("description", "so 文件绝对路径（需已应用补丁）") }
                     putJsonObject("sign") { put("type", "boolean"); put("description", "是否重签名（默认 true）") }
@@ -2691,6 +2692,7 @@ put("asmCode", if (full) asmCode else asmCode?.take(MAX_SRC))
                 "on_load=wait 时启动冻结等待 attach）；script 模式启动时自动跑签名伪装/完整性" +
                 "指纹对抗。注意：安装前需卸载原 App（签名变化）",
             inputSchema = buildJsonObject {
+                put("type", "object")
                 putJsonObject("properties") {
                     putJsonObject("apkPath") { put("type", "string"); put("description", "源 APK 绝对路径（任意 APK，无需已导入项目）") }
                     putJsonObject("mode") { put("type", "string"); put("description", "listen（默认，attach 调试）| script（启动自对抗，无需 attach）") }
